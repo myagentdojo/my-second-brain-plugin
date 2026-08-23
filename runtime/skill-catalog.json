@@ -1,6 +1,11 @@
 {
   "schemaVersion": 1,
   "skills": {
+    "frontier-runner": {
+      "entry": "runtime/frontier-runner.js",
+      "runtimeProfile": "bun",
+      "workspace": "packages/frontier-runner"
+    },
     "hello-world": {
       "entry": "runtime/hello-world.js",
       "runtimeProfile": "bun"

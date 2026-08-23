@@ -1644,7 +1644,6 @@ const nonBundledSkillPayloadFiles = [
 	"skills/capability-tour/references/capability-reviewer.md",
 	"skills/dev-mode/SKILL.md",
 	"skills/frontier-runner/CONTEXT.md",
-	"skills/frontier-runner/SKILL.md",
 	"skills/frontier-runner/scripts/frontier-runner.sh",
 	"skills/handoff-to-opus/SKILL.md",
 	"skills/handoff-to-opus/references/coderabbit-exact-range.md",

@@ -2,6 +2,10 @@
 # Generated from runtime/skill-catalog.json. Edit the source, then run bun run generate.
 runtime_catalog_select_skill() {
 	case "$1" in
+	frontier-runner)
+		RUNTIME_SKILL_ENTRY='runtime/frontier-runner.js'
+		RUNTIME_SKILL_PROFILE='bun'
+		;;
 	hello-world)
 		RUNTIME_SKILL_ENTRY='runtime/hello-world.js'
 		RUNTIME_SKILL_PROFILE='bun'

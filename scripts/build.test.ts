@@ -1461,7 +1461,12 @@ function runRepositoryBuild(): {
 
 test("workspace bundles build, relocate, and execute without hooks, workspaces, or node_modules", () => {
 	const result = runRepositoryBuild()
-	expect(Object.keys(result.bundles)).toEqual(["hello-world", "skill-a", "skill-b"])
+	expect(Object.keys(result.bundles)).toEqual([
+		"frontier-runner",
+		"hello-world",
+		"skill-a",
+		"skill-b",
+	])
 	validateBundleClosure(root)
 
 	const installedRoot = temporaryDirectory("relocated-plugin-")
