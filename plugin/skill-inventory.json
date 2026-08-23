@@ -52,6 +52,11 @@
 			"hookDependence": "hook-independent"
 		},
 		{
+			"id": "notebooklm",
+			"execution": "model-only",
+			"hookDependence": "hook-independent"
+		},
+		{
 			"id": "orchestration-design",
 			"execution": "model-only",
 			"hookDependence": "hook-independent"
