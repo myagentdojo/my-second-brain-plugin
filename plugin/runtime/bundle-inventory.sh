@@ -3,9 +3,9 @@
 runtime_inventory_select_bundle() {
 	case "$1" in
 	'frontier-runner')
-		RUNTIME_BUNDLE_PATH='runtime/frontier-runner-c9f46f594a504e89.js'
-		RUNTIME_BUNDLE_BYTES='49879'
-		RUNTIME_BUNDLE_SHA256='c9f46f594a504e893fc6e82f9a38fd3d0baa501072b209fe188b6b03fc9e493a'
+		RUNTIME_BUNDLE_PATH='runtime/frontier-runner-fc0ef244ba53212d.js'
+		RUNTIME_BUNDLE_BYTES='58538'
+		RUNTIME_BUNDLE_SHA256='fc0ef244ba53212d95dbc0c790b0f015763617dc5fa0f077c3b6a1a5d62c1345'
 		;;
 	'hello-world')
 		RUNTIME_BUNDLE_PATH='runtime/hello-world.js'

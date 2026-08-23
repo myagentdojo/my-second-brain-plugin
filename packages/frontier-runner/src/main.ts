@@ -16,18 +16,22 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 const schemaVersion = 1
 const receiptSchemaVersion = 1
 const maximumPromptBytes = 32 * 1024
+const maximumResponseBytes = 1024
 const unitIdPattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 const runIdPattern = /^fr-[a-f0-9]{16}$/
 const sha256Pattern = /^[a-f0-9]{64}$/
 const completedStatuses = new Set(["idle", "done"])
 const agentStatuses = new Set(["idle", "working", "blocked", "done", "unknown"])
 const promptUncertainCodes = new Set(["timeout", "agent_prompt_stalled"])
+const responseFailedCodes = new Set(["agent_not_found", "agent_not_ready", "invalid_key", "agent_send_keys_failed"])
 const effectOutcomeValues = ["planned", "unknown", "succeeded", "timed_out", "failed"] as const
 const effectOutcomes = new Set<string>(effectOutcomeValues)
 const runStateValues = [
 	"prepared",
 	"starting",
 	"timed_out",
+	"blocked",
+	"responded",
 	"settled_unproved",
 	"completed",
 	"cleanup_pending",
@@ -46,6 +50,7 @@ const initialEffectNames = [
 ] as const
 const effectNameValues = [
 	...initialEffectNames,
+	"responseDispatch",
 	"resumeWait",
 	"workerPaneClose",
 	"browserPaneClose",
@@ -54,7 +59,7 @@ const effectNameValues = [
 ] as const
 const effectNames = new Set<string>(effectNameValues)
 
-type CommandName = "run" | "resume" | "cleanup" | "unknown"
+type CommandName = "run" | "respond" | "resume" | "cleanup" | "unknown"
 type EffectOutcome = (typeof effectOutcomeValues)[number]
 type EffectName = (typeof effectNameValues)[number]
 type RunState = (typeof runStateValues)[number]
@@ -92,6 +97,9 @@ interface Receipt {
 		browserPaneId?: string
 		workerPaneId?: string
 	}
+	response?: {
+		sha256: string
+	}
 	effects: Partial<Record<EffectName, EffectRecord>>
 	observation?: {
 		agentStatus?: string
@@ -102,6 +110,11 @@ interface Receipt {
 
 interface ParsedFlags {
 	values: Map<string, string>
+}
+
+interface ResponseInput {
+	sha256: string
+	keys: string[]
 }
 
 interface HerdrResult {
@@ -177,12 +190,14 @@ function help(): string {
 Usage:
   frontier-runner run --unit-id ID --workspace PATH --prompt-file PATH \\
     --timeout-ms MS --browser-url URL --result-file RELATIVE_PATH
+  frontier-runner respond --run-id ID --response-file PATH
   frontier-runner resume --run-id ID
   frontier-runner cleanup --run-id ID
   frontier-runner --help
 
 Commands:
   run      Create one Terminal Code pane, one Chromium pane, and one Codex worker.
+  respond  Send one exact private-file response to the recorded blocked worker.
   resume   Reconcile the recorded worker after timeout without resending the prompt.
   cleanup  Close only the panes recorded as owned by this run.
 
@@ -365,6 +380,66 @@ function promptBytes(path: string): Uint8Array {
 		})
 	}
 	return bytes
+}
+
+function responseInput(path: string): ResponseInput {
+	if (!existsSync(path) || !lstatSync(path).isFile()) {
+		throw new FrontierError({
+			message: "response file is not an existing non-symlink regular file",
+			code: "RESPONSE_INVALID",
+			exitCode: 2,
+			nextAction: "Write the exact approved response to one private regular file.",
+		})
+	}
+	const mode = statSync(path).mode & 0o777
+	if ((mode & 0o077) !== 0 || (mode & 0o400) === 0) {
+		throw new FrontierError({
+			message: "response file permissions expose it beyond the owner",
+			code: "RESPONSE_FILE_NOT_PRIVATE",
+			exitCode: 2,
+			nextAction: "Set the response file to owner-only permissions, such as mode 0600.",
+		})
+	}
+	const bytes = readFileSync(path)
+	if (bytes.length === 0 || bytes.length > maximumResponseBytes) {
+		throw new FrontierError({
+			message: `response must contain 1 to ${maximumResponseBytes} bytes`,
+			code: "RESPONSE_INVALID",
+			exitCode: 2,
+			nextAction: "Use one non-empty response no larger than 1 KiB.",
+		})
+	}
+	let text: string
+	try {
+		text = new TextDecoder("utf-8", { fatal: true }).decode(bytes)
+	} catch {
+		throw new FrontierError({
+			message: "response is not valid UTF-8",
+			code: "RESPONSE_INVALID",
+			exitCode: 2,
+			nextAction: "Write one valid UTF-8 response line without control characters.",
+		})
+	}
+	if (/\r|\n|\u2028|\u2029|\p{C}/u.test(text)) {
+		throw new FrontierError({
+			message: "response must be exactly one printable line",
+			code: "RESPONSE_INVALID",
+			exitCode: 2,
+			nextAction: "Remove line breaks and control characters without trimming approved text.",
+		})
+	}
+	if (/frontier-result:[a-f0-9]{64}/.test(text)) {
+		throw new FrontierError({
+			message: "response contains a complete Frontier Runner result marker",
+			code: "RESPONSE_MARKER_CONFLICT",
+			exitCode: 2,
+			nextAction: "Remove the complete marker so echoed input cannot satisfy result proof.",
+		})
+	}
+	return {
+		sha256: sha256(bytes),
+		keys: Array.from(text, (character) => (character === " " ? "space" : character)),
+	}
 }
 
 function timeoutValue(input: string): number {
@@ -732,22 +807,53 @@ function completedRunEffects(receipt: Receipt): boolean {
 	)
 }
 
+function responseEffectValid(receipt: Receipt): boolean {
+	const effect = receipt.effects.responseDispatch
+	if (!receipt.response && !effect) return true
+	return Boolean(
+		receipt.response &&
+			sha256Pattern.test(receipt.response.sha256) &&
+			effect &&
+			effect.outcome !== "planned",
+	)
+}
+
 function receiptStateInvariants(receipt: Receipt): boolean {
 	if (!initialEffectNames.every((effect) => receipt.effects[effect] !== undefined)) return false
 	if (!splitResourceInvariants(receipt)) return false
+	if (!responseEffectValid(receipt)) return false
 
 	if (receipt.state === "prepared") {
-		return !receiptHasRunResources(receipt) && initialEffectNames.every((effect) => effectIs(receipt, effect, "planned"))
+		return (
+			!receiptHasRunResources(receipt) &&
+			!receipt.response &&
+			!receipt.effects.responseDispatch &&
+			initialEffectNames.every((effect) => effectIs(receipt, effect, "planned"))
+		)
 	}
 	if (receipt.state === "timed_out") {
-		return (
+		const promptTimedOut =
 			completedRunEffects(receipt) &&
 			((effectIs(receipt, "promptDispatch", "timed_out") &&
 				promptUncertainCodes.has(receipt.effects.promptDispatch?.code ?? "")) ||
 				(effectIs(receipt, "promptDispatch", "succeeded") &&
 					effectIs(receipt, "resumeWait", "timed_out") &&
 					receipt.effects.resumeWait?.code === "timeout"))
+		const responseTimedOut =
+			completedRunEffects(receipt) &&
+			effectIs(receipt, "responseDispatch", "timed_out") &&
+			receipt.effects.responseDispatch?.code === "timeout"
+		return promptTimedOut || responseTimedOut
+	}
+	if (receipt.state === "blocked") {
+		return (
+			completedRunEffects(receipt) &&
+			receipt.observation?.agentStatus === "blocked" &&
+			!effectIs(receipt, "responseDispatch", "succeeded")
 		)
+	}
+	if (receipt.state === "responded") {
+		return completedRunEffects(receipt) && effectIs(receipt, "responseDispatch", "succeeded")
 	}
 	if (receipt.state === "settled_unproved") {
 		return (
@@ -790,6 +896,7 @@ function isReceipt(value: unknown): value is Receipt {
 	const workspace = jsonObject(receipt?.workspace)
 	const inputs = jsonObject(receipt?.inputs)
 	const resources = jsonObject(receipt?.resources)
+	const response = jsonObject(receipt?.response)
 	const effects = jsonObject(receipt?.effects)
 	if (
 		receipt?.schemaVersion !== receiptSchemaVersion ||
@@ -812,6 +919,7 @@ function isReceipt(value: unknown): value is Receipt {
 		inputs.timeoutMs < 1 ||
 		inputs.timeoutMs > 3_600_000 ||
 		!stringField(resources, "workerName") ||
+		(receipt?.response !== undefined && !sha256Pattern.test(stringField(response, "sha256") ?? "")) ||
 		!effects
 	) {
 		return false
@@ -935,6 +1043,9 @@ function startWorker(receipt: Receipt): void {
 			"codex",
 			"--pane",
 			receipt.resources.workerPaneId!,
+			"--",
+			"--enable",
+			"default_mode_request_user_input",
 		],
 		receipt.workspace.path,
 	)
@@ -1110,13 +1221,19 @@ function exactMarkerCount(readback: string, marker: string): number {
 
 function proveResult(receipt: Receipt, observation: AgentObservation): ResultEnvelope {
 	if (observation.status === "blocked") {
+		receipt.state = "blocked"
+		receipt.observation = { agentStatus: observation.status }
+		writeReceipt(receipt)
+		const responseAttempted = receipt.effects.responseDispatch !== undefined
 		throw new FrontierError({
 			message: "the recorded worker is blocked on human input",
 			code: "AGENT_BLOCKED",
 			runId: receipt.runId,
 			state: receipt.state,
-			retrySafe: true,
-			nextAction: `Inspect ${receipt.resources.workerName} and let the user decide the visible approval or question.`,
+			retrySafe: !responseAttempted,
+			nextAction: responseAttempted
+				? `Inspect ${receipt.resources.workerName}; the recorded response will not be sent again.`
+				: `Inspect ${receipt.resources.workerName}, obtain exact operator approval, then use frontier-runner respond.`,
 		})
 	}
 	if (observation.status === "unknown") {
@@ -1209,8 +1326,11 @@ function validateReceiptContext(receipt: Receipt): void {
 	canonicalDirectory(receipt.workspace.path)
 }
 
-function unknownEffect(receipt: Receipt): string | undefined {
-	return Object.entries(receipt.effects).find(([, effect]) => effect.outcome === "unknown")?.[0]
+function unknownEffect(receipt: Receipt, ignored: readonly EffectName[] = []): string | undefined {
+	const ignoredSet = new Set<EffectName>(ignored)
+	return Object.entries(receipt.effects).find(
+		([name, effect]) => effect.outcome === "unknown" && !ignoredSet.has(name as EffectName),
+	)?.[0]
 }
 
 function runCommand(arguments_: string[]): ResultEnvelope {
@@ -1337,6 +1457,125 @@ function runCommand(arguments_: string[]): ResultEnvelope {
 	return { ...completed, command: "run", sideEffects: ["receipt", "editor-pane", "browser-pane", "worker-pane", "codex-worker", "prompt"] }
 }
 
+function respondCommand(arguments_: string[]): ResultEnvelope {
+	const flags = parseFlags(arguments_, ["--run-id", "--response-file"])
+	const runId = requiredFlag(flags, "--run-id")
+	const receipt = readReceipt(runId)
+	const response = responseInput(requiredFlag(flags, "--response-file"))
+	validateReceiptContext(receipt)
+	if (receipt.response || receipt.effects.responseDispatch) {
+		throw new FrontierError({
+			message: "this run already has one recorded response attempt",
+			code: "RESPONSE_ALREADY_ATTEMPTED",
+			runId,
+			state: receipt.state,
+			nextAction: `Run frontier-runner resume --run-id ${runId}; the response will not be sent again.`,
+		})
+	}
+	if (receipt.state === "completed" || receipt.state === "cleaned") {
+		throw new FrontierError({
+			message: `cannot respond to a run in terminal state ${receipt.state}`,
+			code: "RESPONSE_NOT_AVAILABLE",
+			runId,
+			state: receipt.state,
+			nextAction:
+				receipt.state === "completed"
+					? `Run frontier-runner cleanup --run-id ${runId} when the panes are no longer needed.`
+					: "Use a new unit ID for another bounded run.",
+		})
+	}
+	const uncertainEffect = unknownEffect(receipt)
+	if (uncertainEffect) {
+		throw new FrontierError({
+			message: `receipt contains an unknown external effect: ${uncertainEffect}`,
+			code: "EFFECT_UNKNOWN",
+			runId,
+			state: receipt.state,
+			nextAction: "Inspect the recorded panes and effect before any response; automatic replay is unsafe.",
+		})
+	}
+	if (!receipt.resources.workerPaneId || receipt.effects.workerStart?.outcome !== "succeeded") {
+		throw new FrontierError({
+			message: "receipt has no confirmed worker identity",
+			code: "WORKER_IDENTITY_LOST",
+			runId,
+			state: receipt.state,
+			nextAction: "Inspect the private receipt and Herdr layout; do not create a replacement worker.",
+		})
+	}
+	reconcileRunPanes(receipt)
+	const observation = agentObservation(receipt)
+	if (observation.status !== "blocked") {
+		throw new FrontierError({
+			message: `recorded worker is not blocked: ${observation.status}`,
+			code: "RESPONSE_NOT_BLOCKED",
+			runId,
+			state: receipt.state,
+			nextAction: `Inspect ${receipt.resources.workerName}; do not send input unless Herdr reports blocked.`,
+		})
+	}
+
+	receipt.state = "blocked"
+	receipt.observation = { agentStatus: observation.status }
+	receipt.response = { sha256: response.sha256 }
+	recordEffect(receipt, "responseDispatch", "unknown")
+	const result = runHerdr(
+		["agent", "send-keys", receipt.resources.workerName, ...response.keys, "enter"],
+		receipt.workspace.path,
+	)
+	if (herdrResponseResult(result, "ok")) {
+		receipt.state = "responded"
+		recordEffect(receipt, "responseDispatch", "succeeded")
+		return {
+			schemaVersion,
+			ok: true,
+			command: "respond",
+			code: "RESPONSE_DISPATCHED",
+			runId,
+			state: receipt.state,
+			changedState: "partial",
+			sideEffects: ["response"],
+			retrySafe: false,
+			nextAction: `Run frontier-runner resume --run-id ${runId}; neither prompt nor response will be resent.`,
+		}
+	}
+	if (result.errorCode === "timeout") {
+		receipt.state = "timed_out"
+		recordEffect(receipt, "responseDispatch", "timed_out", result.errorCode)
+		throw new FrontierError({
+			message: "response delivery timed out after it may have taken effect",
+			code: "RESPONSE_TIMEOUT",
+			exitCode: 124,
+			runId,
+			state: receipt.state,
+			changedState: "partial",
+			sideEffects: ["response-maybe-delivered"],
+			nextAction: `Run frontier-runner resume --run-id ${runId}; do not repeat respond.`,
+		})
+	}
+	if (result.errorCode && responseFailedCodes.has(result.errorCode)) {
+		receipt.state = "failed"
+		recordEffect(receipt, "responseDispatch", "failed", result.errorCode)
+		throw new FrontierError({
+			message: `Herdr rejected the response before accepting input: ${result.errorCode}`,
+			code: "RESPONSE_DISPATCH_FAILED",
+			runId,
+			state: receipt.state,
+			changedState: "partial",
+			nextAction: `Inspect ${receipt.resources.workerName}; do not repeat respond or create a replacement worker.`,
+		})
+	}
+	throw new FrontierError({
+		message: `response dispatch outcome is unknown${result.errorCode ? `: ${result.errorCode}` : ""}`,
+		code: "RESPONSE_EFFECT_UNKNOWN",
+		runId,
+		state: receipt.state,
+		changedState: "partial",
+		sideEffects: ["response-maybe-delivered"],
+		nextAction: `Run frontier-runner resume --run-id ${runId}; do not repeat respond.`,
+	})
+}
+
 function resumeCommand(arguments_: string[]): ResultEnvelope {
 	const flags = parseFlags(arguments_, ["--run-id"])
 	const runId = requiredFlag(flags, "--run-id")
@@ -1370,7 +1609,7 @@ function resumeCommand(arguments_: string[]): ResultEnvelope {
 			nextAction: `Run frontier-runner cleanup --run-id ${runId} when the panes are no longer needed.`,
 		}
 	}
-	const uncertainEffect = unknownEffect(receipt)
+	const uncertainEffect = unknownEffect(receipt, ["responseDispatch"])
 	if (uncertainEffect) {
 		throw new FrontierError({
 			message: `receipt contains an unknown external effect: ${uncertainEffect}`,
@@ -1555,7 +1794,7 @@ if (commandInput === undefined || commandInput === "--help" || commandInput === 
 	process.stdout.write(help())
 	process.exit(0)
 }
-if (!["run", "resume", "cleanup"].includes(commandInput))
+if (!["run", "respond", "resume", "cleanup"].includes(commandInput))
 	emitFailure(
 		"unknown",
 		new FrontierError({
@@ -1570,9 +1809,11 @@ try {
 	const envelope =
 		command === "run"
 			? runCommand(commandArguments)
-			: command === "resume"
-				? resumeCommand(commandArguments)
-				: cleanupCommand(commandArguments)
+			: command === "respond"
+				? respondCommand(commandArguments)
+				: command === "resume"
+					? resumeCommand(commandArguments)
+					: cleanupCommand(commandArguments)
 	emit(envelope)
 } catch (error) {
 	if (error instanceof FrontierError) emitFailure(command, error)

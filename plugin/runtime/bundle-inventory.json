@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "bundles": {
     "frontier-runner": {
-      "path": "runtime/frontier-runner-c9f46f594a504e89.js",
-      "bytes": 49879,
-      "sha256": "c9f46f594a504e893fc6e82f9a38fd3d0baa501072b209fe188b6b03fc9e493a"
+      "path": "runtime/frontier-runner-fc0ef244ba53212d.js",
+      "bytes": 58538,
+      "sha256": "fc0ef244ba53212d95dbc0c790b0f015763617dc5fa0f077c3b6a1a5d62c1345"
     },
     "hello-world": {
       "path": "runtime/hello-world.js",

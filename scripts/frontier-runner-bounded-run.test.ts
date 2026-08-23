@@ -22,6 +22,7 @@ interface Fixture {
 	bin: string
 	workspace: string
 	promptFile: string
+	responseFile: string
 	resultFile: string
 	stateHome: string
 	commandLog: string
@@ -59,6 +60,7 @@ function fixture(): Fixture {
 	const workspace = join(fixtureRoot, "workspace")
 	const stateHome = join(fixtureRoot, "state")
 	const promptFile = join(fixtureRoot, "prompt.md")
+	const responseFile = join(fixtureRoot, "response.txt")
 	const resultFile = join(workspace, "fixture.txt")
 	const commandLog = join(fixtureRoot, "commands.log")
 	const deliveredPrompt = join(fixtureRoot, "delivered-prompt.md")
@@ -68,6 +70,8 @@ function fixture(): Fixture {
 	mkdirSync(bin)
 	mkdirSync(workspace)
 	writeFileSync(promptFile, "Replace fixture.txt with the requested final bytes. PROMPT_BODY_PRIVATE\n")
+	writeFileSync(responseFile, "Proceed once", { mode: 0o600 })
+	chmodSync(responseFile, 0o600)
 	writeFileSync(resultFile, "before\n")
 	writeFileSync(commandLog, "")
 	writeFileSync(deliveredPrompt, "")
@@ -185,6 +189,28 @@ case "\${1:-} \${2:-}" in
 				;;
 		esac
 		;;
+	"agent send-keys")
+		if [[ "$FR_TEST_RESPONSE_MODE" != "failed" ]]; then
+			printf 'frontier-result:%s\n' "$FR_TEST_AFTER_HASH" > "$FR_TEST_TRANSCRIPT"
+		fi
+		case "$FR_TEST_RESPONSE_MODE" in
+			timeout)
+				printf '{"id":"cli:agent:send-keys","error":{"code":"timeout","message":"timed out"}}\n' >&2
+				exit 1
+			;;
+			unknown)
+				printf '{"id":"cli:agent:send-keys","error":{"code":"socket_closed","message":"unknown"}}\n' >&2
+				exit 1
+			;;
+			failed)
+				printf '{"id":"cli:agent:send-keys","error":{"code":"agent_not_ready","message":"not ready"}}\n' >&2
+				exit 1
+			;;
+			*)
+				printf '{"id":"cli:agent:send-keys","result":{"type":"ok"}}\n'
+				;;
+		esac
+		;;
 	"agent get")
 		printf '{"id":"cli:agent:get","result":{"type":"agent_info","agent":{"name":"%s","pane_id":"%s","terminal_id":"term:%s","workspace_id":"w1","tab_id":"w1:t1","agent_status":"%s","interactive_ready":true,"focused":false,"revision":1}}}\n' "\${3:-}" "$FR_TEST_AGENT_PANE" "$FR_TEST_AGENT_PANE" "$FR_TEST_AGENT_STATUS"
 		;;
@@ -211,6 +237,7 @@ esac
 		bin,
 		workspace,
 		promptFile,
+		responseFile,
 		resultFile,
 		stateHome,
 		commandLog,
@@ -256,6 +283,7 @@ function environment(testFixture: Fixture, overrides: Record<string, string | un
 		FR_TEST_RESULT_FILE: testFixture.resultFile,
 		FR_TEST_AFTER_HASH: afterHash,
 		FR_TEST_PROMPT_MODE: "timeout",
+		FR_TEST_RESPONSE_MODE: "success",
 		FR_TEST_TRANSCRIPT_MODE: "marker",
 		FR_TEST_PROTOCOL_MODE: "valid",
 		FR_TEST_AGENT_PANE: "w1:p4",
@@ -292,6 +320,10 @@ function runArguments(testFixture: Fixture): string[] {
 	]
 }
 
+function responseArguments(testFixture: Fixture, runId: string): string[] {
+	return ["respond", "--run-id", runId, "--response-file", testFixture.responseFile]
+}
+
 function envelope(result: ReturnType<typeof Bun.spawnSync>): Record<string, unknown> {
 	return JSON.parse(result.stdout.toString()) as Record<string, unknown>
 }
@@ -304,14 +336,216 @@ function count(text: string, pattern: RegExp): number {
 	return text.match(pattern)?.length ?? 0
 }
 
-test("bundled public executable exposes run, resume, and cleanup", () => {
+test("bundled public executable exposes run, respond, resume, and cleanup", () => {
 	const testFixture = fixture()
 	const result = runCli(testFixture, ["--help"])
 
 	expect(result.exitCode, result.stderr.toString()).toBe(0)
 	expect(result.stdout.toString()).toContain("frontier-runner run")
 	expect(result.stdout.toString()).toContain("frontier-runner resume")
+	expect(result.stdout.toString()).toContain("frontier-runner respond")
 	expect(result.stdout.toString()).toContain("frontier-runner cleanup")
+})
+
+test("respond rejects a non-private response file before contacting the worker", () => {
+	const testFixture = fixture()
+	const timedOut = runCli(testFixture, runArguments(testFixture), {
+		FR_TEST_TRANSCRIPT_MODE: "missing",
+	})
+	const runId = envelope(timedOut).runId as string
+	chmodSync(testFixture.responseFile, 0o644)
+	const beforeRespond = readFileSync(testFixture.commandLog, "utf8")
+
+	const responded = runCli(testFixture, responseArguments(testFixture, runId), {
+		FR_TEST_AGENT_STATUS: "blocked",
+	})
+
+	expect(responded.exitCode).toBe(2)
+	expect(envelope(responded)).toMatchObject({
+		ok: false,
+		command: "respond",
+		code: "RESPONSE_FILE_NOT_PRIVATE",
+		changedState: "none",
+	})
+	expect(readFileSync(testFixture.commandLog, "utf8")).toBe(beforeRespond)
+})
+
+test("respond rejects a multiline response before contacting the worker", () => {
+	const testFixture = fixture()
+	const timedOut = runCli(testFixture, runArguments(testFixture), {
+		FR_TEST_TRANSCRIPT_MODE: "missing",
+	})
+	const runId = envelope(timedOut).runId as string
+	writeFileSync(testFixture.responseFile, "Proceed once\n", { mode: 0o600 })
+	chmodSync(testFixture.responseFile, 0o600)
+	const beforeRespond = readFileSync(testFixture.commandLog, "utf8")
+
+	const responded = runCli(testFixture, responseArguments(testFixture, runId), {
+		FR_TEST_AGENT_STATUS: "blocked",
+	})
+
+	expect(responded.exitCode).toBe(2)
+	expect(envelope(responded)).toMatchObject({
+		ok: false,
+		command: "respond",
+		code: "RESPONSE_INVALID",
+		changedState: "none",
+	})
+	expect(readFileSync(testFixture.commandLog, "utf8")).toBe(beforeRespond)
+})
+
+test("respond sends one exact private response to the recorded blocked worker and stores only its hash", () => {
+	const testFixture = fixture()
+	const timedOut = runCli(testFixture, runArguments(testFixture), {
+		FR_TEST_TRANSCRIPT_MODE: "missing",
+	})
+	const runId = envelope(timedOut).runId as string
+	const responded = runCli(testFixture, responseArguments(testFixture, runId), {
+		FR_TEST_AGENT_STATUS: "blocked",
+	})
+
+	expect(responded.exitCode, responded.stderr.toString()).toBe(0)
+	expect(envelope(responded)).toMatchObject({
+		ok: true,
+		command: "respond",
+		code: "RESPONSE_DISPATCHED",
+		runId,
+		state: "responded",
+		changedState: "partial",
+		sideEffects: ["response"],
+		retrySafe: false,
+	})
+	const commands = readFileSync(testFixture.commandLog, "utf8")
+	const workerName = commands.match(/agent prompt <(fr_[a-f0-9]+)>/)?.[1]
+	expect(commands).toContain(
+		`agent <send-keys> <${workerName}> <P> <r> <o> <c> <e> <e> <d> <space> <o> <n> <c> <e> <enter>\n`,
+	)
+	expect(count(commands, /^agent <send-keys>/gm)).toBe(1)
+	const path = receiptPath(testFixture, runId)
+	const receiptText = readFileSync(path, "utf8")
+	const receipt = JSON.parse(receiptText) as {
+		response: { sha256: string }
+		effects: { responseDispatch: { outcome: string; observedAt: string } }
+	}
+	expect(receipt.response.sha256).toBe(
+		"3f5ef0e62c49f2c5571fe9f36bcc4ac3a88499a4260f8614b372a3c048e4bf0e",
+	)
+	expect(receipt.effects.responseDispatch).toMatchObject({ outcome: "succeeded" })
+	expect(receipt.effects.responseDispatch.observedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/)
+	expect(receiptText).not.toContain("Proceed once")
+	expect(receiptText).not.toContain(testFixture.responseFile)
+	expect(statSync(path).mode & 0o777).toBe(0o600)
+})
+
+test("respond fails closed before dispatch for a changed worker identity or a worker no longer blocked", () => {
+	for (const [overrides, code] of [
+		[{ FR_TEST_AGENT_STATUS: "blocked", FR_TEST_AGENT_PANE: "w1:p9" }, "WORKER_IDENTITY_CONFLICT"],
+		[{ FR_TEST_AGENT_STATUS: "idle" }, "RESPONSE_NOT_BLOCKED"],
+	] as const) {
+		const testFixture = fixture()
+		const timedOut = runCli(testFixture, runArguments(testFixture), {
+			FR_TEST_TRANSCRIPT_MODE: "missing",
+		})
+		const runId = envelope(timedOut).runId as string
+		const responded = runCli(testFixture, responseArguments(testFixture, runId), overrides)
+
+		expect(responded.exitCode, code).toBe(1)
+		expect(envelope(responded)).toMatchObject({ ok: false, command: "respond", code })
+		expect(count(readFileSync(testFixture.commandLog, "utf8"), /^agent <send-keys>/gm)).toBe(0)
+	}
+})
+
+test("a successful response can be resumed to completion without another response or original prompt", () => {
+	const testFixture = fixture()
+	const timedOut = runCli(testFixture, runArguments(testFixture), {
+		FR_TEST_TRANSCRIPT_MODE: "missing",
+	})
+	const runId = envelope(timedOut).runId as string
+	expect(
+		runCli(testFixture, responseArguments(testFixture, runId), {
+			FR_TEST_AGENT_STATUS: "blocked",
+		}).exitCode,
+	).toBe(0)
+
+	const resumed = runCli(testFixture, ["resume", "--run-id", runId], {
+		FR_TEST_AGENT_STATUS: "idle",
+	})
+
+	expect(resumed.exitCode, resumed.stderr.toString()).toBe(0)
+	expect(envelope(resumed)).toMatchObject({ code: "RUN_COMPLETED", state: "completed" })
+	const commands = readFileSync(testFixture.commandLog, "utf8")
+	expect(count(commands, /^agent prompt/gm)).toBe(1)
+	expect(count(commands, /^agent <send-keys>/gm)).toBe(1)
+	writeFileSync(testFixture.commandLog, "")
+	const cleaned = runCli(testFixture, ["cleanup", "--run-id", runId])
+	expect(cleaned.exitCode, cleaned.stderr.toString()).toBe(0)
+	expect(envelope(cleaned)).toMatchObject({ code: "CLEANUP_CONVERGED", state: "cleaned" })
+	expect(readFileSync(testFixture.livePanes, "utf8")).toBe("w1:p1\n")
+})
+
+test("classified and unknown response outcomes reconcile without replay", () => {
+	for (const [responseMode, exitCode, outcome] of [
+		["timeout", 124, "timed_out"],
+		["unknown", 1, "unknown"],
+	] as const) {
+		const testFixture = fixture()
+		const timedOut = runCli(testFixture, runArguments(testFixture), {
+			FR_TEST_TRANSCRIPT_MODE: "missing",
+		})
+		const runId = envelope(timedOut).runId as string
+		const responded = runCli(testFixture, responseArguments(testFixture, runId), {
+			FR_TEST_AGENT_STATUS: "blocked",
+			FR_TEST_RESPONSE_MODE: responseMode,
+		})
+
+		expect(responded.exitCode, responseMode).toBe(exitCode)
+		const receipt = JSON.parse(readFileSync(receiptPath(testFixture, runId), "utf8")) as {
+			effects: { responseDispatch: { outcome: string } }
+		}
+		expect(receipt.effects.responseDispatch.outcome).toBe(outcome)
+		const resumed = runCli(testFixture, ["resume", "--run-id", runId], {
+			FR_TEST_AGENT_STATUS: "idle",
+		})
+		expect(resumed.exitCode, `${responseMode}: ${resumed.stderr.toString()}`).toBe(0)
+		expect(envelope(resumed)).toMatchObject({ code: "RUN_COMPLETED", state: "completed" })
+		const commands = readFileSync(testFixture.commandLog, "utf8")
+		expect(count(commands, /^agent prompt/gm)).toBe(1)
+		expect(count(commands, /^agent <send-keys>/gm)).toBe(1)
+	}
+})
+
+test("repeating respond or calling it after completion cannot dispatch again", () => {
+	const testFixture = fixture()
+	const timedOut = runCli(testFixture, runArguments(testFixture), {
+		FR_TEST_TRANSCRIPT_MODE: "missing",
+	})
+	const runId = envelope(timedOut).runId as string
+	expect(
+		runCli(testFixture, responseArguments(testFixture, runId), {
+			FR_TEST_AGENT_STATUS: "blocked",
+		}).exitCode,
+	).toBe(0)
+	writeFileSync(testFixture.commandLog, "")
+
+	const repeated = runCli(testFixture, responseArguments(testFixture, runId), {
+		FR_TEST_AGENT_STATUS: "blocked",
+	})
+	expect(repeated.exitCode).toBe(1)
+	expect(envelope(repeated)).toMatchObject({ code: "RESPONSE_ALREADY_ATTEMPTED" })
+	expect(readFileSync(testFixture.commandLog, "utf8")).toBe("")
+
+	expect(
+		runCli(testFixture, ["resume", "--run-id", runId], {
+			FR_TEST_AGENT_STATUS: "idle",
+		}).exitCode,
+	).toBe(0)
+	writeFileSync(testFixture.commandLog, "")
+	const completed = runCli(testFixture, responseArguments(testFixture, runId), {
+		FR_TEST_AGENT_STATUS: "blocked",
+	})
+	expect(completed.exitCode).toBe(1)
+	expect(envelope(completed)).toMatchObject({ code: "RESPONSE_ALREADY_ATTEMPTED" })
+	expect(readFileSync(testFixture.commandLog, "utf8")).toBe("")
 })
 
 test("unknown commands return a structured usage failure", () => {
@@ -484,6 +718,16 @@ test("a deliberate timeout persists a private minimal receipt after one dispatch
 	expect(count(commands, /^pane <split>/gm)).toBe(3)
 	expect(count(commands, /^agent <start>/gm)).toBe(1)
 	expect(count(commands, /^agent prompt/gm)).toBe(1)
+})
+
+test("starts the dedicated Codex worker with its question surface enabled", () => {
+	const testFixture = fixture()
+	const result = runCli(testFixture, runArguments(testFixture))
+
+	expect(result.exitCode, result.stderr.toString()).toBe(124)
+	expect(readFileSync(testFixture.commandLog, "utf8")).toMatch(
+		/^agent <start> <fr_[a-f0-9]{12}> <--kind> <codex> <--pane> <w1:p4> <--> <--enable> <default_mode_request_user_input>$/m,
+	)
 })
 
 test("the worker prompt requires a final shell action that emits the independently derived marker", () => {
