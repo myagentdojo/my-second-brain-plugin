@@ -38,12 +38,14 @@ function fixture(): {
 	mkdirSync(managedWorkspace)
 	mkdirSync(requestedWorkspace)
 	writeFileSync(commandLog, "")
-	for (const command of ["code", "herdr", "open"]) {
+	for (const command of ["herdr", "open", "tode"]) {
 		const path = join(bin, command)
 		const response =
 			command === "herdr"
 				? `if [ "$*" = "pane current --current" ]; then
 	printf '%s\\n' "$FRONTIER_RUNNER_TEST_PANE_JSON"
+	elif [ "\${1:-}" = "pane" ] && [ "\${2:-}" = "split" ]; then
+	printf '%s\\n' "$FRONTIER_RUNNER_TEST_SPLIT_JSON"
 fi
 `
 				: ""
@@ -72,6 +74,7 @@ function run(
 			HERDR_ENV: undefined,
 			HERDR_PANE_ID: undefined,
 			FRONTIER_RUNNER_TEST_PANE_JSON: undefined,
+			FRONTIER_RUNNER_TEST_SPLIT_JSON: undefined,
 			PATH: `${options.bin}:${process.env.PATH ?? ""}`,
 			FRONTIER_RUNNER_TEST_COMMAND_LOG: options.commandLog,
 			...options.environment,
@@ -87,15 +90,16 @@ test("outside Herdr opens the named session for the requested workspace", () => 
 
 	expect(result.exitCode, result.stderr.toString()).toBe(0)
 	expect(result.stdout.toString()).toBe(
-		`session=frontier-runner-v0\nworkspace=${testFixture.requestedWorkspace}\nnext=run frontier-runner again inside the managed pane to open VS Code\n`,
+		`session=frontier-runner-v0\nworkspace=${testFixture.requestedWorkspace}\nnext=run frontier-runner again inside the managed pane to open Terminal Code\n`,
 	)
 	expect(readFileSync(testFixture.commandLog, "utf8")).toBe(
 		`open <-Ra> <Ghostty.app>\nopen <-na> <Ghostty.app> <--args> <--working-directory=${testFixture.requestedWorkspace}> <-e> <herdr> <--session> <frontier-runner-v0>\n`,
 	)
 })
 
-test("inside Herdr opens only the active pane workspace", () => {
+test("inside Herdr opens Terminal Code only on the active pane workspace", () => {
 	const testFixture = fixture()
+	const editorPaneId = "w1:p8"
 	const paneJson = JSON.stringify({
 		id: "cli:pane:current",
 		result: {
@@ -106,12 +110,20 @@ test("inside Herdr opens only the active pane workspace", () => {
 			},
 		},
 	})
+	const splitJson = JSON.stringify({
+		id: "cli:pane:split",
+		result: {
+			type: "pane_split",
+			pane: { pane_id: editorPaneId },
+		},
+	})
 	const result = run(testFixture.requestedWorkspace, {
 		...testFixture,
 		environment: {
 			HERDR_ENV: "1",
 			HERDR_PANE_ID: "w1:p7",
 			FRONTIER_RUNNER_TEST_PANE_JSON: paneJson,
+			FRONTIER_RUNNER_TEST_SPLIT_JSON: splitJson,
 		},
 	})
 
@@ -129,14 +141,15 @@ test("inside Herdr opens only the active pane workspace", () => {
 			HERDR_ENV: "1",
 			HERDR_PANE_ID: "w1:p7",
 			FRONTIER_RUNNER_TEST_PANE_JSON: paneJson,
+			FRONTIER_RUNNER_TEST_SPLIT_JSON: splitJson,
 		},
 	})
 	expect(canonical.exitCode, canonical.stderr.toString()).toBe(0)
 	expect(canonical.stdout.toString()).toBe(
-		`editor=vscode\npane=w1:p7\nworkspace=${testFixture.managedWorkspace}\nnext=start or resume one bounded worker in this Herdr workspace\n`,
+		`editor=terminal-code\npane=w1:p7\neditor_pane=${editorPaneId}\nworkspace=${testFixture.managedWorkspace}\nnext=start or resume one bounded worker in this Herdr workspace\n`,
 	)
 	expect(readFileSync(testFixture.commandLog, "utf8")).toBe(
-		`herdr <pane> <current> <--current>\ncode <-n> <${testFixture.managedWorkspace}>\n`,
+		`herdr <pane> <current> <--current>\nherdr <pane> <split> <--current> <--direction> <right> <--cwd> <${testFixture.managedWorkspace}> <--no-focus>\nherdr <pane> <run> <${editorPaneId}> <exec tode .>\n`,
 	)
 })
 

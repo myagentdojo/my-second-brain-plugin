@@ -7,8 +7,9 @@ usage() {
 Usage: frontier-runner.sh [workspace]
 
 Outside Herdr, attach Ghostty to the frontier-runner-v0 session. Inside a
-managed Herdr pane, open the calling pane's foreground cwd in VS Code. Outside
-Herdr, the workspace defaults to the current directory.
+managed Herdr pane, open Terminal Code on the calling pane's foreground cwd in
+a right-hand Herdr pane. Outside Herdr, the workspace defaults to the current
+directory.
 EOF
 }
 
@@ -29,7 +30,7 @@ if [[ "${HERDR_ENV:-}" == "1" ]]; then
 		printf 'repair: invoke from a Herdr-managed pane process\n' >&2
 		exit 1
 	fi
-	for command_name in herdr jq code; do
+	for command_name in herdr jq tode; do
 		if ! command -v "$command_name" >/dev/null 2>&1; then
 			printf 'error: required command is missing: %s\n' "$command_name" >&2
 			printf 'repair: install or expose %s on PATH, then retry\n' "$command_name" >&2
@@ -70,9 +71,24 @@ if [[ "${HERDR_ENV:-}" == "1" ]]; then
 			exit 2
 		fi
 	fi
-	code -n "$workspace" >/dev/null
-	printf 'editor=vscode\n'
+	if ! split_json="$(herdr pane split --current --direction right --cwd "$workspace" --no-focus)"; then
+		printf 'error: Herdr could not create the Terminal Code pane\n' >&2
+		printf 'repair: inspect the current pane layout and retry\n' >&2
+		exit 1
+	fi
+	if ! editor_pane_id="$(printf '%s\n' "$split_json" | jq -er '.result.pane.pane_id | select(type == "string" and length > 0)' 2>/dev/null)"; then
+		printf 'error: Herdr returned no Terminal Code pane id\n' >&2
+		printf 'repair: inspect herdr pane split output\n' >&2
+		exit 1
+	fi
+	if ! herdr pane run "$editor_pane_id" 'exec tode .' >/dev/null; then
+		printf 'error: Herdr could not start Terminal Code in pane %s\n' "$editor_pane_id" >&2
+		printf 'repair: verify tode is available to the managed pane shell\n' >&2
+		exit 1
+	fi
+	printf 'editor=terminal-code\n'
 	printf 'pane=%s\n' "$pane_id"
+	printf 'editor_pane=%s\n' "$editor_pane_id"
 	printf 'workspace=%s\n' "$workspace"
 	printf 'next=start or resume one bounded worker in this Herdr workspace\n'
 	exit 0
@@ -105,4 +121,4 @@ open -na Ghostty.app --args "--working-directory=$workspace" -e herdr --session 
 
 printf 'session=%s\n' "$session"
 printf 'workspace=%s\n' "$workspace"
-printf 'next=run frontier-runner again inside the managed pane to open VS Code\n'
+printf 'next=run frontier-runner again inside the managed pane to open Terminal Code\n'
