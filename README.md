@@ -122,7 +122,14 @@ bun run dev:codex
 
 Codex plugins are cached rather than loaded directly from the checkout. The command builds `plugin/`, copies it into ignored `.dev` staging, adds build metadata only to the staged Codex version, creates or validates the local development marketplace, reinstalls the plugin, and launches Codex. After an edit, rerun the command and start a fresh task.
 
-Codex development completes when a fresh task discovers and runs the changed staged plugin.
+Production and development remain enabled together under distinct Codex identities:
+
+- Production displays as `<Display Name>` and exposes `$<plugin-name>:<skill>`.
+- Development displays as `<Display Name> Dev` and exposes `$<plugin-name>-dev:<skill>`.
+
+The development reinstall adds the distinct development identity before removing only the superseded same-name development selector. It preserves the production installation. Use `bun run dev -- codex --no-launch` when a new Codex window is unnecessary.
+
+Codex development completes when a fresh task discovers both identities without collisions and runs the changed development skill from the staged cache. Production-skill proof must resolve to the production cache separately.
 
 Use the native development commands. A skills-only symlink or harness-global copy bypasses the manifests, launchers, runtime custody, cache identity, and installation boundary under test.
 
@@ -145,7 +152,7 @@ Local proof completes when the current worktree contains only the intended diff 
 plugin/
 ├── .claude-plugin/plugin.json
 ├── .codex-plugin/plugin.json
-├── skills/{capability-tour,dev-mode,handoff-to-opus,hello-world,new-note,new-project,runtime-custody,skill-a,skill-b,ultragoal}/SKILL.md
+├── skills/{capability-tour,dev-mode,frontier-runner,handoff-to-opus,hello-world,new-note,new-project,runtime-custody,skill-a,skill-b,ultragoal}/SKILL.md
 ├── bin/{hello-world,skill-a,skill-b}
 ├── THIRD-PARTY-NOTICES.md
 └── runtime/

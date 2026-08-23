@@ -372,6 +372,7 @@ test("automated install evidence binds bytes without claiming native activation"
 				"runtime-custody",
 				"capability-tour",
 				"dev-mode",
+				"frontier-runner",
 				"handoff-to-opus",
 				"new-note",
 				"new-project",

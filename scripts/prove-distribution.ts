@@ -172,6 +172,7 @@ const packagedSkills = entries
 if (JSON.stringify(packagedSkills) !== JSON.stringify([
 	"capability-tour",
 	"dev-mode",
+	"frontier-runner",
 	"handoff-to-opus",
 	"hello-world",
 	"new-note",

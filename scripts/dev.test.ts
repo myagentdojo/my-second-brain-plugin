@@ -2,17 +2,19 @@ import { expect, test } from "bun:test"
 import { createHash } from "node:crypto"
 import {
 	chmodSync,
+	cpSync,
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
 	readFileSync,
+	realpathSync,
 	rmSync,
 	statSync,
 	utimesSync,
 	writeFileSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
-import { join, resolve } from "node:path"
+import { basename, join, resolve } from "node:path"
 
 import { claudeWatchSources } from "./dev"
 import { loadPluginConfig } from "./plugin-config"
@@ -52,14 +54,26 @@ interface FakeState {
 	installVersions?: Record<string, string>
 }
 
-function run(arguments_: string[], environment = process.env) {
+function run(arguments_: string[], environment = process.env, repositoryRoot = root) {
 	return Bun.spawnSync({
 		cmd: [process.execPath, "scripts/dev.ts", ...arguments_],
-		cwd: root,
+		cwd: repositoryRoot,
 		env: environment,
 		stdout: "pipe",
 		stderr: "pipe",
 	})
+}
+
+const isolatedRepositoryExcludedEntries = new Set([".dev", ".git"])
+
+function isolatedRepository(prefix: string): string {
+	const repositoryRoot = mkdtempSync(join(tmpdir(), prefix))
+	cpSync(root, repositoryRoot, {
+		recursive: true,
+		filter: (source) =>
+			source === root || !isolatedRepositoryExcludedEntries.has(basename(source)),
+	})
+	return realpathSync(repositoryRoot)
 }
 
 /**
@@ -266,6 +280,95 @@ test("Codex development dry-run remains the native staged reinstall plan", () =>
 	expect(output.harness).toBe("codex")
 	expect(output.install).toContain("codex plugin add")
 	expect(output.reload).toBe("Start a fresh Codex task after reinstall")
+})
+
+test("Codex check stages a distinct development identity", () => {
+	const repositoryRoot = isolatedRepository("codex-development-identity-")
+	try {
+		const result = run(["codex", "--check"], process.env, repositoryRoot)
+
+		expect(result.exitCode).toBe(0)
+		const marketplaceRoot = join(repositoryRoot, ".dev", "codex-marketplace")
+		const marketplace = JSON.parse(
+			readFileSync(join(marketplaceRoot, ".agents", "plugins", "marketplace.json"), "utf8"),
+		)
+		expect(marketplace).toMatchObject({
+			name: "my-second-brain-dev",
+			interface: { displayName: "My Second Brain Dev" },
+			plugins: [
+				{
+					name: "my-second-brain-dev",
+					source: { source: "local" },
+				},
+			],
+		})
+		const developmentRoot = resolve(marketplaceRoot, marketplace.plugins[0].source.path)
+		const developmentManifest = JSON.parse(
+			readFileSync(join(developmentRoot, ".codex-plugin", "plugin.json"), "utf8"),
+		)
+		expect(developmentManifest).toMatchObject({
+			name: "my-second-brain-dev",
+			interface: { displayName: "My Second Brain Dev" },
+		})
+		const productionManifest = JSON.parse(
+			readFileSync(join(repositoryRoot, "plugin", ".codex-plugin", "plugin.json"), "utf8"),
+		)
+		expect(productionManifest).toMatchObject({
+			name: "my-second-brain",
+			interface: { displayName: "My Second Brain" },
+		})
+		expect(existsSync(join(marketplaceRoot, "plugins", "my-second-brain"))).toBe(false)
+	} finally {
+		rmSync(repositoryRoot, { recursive: true, force: true })
+	}
+})
+
+test("Codex development migrates only the superseded identity", () => {
+	const temporaryRoot = mkdtempSync(join(tmpdir(), "codex-development-test-"))
+	const repositoryRoot = isolatedRepository("codex-development-migration-")
+	const binaryRoot = join(temporaryRoot, "bin")
+	const commandLog = join(temporaryRoot, "commands.log")
+	mkdirSync(binaryRoot, { recursive: true })
+	writeExecutable(
+		join(binaryRoot, "codex"),
+		`#!/usr/bin/env bun
+import { appendFileSync } from "node:fs"
+const command = process.argv.slice(2).join(" ")
+appendFileSync(process.env.CODEX_TEST_COMMAND_LOG, command + "\\n")
+if (command === "plugin marketplace list --json") {
+  console.log(JSON.stringify({ marketplaces: [{ name: "my-second-brain-dev", root: process.env.CODEX_TEST_DEVELOPMENT_ROOT }] }))
+} else if (command.startsWith("plugin add ") || command.startsWith("plugin remove ")) {
+  console.log(JSON.stringify({ ok: true }))
+} else {
+  console.error("unexpected Codex command: " + command)
+  process.exit(99)
+}
+`,
+	)
+	try {
+		const result = run(
+			["codex", "--no-launch"],
+			{
+				...process.env,
+				PATH: `${binaryRoot}:${process.env.PATH ?? ""}`,
+				CODEX_TEST_COMMAND_LOG: commandLog,
+				CODEX_TEST_DEVELOPMENT_ROOT: join(repositoryRoot, ".dev", "codex-marketplace"),
+			},
+			repositoryRoot,
+		)
+
+		expect(result.exitCode, result.stderr.toString()).toBe(0)
+		const commands = readFileSync(commandLog, "utf8").trim().split("\n")
+		expect(commands).toEqual([
+			"plugin marketplace list --json",
+			"plugin add my-second-brain-dev@my-second-brain-dev --json",
+			"plugin remove my-second-brain@my-second-brain-dev --json",
+		])
+		expect(commands).not.toContain("plugin remove my-second-brain@my-second-brain --json")
+	} finally {
+		rmSync(temporaryRoot, { recursive: true, force: true })
+		rmSync(repositoryRoot, { recursive: true, force: true })
+	}
 })
 
 test("Claude development watches workspace, runtime, manifest, and lock inputs", () => {

@@ -243,6 +243,7 @@ const PORTABLE_SKILLS_WITHOUT_HOOKS = [
 	"runtime-custody",
 	"capability-tour",
 	"dev-mode",
+	"frontier-runner",
 	"handoff-to-opus",
 	"new-note",
 	"new-project",

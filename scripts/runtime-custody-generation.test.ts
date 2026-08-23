@@ -93,9 +93,11 @@ test("runtime custody sources generate one thin launcher and checked shell proje
 	const installedSkills = readdirSync(
 		fileURLToPath(new URL("../plugin/skills", import.meta.url)),
 	).sort()
+	// Independent oracle: do not import the build allowlist that this inventory checks.
 	expect(installedSkills).toEqual([
 		"capability-tour",
 		"dev-mode",
+		"frontier-runner",
 		"handoff-to-opus",
 		"hello-world",
 		"new-note",
