@@ -1731,7 +1731,9 @@ export function validateBunOnlyPayload(root: string): void {
 	)
 	const skillFiles = inventory.filter((path) => path.startsWith("skills/"))
 	if (skillFiles.join("\0") !== expectedSkillFiles.join("\0")) {
-		throw new Error("Bun payload closure: skill sidecar inventory does not match the catalog and model-only allowlist")
+		throw new Error(
+			"Bun payload closure: skill sidecar inventory does not match the catalog and non-bundled skill payload files",
+		)
 	}
 
 	const drifted = checkRuntimeCustodyFiles(root)

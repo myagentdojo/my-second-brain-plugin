@@ -197,14 +197,15 @@ const catalog = JSON.parse(readFileSync(join(root, "runtime", "skill-catalog.jso
 const bundles = JSON.parse(
 	readFileSync(join(installedRoot, "runtime", "bundle-inventory.json"), "utf8"),
 )
-for (const surface of [catalog.skills, bundles.bundles]) {
+const expectedExecutableKeys = ["frontier-runner", "hello-world", "skill-a", "skill-b"]
+for (const [surfaceName, surface] of [
+	["runtime catalog", catalog.skills],
+	["bundle inventory", bundles.bundles],
+] as const) {
 	const surfaceKeys = Object.keys(surface).sort()
-	if (
-		JSON.stringify(surfaceKeys) !==
-		JSON.stringify(["frontier-runner", "hello-world", "skill-a", "skill-b"])
-	) {
+	if (JSON.stringify(surfaceKeys) !== JSON.stringify(expectedExecutableKeys)) {
 		throw new Error(
-			`capability-tour entered the executable runtime closure: ${JSON.stringify(surfaceKeys)}`,
+			`executable runtime closure mismatch for ${surfaceName}: expected ${JSON.stringify(expectedExecutableKeys)}, actual ${JSON.stringify(surfaceKeys)}`,
 		)
 	}
 }

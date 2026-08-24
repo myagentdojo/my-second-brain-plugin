@@ -12,18 +12,24 @@ installed `SKILL.md` path.
 ## V0 launcher
 
 Use V0 when the user asks only to open the named Herdr session or Terminal
-Code pane. Run from the target workspace:
+Code pane. Inside a managed Herdr pane, run without an argument:
+
+```sh
+bash <skill-directory>/scripts/frontier-runner.sh
+```
+
+Outside Herdr, run from the target workspace:
 
 ```sh
 bash <skill-directory>/scripts/frontier-runner.sh "$PWD"
 ```
 
-Pass another workspace path only when the user names it and the invocation is
-outside Herdr. Outside Herdr, the launcher starts or attaches the named V0
-session in Ghostty. Inside a managed Herdr pane, it resolves the calling pane's
-`foreground_cwd` through Herdr, creates a right-hand pane with that canonical
-directory, and starts Terminal Code there. A missing pane directory,
-conflicting path, or unavailable `tode` command fails closed.
+Outside Herdr, pass another workspace path only when the user names it. The
+launcher starts or attaches the named V0 session in Ghostty. Inside a managed
+Herdr pane, it resolves the calling pane's `foreground_cwd` through Herdr,
+creates a right-hand pane with that canonical directory, and starts Terminal
+Code there. A missing pane directory, conflicting path, or unavailable `tode`
+command fails closed.
 
 Report the launcher's output. Stop at any agent trust, permission, or approval
 screen and leave that decision to the user.
