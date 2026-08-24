@@ -42,6 +42,8 @@ var runStateValues = [
   "review_unproved",
   "reviewed",
   "review_breached",
+  "decision_starting",
+  "decided",
   "cleanup_pending",
   "cleaned",
   "failed"
@@ -64,6 +66,7 @@ var effectNameValues = [
   "reviewerStart",
   "reviewPromptDispatch",
   "reviewWait",
+  "decisionRecord",
   "reviewerPaneClose",
   "workerPaneClose",
   "browserPaneClose",
@@ -103,6 +106,7 @@ Usage:
   frontier-runner respond --run-id ID --response-file PATH
   frontier-runner resume --run-id ID
   frontier-runner review --run-id ID --review-prompt-file PATH
+  frontier-runner decide --run-id ID --decision-file PATH
   frontier-runner cleanup --run-id ID
   frontier-runner --help
 
@@ -111,6 +115,7 @@ Commands:
   respond  Send one exact private-file response to the recorded blocked worker.
   resume   Reconcile the recorded worker after timeout without resending the prompt.
   review   Start one fresh read-only Codex reviewer for one proved run.
+  decide   Record one state-bound accepted or declined operator decision.
   cleanup  Close only the panes recorded as owned by this run.
 
 Output:
@@ -310,6 +315,41 @@ function privateReviewPrompt(path) {
     });
   }
   return bytes;
+}
+function privateDecision(path) {
+  if (!existsSync(path) || !lstatSync(path).isFile()) {
+    throw new FrontierError({
+      message: "decision file is not an existing non-symlink regular file",
+      code: "DECISION_FILE_INVALID",
+      exitCode: 2,
+      nextAction: "Write exactly accepted or declined followed by one newline to a private regular file."
+    });
+  }
+  const mode = statSync(path).mode & 511;
+  if ((mode & 63) !== 0 || (mode & 256) === 0) {
+    throw new FrontierError({
+      message: "decision file permissions expose it beyond the owner",
+      code: "DECISION_FILE_NOT_PRIVATE",
+      exitCode: 2,
+      nextAction: "Set the decision file to owner-only permissions, such as mode 0600."
+    });
+  }
+  const bytes = readFileSync(path);
+  const text = bytes.toString();
+  if (text !== `accepted
+` && text !== `declined
+`) {
+    throw new FrontierError({
+      message: "decision file must contain exactly accepted or declined followed by one newline",
+      code: "DECISION_FILE_INVALID",
+      exitCode: 2,
+      nextAction: "Replace the file with exactly accepted or declined followed by one trailing newline."
+    });
+  }
+  return {
+    classification: text.slice(0, -1),
+    fileSha256: sha256(bytes)
+  };
 }
 function workspaceSha256(workspace) {
   const hash = createHash("sha256");
@@ -563,11 +603,13 @@ function currentPane(workspace) {
   const workspaceId = stringField(pane, "workspace_id");
   const tabId = stringField(pane, "tab_id");
   const foregroundCwd = stringField(pane, "foreground_cwd");
-  if (!paneId || !workspaceId || !tabId || !foregroundCwd) {
+  const agentSession = jsonObject(pane?.agent_session);
+  const sessionId = stringField(agentSession, "value");
+  if (!paneId || !workspaceId || !tabId || !foregroundCwd || stringField(pane, "agent") !== "codex" || stringField(agentSession, "agent") !== "codex" || stringField(agentSession, "kind") !== "id" || stringField(agentSession, "source") !== "herdr:codex" || !sessionId) {
     throw new FrontierError({
-      message: "Herdr current pane omitted required identifiers or foreground cwd",
+      message: "Herdr current pane omitted the recognised Codex Controller identity or pane context",
       code: "HERDR_CURRENT_INVALID",
-      nextAction: "Use a pane whose foreground process cwd Herdr can resolve."
+      nextAction: "Use a recognised Codex Controller pane whose identity and foreground cwd Herdr can resolve."
     });
   }
   if (paneId !== process.env.HERDR_PANE_ID) {
@@ -592,7 +634,7 @@ function currentPane(workspace) {
       nextAction: "Invoke from a pane whose foreground cwd is the explicitly granted workspace."
     });
   }
-  return { paneId, workspaceId, tabId, foregroundCwd: workspace };
+  return { paneId, workspaceId, tabId, foregroundCwd: workspace, sessionId };
 }
 function stateRoot() {
   const base = process.env.XDG_STATE_HOME ? resolve(process.env.XDG_STATE_HOME) : process.env.HOME ? join(resolve(process.env.HOME), ".local", "state") : undefined;
@@ -730,6 +772,13 @@ function reviewRecordValid(receipt) {
   }
   return Boolean(receipt.resources.reviewerName && completedObservationValid(receipt) && receipt.effects.reviewerPane && receipt.effects.reviewerStart && receipt.effects.reviewPromptDispatch);
 }
+function decisionRecordValid(receipt) {
+  const decision = receipt.decision;
+  const review = receipt.review;
+  if (!decision || !review)
+    return false;
+  return Boolean(["accepted", "declined"].includes(decision.classification) && sha256Pattern.test(decision.fileSha256) && decision.submissionAttempt === 1 && decision.runId === receipt.runId && decision.candidateSha256 === review.candidateBeforeSha256 && decision.candidateSha256 === review.candidateAfterSha256 && decision.reviewerName === receipt.resources.reviewerName && decision.verdict === "approve" && review.verdict === "approve" && decision.verdictMarkerSha256 === review.verdictMarkerSha256 && decision.controller.workspaceId === receipt.workspace.workspaceId && decision.controller.tabId === receipt.workspace.tabId && decision.controller.paneId === receipt.workspace.callerPaneId && decision.controller.sessionId.length > 0 && decision.submittedAt.length > 0);
+}
 function receiptStateInvariants(receipt) {
   if (!initialEffectNames.every((effect) => receipt.effects[effect] !== undefined))
     return false;
@@ -738,6 +787,8 @@ function receiptStateInvariants(receipt) {
   if (!responseEffectValid(receipt))
     return false;
   if (receipt.review && !reviewRecordValid(receipt))
+    return false;
+  if (receipt.decision && !decisionRecordValid(receipt))
     return false;
   if (receipt.state === "prepared") {
     return !receiptHasRunResources(receipt) && !receipt.response && !receipt.effects.responseDispatch && initialEffectNames.every((effect) => effectIs(receipt, effect, "planned"));
@@ -770,6 +821,14 @@ function receiptStateInvariants(receipt) {
     }
     return !receipt.review?.verdict;
   }
+  if (receipt.state === "decision_starting" || receipt.state === "decided") {
+    if (!decisionRecordValid(receipt))
+      return false;
+    if (receipt.state === "decision_starting") {
+      return !receipt.decision?.recordedAt && effectIs(receipt, "decisionRecord", "planned", "unknown");
+    }
+    return Boolean(receipt.decision?.recordedAt && effectIs(receipt, "decisionRecord", "succeeded"));
+  }
   if (receipt.state === "cleanup_pending" || receipt.state === "cleaned") {
     for (const splitEffect of ["editorPane", "browserPane", "workerPane"]) {
       if (effectIs(receipt, splitEffect, "unknown"))
@@ -799,8 +858,10 @@ function isReceipt(value) {
   const resources = jsonObject(receipt?.resources);
   const response = jsonObject(receipt?.response);
   const review = jsonObject(receipt?.review);
+  const decision = jsonObject(receipt?.decision);
+  const controller = jsonObject(decision?.controller);
   const effects = jsonObject(receipt?.effects);
-  if (receipt?.schemaVersion !== receiptSchemaVersion || !runIdPattern.test(stringField(receipt, "runId") ?? "") || !unitIdPattern.test(stringField(receipt, "unitId") ?? "") || !sha256Pattern.test(stringField(receipt, "requestHash") ?? "") || !runStates.has(stringField(receipt, "state") ?? "") || !stringField(receipt, "createdAt") || !stringField(receipt, "updatedAt") || !stringField(workspace, "path") || !stringField(workspace, "workspaceId") || !stringField(workspace, "tabId") || !stringField(workspace, "callerPaneId") || !sha256Pattern.test(stringField(inputs, "promptSha256") ?? "") || !sha256Pattern.test(stringField(inputs, "browserUrlSha256") ?? "") || !isSafeRelativeResultPath(stringField(inputs, "resultFile") ?? "") || !sha256Pattern.test(stringField(inputs, "resultBeforeSha256") ?? "") || typeof inputs?.timeoutMs !== "number" || !Number.isSafeInteger(inputs.timeoutMs) || inputs.timeoutMs < 1 || inputs.timeoutMs > 3600000 || !stringField(resources, "workerName") || receipt?.response !== undefined && !sha256Pattern.test(stringField(response, "sha256") ?? "") || receipt?.review !== undefined && !review || !effects) {
+  if (receipt?.schemaVersion !== receiptSchemaVersion || !runIdPattern.test(stringField(receipt, "runId") ?? "") || !unitIdPattern.test(stringField(receipt, "unitId") ?? "") || !sha256Pattern.test(stringField(receipt, "requestHash") ?? "") || !runStates.has(stringField(receipt, "state") ?? "") || !stringField(receipt, "createdAt") || !stringField(receipt, "updatedAt") || !stringField(workspace, "path") || !stringField(workspace, "workspaceId") || !stringField(workspace, "tabId") || !stringField(workspace, "callerPaneId") || !sha256Pattern.test(stringField(inputs, "promptSha256") ?? "") || !sha256Pattern.test(stringField(inputs, "browserUrlSha256") ?? "") || !isSafeRelativeResultPath(stringField(inputs, "resultFile") ?? "") || !sha256Pattern.test(stringField(inputs, "resultBeforeSha256") ?? "") || typeof inputs?.timeoutMs !== "number" || !Number.isSafeInteger(inputs.timeoutMs) || inputs.timeoutMs < 1 || inputs.timeoutMs > 3600000 || !stringField(resources, "workerName") || receipt?.response !== undefined && !sha256Pattern.test(stringField(response, "sha256") ?? "") || receipt?.review !== undefined && !review || receipt?.decision !== undefined && (!decision || !controller || !sha256Pattern.test(stringField(decision, "fileSha256") ?? "") || decision.submissionAttempt !== 1 || !stringField(decision, "runId") || !stringField(decision, "candidateSha256") || !stringField(decision, "reviewerName") || !stringField(decision, "verdict") || !stringField(decision, "verdictMarkerSha256") || !stringField(controller, "sessionId") || !stringField(controller, "workspaceId") || !stringField(controller, "tabId") || !stringField(controller, "paneId") || !stringField(decision, "submittedAt")) || !effects) {
     return false;
   }
   if (!resources || !effects)
@@ -1691,6 +1752,139 @@ Candidate workspace SHA-256: ${candidateBeforeSha256}
     sideEffects: ["reviewer-pane", "codex-reviewer", "review-prompt"]
   };
 }
+function decisionController(receipt) {
+  const controller = currentPane(receipt.workspace.path);
+  if (controller.paneId !== receipt.workspace.callerPaneId) {
+    throw new FrontierError({
+      message: "current Controller pane conflicts with the run's recorded caller pane",
+      code: "CONTROLLER_IDENTITY_CONFLICT",
+      runId: receipt.runId,
+      state: receipt.state,
+      nextAction: "Invoke the decision from the original recognised Controller pane recorded by the run."
+    });
+  }
+  return controller;
+}
+function requireDecisionCandidate(receipt) {
+  const resultFile = canonicalResultFile(receipt.workspace.path, receipt.inputs.resultFile);
+  if (sha256(readFileSync(resultFile.path)) !== receipt.observation?.resultSha256 || workspaceSha256(receipt.workspace.path) !== receipt.review?.candidateAfterSha256) {
+    throw new FrontierError({
+      message: "candidate workspace bytes conflict with the approved review receipt",
+      code: "CANDIDATE_CONFLICT",
+      runId: receipt.runId,
+      state: receipt.state,
+      nextAction: "Restore the exact approved disposable candidate; do not retarget this decision."
+    });
+  }
+}
+function decisionRecorded(receipt, command) {
+  receipt.state = "decided";
+  receipt.decision.recordedAt = now();
+  receipt.effects.decisionRecord = { outcome: "succeeded", observedAt: now() };
+  writeReceipt(receipt);
+  return {
+    schemaVersion,
+    ok: true,
+    command,
+    code: "DECISION_RECORDED",
+    runId: receipt.runId,
+    state: receipt.state,
+    changedState: "complete",
+    sideEffects: ["operator-decision"],
+    retrySafe: true,
+    nextAction: `The ${receipt.decision?.classification} decision is recorded. Stop without repair, cleanup, Git, publication, or another unit.`
+  };
+}
+function decideCommand(arguments_) {
+  const flags = parseFlags(arguments_, ["--run-id", "--decision-file"]);
+  const runId = requiredFlag(flags, "--run-id");
+  const input = privateDecision(requiredFlag(flags, "--decision-file"));
+  const receipt = readReceipt(runId);
+  if (receipt.decision || receipt.effects.decisionRecord) {
+    throw new FrontierError({
+      message: "this run already has one recorded decision attempt",
+      code: "DECISION_ALREADY_ATTEMPTED",
+      runId,
+      state: receipt.state,
+      nextAction: `Run frontier-runner resume --run-id ${runId}; never replace or retarget the first decision.`
+    });
+  }
+  validateReceiptContext(receipt);
+  if (receipt.state !== "reviewed") {
+    throw new FrontierError({
+      message: `only one proved, uncleaned reviewed run can receive a decision: ${receipt.state}`,
+      code: "DECISION_NOT_AVAILABLE",
+      runId,
+      state: receipt.state,
+      nextAction: "Complete and prove the existing run and review before requesting a decision."
+    });
+  }
+  if (receipt.review?.verdict !== "approve" || !receipt.review.verdictMarkerSha256) {
+    throw new FrontierError({
+      message: `operator decision requires advisory approve, not ${receipt.review?.verdict ?? "missing"}`,
+      code: "REVIEW_NOT_APPROVED",
+      runId,
+      state: receipt.state,
+      nextAction: "Stop without acceptance or repair; this review did not approve the candidate."
+    });
+  }
+  const uncertainEffect = unknownEffect(receipt);
+  if (uncertainEffect) {
+    throw new FrontierError({
+      message: `receipt contains an unknown external effect: ${uncertainEffect}`,
+      code: "EFFECT_UNKNOWN",
+      runId,
+      state: receipt.state,
+      nextAction: "Resolve the existing effect before decision; do not submit a decision."
+    });
+  }
+  reconcileRunPanes(receipt);
+  reviewerObservation(receipt);
+  requireDecisionCandidate(receipt);
+  const controller = decisionController(receipt);
+  const submittedAt = now();
+  receipt.state = "decision_starting";
+  receipt.decision = {
+    classification: input.classification,
+    fileSha256: input.fileSha256,
+    submissionAttempt: 1,
+    runId,
+    candidateSha256: receipt.review.candidateBeforeSha256,
+    reviewerName: receipt.resources.reviewerName,
+    verdict: "approve",
+    verdictMarkerSha256: receipt.review.verdictMarkerSha256,
+    controller: {
+      sessionId: controller.sessionId,
+      workspaceId: controller.workspaceId,
+      tabId: controller.tabId,
+      paneId: controller.paneId
+    },
+    submittedAt
+  };
+  receipt.effects.decisionRecord = { outcome: "planned", observedAt: submittedAt };
+  writeReceipt(receipt);
+  receipt.effects.decisionRecord = { outcome: "unknown", observedAt: now() };
+  writeReceipt(receipt);
+  try {
+    const confirmed = decisionController(receipt);
+    if (confirmed.sessionId !== controller.sessionId || confirmed.workspaceId !== controller.workspaceId || confirmed.tabId !== controller.tabId || confirmed.paneId !== controller.paneId) {
+      throw new Error("Controller identity changed after the decision checkpoint");
+    }
+  } catch {
+    throw new FrontierError({
+      message: "decision effect is unknown after the bound checkpoint",
+      code: "DECISION_EFFECT_UNKNOWN",
+      runId,
+      state: receipt.state,
+      changedState: "partial",
+      sideEffects: ["operator-decision-maybe-recorded"],
+      retrySafe: false,
+      nextAction: `Run frontier-runner resume --run-id ${runId}; never resubmit the decision file.`
+    });
+  }
+  requireDecisionCandidate(receipt);
+  return decisionRecorded(receipt, "decide");
+}
 function resumeCommand(arguments_) {
   const flags = parseFlags(arguments_, ["--run-id"]);
   const runId = requiredFlag(flags, "--run-id");
@@ -1709,6 +1903,34 @@ function resumeCommand(arguments_) {
       retrySafe: true,
       nextAction: "Use a new unit ID for another run."
     };
+  }
+  if (receipt.state === "decided") {
+    return {
+      schemaVersion,
+      ok: true,
+      command: "resume",
+      code: "DECISION_RECORDED",
+      runId,
+      state: receipt.state,
+      changedState: "none",
+      sideEffects: [],
+      retrySafe: true,
+      nextAction: `The ${receipt.decision?.classification} decision is already recorded. Stop without another action.`
+    };
+  }
+  if (receipt.state === "decision_starting") {
+    const controller = decisionController(receipt);
+    if (controller.sessionId !== receipt.decision?.controller.sessionId || controller.workspaceId !== receipt.decision?.controller.workspaceId || controller.tabId !== receipt.decision?.controller.tabId || controller.paneId !== receipt.decision?.controller.paneId) {
+      throw new FrontierError({
+        message: "current Controller identity conflicts with the checkpointed decision",
+        code: "CONTROLLER_IDENTITY_CONFLICT",
+        runId,
+        state: receipt.state,
+        nextAction: "Resume from the same recognised Controller session; never resubmit the decision."
+      });
+    }
+    requireDecisionCandidate(receipt);
+    return decisionRecorded(receipt, "resume");
   }
   if (receipt.state === "reviewed") {
     return {
@@ -1946,7 +2168,7 @@ if (commandInput === undefined || commandInput === "--help" || commandInput === 
   process.stdout.write(help());
   process.exit(0);
 }
-if (!["run", "respond", "resume", "review", "cleanup"].includes(commandInput))
+if (!["run", "respond", "resume", "review", "decide", "cleanup"].includes(commandInput))
   emitFailure("unknown", new FrontierError({
     message: `unknown command: ${commandInput}`,
     code: "USAGE",
@@ -1955,7 +2177,7 @@ if (!["run", "respond", "resume", "review", "cleanup"].includes(commandInput))
   }));
 var command = commandInput;
 try {
-  const envelope = command === "run" ? runCommand(commandArguments) : command === "respond" ? respondCommand(commandArguments) : command === "resume" ? resumeCommand(commandArguments) : command === "review" ? reviewCommand(commandArguments) : cleanupCommand(commandArguments);
+  const envelope = command === "run" ? runCommand(commandArguments) : command === "respond" ? respondCommand(commandArguments) : command === "resume" ? resumeCommand(commandArguments) : command === "review" ? reviewCommand(commandArguments) : command === "decide" ? decideCommand(commandArguments) : cleanupCommand(commandArguments);
   emit(envelope);
 } catch (error) {
   if (error instanceof FrontierError)

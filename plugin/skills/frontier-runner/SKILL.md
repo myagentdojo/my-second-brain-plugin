@@ -1,6 +1,6 @@
 ---
 name: frontier-runner
-description: "Start Frontier Runner V0 or drive one receipt-backed bounded Codex run in Herdr."
+description: "Start Frontier Runner V0 or drive one receipt-backed bounded Codex run, review, or operator decision in Herdr."
 disable-model-invocation: true
 ---
 
@@ -69,6 +69,25 @@ Continue a timeout or uncertain prompt outcome only with `resume --run-id
 mutation is a terminal review breach. `approve`, `request_changes`, `reject`,
 and `cancelled` are advisory classifications and grant no authority to repair,
 accept, commit, publish, or begin another unit.
+
+## Operator decision
+
+Use `decide` only for one proved, uncleaned run whose receipt-backed review
+verdict is `approve`. Re-resolve the recognised Controller in the run's
+recorded Herdr workspace, tab, and caller pane. Put Nathan's exact decision in
+one owner-private file containing `accepted` or `declined` followed by one
+newline, then invoke once:
+
+```sh
+<plugin-root>/bin/frontier-runner decide \
+  --run-id <id> \
+  --decision-file <private-path>
+```
+
+If the result is unknown, continue only with `resume --run-id <id>`; never
+resubmit or replace the decision file. `accepted` records Nathan's decision
+for the bound run, candidate, and verdict. It grants no repair, cleanup, Git,
+publication, or next-unit authority. `declined` records the decision and stops.
 
 ## Smoke checks
 

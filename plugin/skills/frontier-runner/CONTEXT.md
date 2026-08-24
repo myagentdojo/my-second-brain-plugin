@@ -60,11 +60,18 @@ It is bound to an unchanged candidate workspace digest and is resumed through
 the same recorded identity without prompt replay or replacement.
 _Avoid_: acceptance, repair instruction, second opinion, implementation gate
 
+**Operator decision**:
+One `accepted` or `declined` classification supplied by Nathan through an
+owner-private file after one receipt-backed `approve` verdict. It is bound to
+the run, candidate, verdict, reviewer, recognised Controller, and first
+submission attempt.
+_Avoid_: repair authority, repository acceptance, publication, cleanup, retry
+
 ## Boundary
 
 The V0 shell launcher owns session start and pane-derived editor launch. The
-bounded executable owns one validated run, one optional read-only review
-transition, private receipt, reconciliation, and owned-pane cleanup. Herdr owns
-terminal execution, observed agent state, and opaque identifiers. The user owns
-every human gate. Queueing, acceptance, repair, repository publication, and a
-second unit require another goal.
+bounded executable owns one validated run, one optional read-only review, one
+state-bound Operator decision, private receipt, reconciliation, and owned-pane
+cleanup. Herdr owns terminal execution, observed agent state, and opaque
+identifiers. The user owns every human gate. Queueing, repair, repository
+acceptance, publication, and a second unit require another goal.

@@ -1,8 +1,10 @@
 import {
 	chmodSync,
 	existsSync,
+	lstatSync,
 	mkdirSync,
 	mkdtempSync,
+	readdirSync,
 	readFileSync,
 	rmSync,
 	statSync,
@@ -23,6 +25,7 @@ interface Fixture {
 	workspace: string
 	promptFile: string
 	reviewPromptFile: string
+	decisionFile: string
 	responseFile: string
 	resultFile: string
 	stateHome: string
@@ -33,6 +36,7 @@ interface Fixture {
 	transcript: string
 	reviewTranscript: string
 	currentPaneJson: string
+	currentPaneCount: string
 }
 
 afterEach(() => {
@@ -63,6 +67,7 @@ function fixture(): Fixture {
 	const stateHome = join(fixtureRoot, "state")
 	const promptFile = join(fixtureRoot, "prompt.md")
 	const reviewPromptFile = join(fixtureRoot, "review-prompt.md")
+	const decisionFile = join(fixtureRoot, "decision.txt")
 	const responseFile = join(fixtureRoot, "response.txt")
 	const resultFile = join(workspace, "fixture.txt")
 	const commandLog = join(fixtureRoot, "commands.log")
@@ -71,6 +76,7 @@ function fixture(): Fixture {
 	const splitCount = join(fixtureRoot, "split-count")
 	const transcript = join(fixtureRoot, "transcript.txt")
 	const reviewTranscript = join(fixtureRoot, "review-transcript.txt")
+	const currentPaneCount = join(fixtureRoot, "current-pane-count")
 	mkdirSync(bin)
 	mkdirSync(workspace)
 	writeFileSync(promptFile, "Replace fixture.txt with the requested final bytes. PROMPT_BODY_PRIVATE\n")
@@ -78,6 +84,8 @@ function fixture(): Fixture {
 		mode: 0o600,
 	})
 	chmodSync(reviewPromptFile, 0o600)
+	writeFileSync(decisionFile, "accepted\n", { mode: 0o600 })
+	chmodSync(decisionFile, 0o600)
 	writeFileSync(responseFile, "Proceed once", { mode: 0o600 })
 	chmodSync(responseFile, 0o600)
 	writeFileSync(resultFile, "before\n")
@@ -87,6 +95,7 @@ function fixture(): Fixture {
 	writeFileSync(splitCount, "0\n")
 	writeFileSync(transcript, "")
 	writeFileSync(reviewTranscript, "")
+	writeFileSync(currentPaneCount, "0\n")
 
 	createExecutable(
 		join(bin, "tode"),
@@ -110,6 +119,13 @@ fi
 
 case "\${1:-} \${2:-}" in
 	"pane current")
+		count=$(tr -d '\\n' < "$FR_TEST_CURRENT_PANE_COUNT")
+		count=$((count + 1))
+		printf '%s\n' "$count" > "$FR_TEST_CURRENT_PANE_COUNT"
+		if [[ "$FR_TEST_PROTOCOL_MODE" == "current_second_unknown" && "$count" -ge 2 ]]; then
+			printf '{"id":"cli:pane:current","error":{"code":"socket_closed","message":"unknown"}}\n' >&2
+			exit 1
+		fi
 		printf '%s\n' "$FR_TEST_CURRENT_PANE_JSON"
 		;;
 	"pane split")
@@ -279,6 +295,7 @@ esac
 		workspace,
 		promptFile,
 		reviewPromptFile,
+		decisionFile,
 		responseFile,
 		resultFile,
 		stateHome,
@@ -293,6 +310,13 @@ esac
 			result: {
 				type: "pane_current",
 				pane: {
+					agent: "codex",
+					agent_session: {
+						agent: "codex",
+						kind: "id",
+						source: "herdr:codex",
+						value: "controller-session-1",
+					},
 					pane_id: "w1:p1",
 					terminal_id: "term:w1:p1",
 					workspace_id: "w1",
@@ -304,6 +328,7 @@ esac
 				},
 			},
 		}),
+		currentPaneCount,
 	}
 }
 
@@ -323,6 +348,7 @@ function environment(testFixture: Fixture, overrides: Record<string, string | un
 		FR_TEST_TRANSCRIPT: testFixture.transcript,
 		FR_TEST_REVIEW_TRANSCRIPT: testFixture.reviewTranscript,
 		FR_TEST_CURRENT_PANE_JSON: testFixture.currentPaneJson,
+		FR_TEST_CURRENT_PANE_COUNT: testFixture.currentPaneCount,
 		FR_TEST_WORKSPACE: testFixture.workspace,
 		FR_TEST_RESULT_FILE: testFixture.resultFile,
 		FR_TEST_AFTER_HASH: afterHash,
@@ -377,6 +403,10 @@ function reviewArguments(testFixture: Fixture, runId: string): string[] {
 	return ["review", "--run-id", runId, "--review-prompt-file", testFixture.reviewPromptFile]
 }
 
+function decisionArguments(testFixture: Fixture, runId: string): string[] {
+	return ["decide", "--run-id", runId, "--decision-file", testFixture.decisionFile]
+}
+
 function envelope(result: ReturnType<typeof Bun.spawnSync>): Record<string, unknown> {
 	return JSON.parse(result.stdout.toString()) as Record<string, unknown>
 }
@@ -398,7 +428,44 @@ function completeRun(testFixture: Fixture): string {
 	return runId
 }
 
-test("bundled public executable exposes run, respond, resume, review, and cleanup", () => {
+function completeReview(testFixture: Fixture, verdict = "approve"): string {
+	const runId = completeRun(testFixture)
+	const reviewed = runCli(testFixture, reviewArguments(testFixture, runId), {
+		FR_TEST_REVIEW_TRANSCRIPT_MODE: verdict,
+	})
+	expect(reviewed.exitCode, reviewed.stderr.toString()).toBe(0)
+	return runId
+}
+
+function workspaceSnapshot(rootPath: string): unknown[] {
+	const visit = (path: string, relativePath: string): unknown[] => {
+		const entries = readdirSync(path).sort()
+		return entries.flatMap((entry) => {
+			const absolute = join(path, entry)
+			const relative = relativePath ? `${relativePath}/${entry}` : entry
+			const stats = lstatSync(absolute)
+			if (stats.isDirectory()) {
+				return [
+					{ path: relative, type: "directory", mode: stats.mode & 0o777 },
+					...visit(absolute, relative),
+				]
+			}
+			return [
+				{
+					path: relative,
+					type: stats.isSymbolicLink() ? "symlink" : "file",
+					mode: stats.mode & 0o777,
+					bytes: stats.isSymbolicLink()
+						? undefined
+						: readFileSync(absolute).toString("hex"),
+				},
+			]
+		})
+	}
+	return visit(rootPath, "")
+}
+
+test("bundled public executable exposes run, respond, resume, review, decide, and cleanup", () => {
 	const testFixture = fixture()
 	const result = runCli(testFixture, ["--help"])
 
@@ -407,6 +474,7 @@ test("bundled public executable exposes run, respond, resume, review, and cleanu
 	expect(result.stdout.toString()).toContain("frontier-runner resume")
 	expect(result.stdout.toString()).toContain("frontier-runner respond")
 	expect(result.stdout.toString()).toContain("frontier-runner review")
+	expect(result.stdout.toString()).toContain("frontier-runner decide")
 	expect(result.stdout.toString()).toContain("frontier-runner cleanup")
 })
 
@@ -585,6 +653,201 @@ test("reviewer workspace mutation is a terminal breach and cleanup closes its ow
 	expect(cleaned.exitCode, cleaned.stderr.toString()).toBe(0)
 	expect(readFileSync(testFixture.commandLog, "utf8")).toContain("pane <close> <w1:p5>")
 	expect(readFileSync(testFixture.livePanes, "utf8")).toBe("w1:p1\n")
+})
+
+test("decide records one accepted or declined operator decision bound to the approved candidate", () => {
+	for (const [classification, expectedSha256] of [
+		["accepted", "4825c38ba9e071bc3e19961e7c1bd0c1a2fcc575a5cff7e416d7f7c772597271"],
+		["declined", "168b89cafb455ed7ac8d7d20b07c0aa2d62c9edf4fd1902a5d3c1bb259f4b620"],
+	] as const) {
+		const testFixture = fixture()
+		const runId = completeReview(testFixture)
+		writeFileSync(testFixture.decisionFile, `${classification}\n`, { mode: 0o600 })
+		chmodSync(testFixture.decisionFile, 0o600)
+		const before = workspaceSnapshot(testFixture.workspace)
+
+		const decided = runCli(testFixture, decisionArguments(testFixture, runId))
+
+		expect(decided.exitCode, decided.stderr.toString()).toBe(0)
+		expect(decided.stderr.toString()).toBe("")
+		expect(envelope(decided)).toMatchObject({
+			ok: true,
+			command: "decide",
+			code: "DECISION_RECORDED",
+			runId,
+			state: "decided",
+			changedState: "complete",
+			sideEffects: ["operator-decision"],
+			retrySafe: true,
+		})
+		expect(workspaceSnapshot(testFixture.workspace)).toEqual(before)
+		const receiptText = readFileSync(receiptPath(testFixture, runId), "utf8")
+		const receipt = JSON.parse(receiptText) as {
+			state: string
+			resources: { reviewerName: string }
+			review: { candidateBeforeSha256: string; verdict: string; verdictMarkerSha256: string }
+			decision: {
+				classification: string
+				fileSha256: string
+				submissionAttempt: number
+				runId: string
+				candidateSha256: string
+				reviewerName: string
+				verdict: string
+				verdictMarkerSha256: string
+				controller: {
+					sessionId: string
+					workspaceId: string
+					tabId: string
+					paneId: string
+				}
+			}
+			effects: { decisionRecord: { outcome: string } }
+		}
+		expect(receipt).toMatchObject({
+			state: "decided",
+			decision: {
+				classification,
+				fileSha256: expectedSha256,
+				submissionAttempt: 1,
+				runId,
+				candidateSha256: receipt.review.candidateBeforeSha256,
+				reviewerName: receipt.resources.reviewerName,
+				verdict: "approve",
+				verdictMarkerSha256: receipt.review.verdictMarkerSha256,
+				controller: {
+					sessionId: "controller-session-1",
+					workspaceId: "w1",
+					tabId: "w1:t1",
+					paneId: "w1:p1",
+				},
+			},
+			effects: { decisionRecord: { outcome: "succeeded" } },
+		})
+		expect(receiptText).not.toContain(`${classification}\\n`)
+		expect(statSync(receiptPath(testFixture, runId)).mode & 0o777).toBe(0o600)
+	}
+}, 15_000)
+
+test("decide rejects malformed or non-private decision files before changing the reviewed receipt", () => {
+	for (const [prepare, code] of [
+		[(testFixture: Fixture) => writeFileSync(testFixture.decisionFile, "accepted"), "DECISION_FILE_INVALID"],
+		[(testFixture: Fixture) => writeFileSync(testFixture.decisionFile, "accepted\ndeclined\n"), "DECISION_FILE_INVALID"],
+		[(testFixture: Fixture) => chmodSync(testFixture.decisionFile, 0o644), "DECISION_FILE_NOT_PRIVATE"],
+	] as const) {
+		const testFixture = fixture()
+		const runId = completeReview(testFixture)
+		prepare(testFixture)
+		const before = readFileSync(receiptPath(testFixture, runId), "utf8")
+
+		const decided = runCli(testFixture, decisionArguments(testFixture, runId))
+
+		expect(decided.exitCode, code).toBe(2)
+		expect(envelope(decided)).toMatchObject({ ok: false, command: "decide", code })
+		expect(readFileSync(receiptPath(testFixture, runId), "utf8"), code).toBe(before)
+	}
+}, 15_000)
+
+test("decide fails closed for outside-Herdr, changed, mismatched, and non-approved requests", () => {
+	for (const [prepare, overrides, code] of [
+		[(_: Fixture) => {}, { HERDR_ENV: undefined }, "HERDR_REQUIRED"],
+		[(testFixture: Fixture) => writeFileSync(testFixture.resultFile, "changed after review\n"), {}, "CANDIDATE_CONFLICT"],
+		[(_: Fixture) => {}, { HERDR_PANE_ID: "w1:p9" }, "HERDR_CONTEXT_CONFLICT"],
+	] as const) {
+		const testFixture = fixture()
+		const runId = completeReview(testFixture)
+		prepare(testFixture)
+		const before = readFileSync(receiptPath(testFixture, runId), "utf8")
+		const decided = runCli(testFixture, decisionArguments(testFixture, runId), overrides)
+		expect(decided.exitCode, code).toBe(1)
+		expect(envelope(decided)).toMatchObject({ ok: false, command: "decide", code })
+		expect(readFileSync(receiptPath(testFixture, runId), "utf8"), code).toBe(before)
+	}
+
+	const testFixture = fixture()
+	const runId = completeReview(testFixture, "request_changes")
+	const before = readFileSync(receiptPath(testFixture, runId), "utf8")
+	const decided = runCli(testFixture, decisionArguments(testFixture, runId))
+	expect(decided.exitCode).toBe(1)
+	expect(envelope(decided)).toMatchObject({
+		ok: false,
+		command: "decide",
+		code: "REVIEW_NOT_APPROVED",
+	})
+	expect(readFileSync(receiptPath(testFixture, runId), "utf8")).toBe(before)
+}, 20_000)
+
+test("decide records at most one submission attempt and cannot replace the first decision", () => {
+	const testFixture = fixture()
+	const runId = completeReview(testFixture)
+	const first = runCli(testFixture, decisionArguments(testFixture, runId))
+	expect(first.exitCode, first.stderr.toString()).toBe(0)
+	const before = readFileSync(receiptPath(testFixture, runId), "utf8")
+	writeFileSync(testFixture.decisionFile, "declined\n", { mode: 0o600 })
+	chmodSync(testFixture.decisionFile, 0o600)
+
+	const repeated = runCli(testFixture, decisionArguments(testFixture, runId))
+
+	expect(repeated.exitCode).toBe(1)
+	expect(envelope(repeated)).toMatchObject({
+		ok: false,
+		command: "decide",
+		code: "DECISION_ALREADY_ATTEMPTED",
+	})
+	expect(readFileSync(receiptPath(testFixture, runId), "utf8")).toBe(before)
+})
+
+test("an unknown decision effect resumes the same checkpoint without resubmitting the file", () => {
+	const testFixture = fixture()
+	const runId = completeReview(testFixture)
+	writeFileSync(testFixture.currentPaneCount, "0\n")
+
+	const uncertain = runCli(testFixture, decisionArguments(testFixture, runId), {
+		FR_TEST_PROTOCOL_MODE: "current_second_unknown",
+	})
+
+	expect(uncertain.exitCode).toBe(1)
+	expect(envelope(uncertain)).toMatchObject({
+		ok: false,
+		command: "decide",
+		code: "DECISION_EFFECT_UNKNOWN",
+		state: "decision_starting",
+		retrySafe: false,
+	})
+	const checkpoint = JSON.parse(readFileSync(receiptPath(testFixture, runId), "utf8")) as {
+		state: string
+		decision: { classification: string; fileSha256: string; submissionAttempt: number }
+		effects: { decisionRecord: { outcome: string } }
+	}
+	expect(checkpoint).toMatchObject({
+		state: "decision_starting",
+		decision: {
+			classification: "accepted",
+			fileSha256: "4825c38ba9e071bc3e19961e7c1bd0c1a2fcc575a5cff7e416d7f7c772597271",
+			submissionAttempt: 1,
+		},
+		effects: { decisionRecord: { outcome: "unknown" } },
+	})
+	rmSync(testFixture.decisionFile)
+	writeFileSync(testFixture.currentPaneCount, "0\n")
+
+	const resumed = runCli(testFixture, ["resume", "--run-id", runId])
+
+	expect(resumed.exitCode, resumed.stderr.toString()).toBe(0)
+	expect(envelope(resumed)).toMatchObject({
+		ok: true,
+		command: "resume",
+		code: "DECISION_RECORDED",
+		state: "decided",
+	})
+	const finalReceipt = JSON.parse(readFileSync(receiptPath(testFixture, runId), "utf8")) as {
+		decision: { classification: string; submissionAttempt: number }
+		effects: { decisionRecord: { outcome: string } }
+	}
+	expect(finalReceipt).toMatchObject({
+		decision: { classification: "accepted", submissionAttempt: 1 },
+		effects: { decisionRecord: { outcome: "succeeded" } },
+	})
 })
 
 test("respond rejects a non-private response file before contacting the worker", () => {

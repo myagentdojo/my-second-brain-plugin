@@ -41,6 +41,8 @@ const runStateValues = [
 	"review_unproved",
 	"reviewed",
 	"review_breached",
+	"decision_starting",
+	"decided",
 	"cleanup_pending",
 	"cleaned",
 	"failed",
@@ -63,6 +65,7 @@ const effectNameValues = [
 	"reviewerStart",
 	"reviewPromptDispatch",
 	"reviewWait",
+	"decisionRecord",
 	"reviewerPaneClose",
 	"workerPaneClose",
 	"browserPaneClose",
@@ -71,11 +74,12 @@ const effectNameValues = [
 ] as const
 const effectNames = new Set<string>(effectNameValues)
 
-type CommandName = "run" | "respond" | "resume" | "review" | "cleanup" | "unknown"
+type CommandName = "run" | "respond" | "resume" | "review" | "decide" | "cleanup" | "unknown"
 type EffectOutcome = (typeof effectOutcomeValues)[number]
 type EffectName = (typeof effectNameValues)[number]
 type RunState = (typeof runStateValues)[number]
 type ReviewVerdict = "approve" | "request_changes" | "reject" | "cancelled"
+type DecisionClassification = "accepted" | "declined"
 
 interface EffectRecord {
 	outcome: EffectOutcome
@@ -122,6 +126,24 @@ interface Receipt {
 		verdict?: ReviewVerdict
 		verdictMarkerSha256?: string
 	}
+	decision?: {
+		classification: DecisionClassification
+		fileSha256: string
+		submissionAttempt: 1
+		runId: string
+		candidateSha256: string
+		reviewerName: string
+		verdict: "approve"
+		verdictMarkerSha256: string
+		controller: {
+			sessionId: string
+			workspaceId: string
+			tabId: string
+			paneId: string
+		}
+		submittedAt: string
+		recordedAt?: string
+	}
 	effects: Partial<Record<EffectName, EffectRecord>>
 	observation?: {
 		agentStatus?: string
@@ -152,6 +174,7 @@ interface CurrentPane {
 	workspaceId: string
 	tabId: string
 	foregroundCwd: string
+	sessionId: string
 }
 
 interface AgentObservation {
@@ -215,6 +238,7 @@ Usage:
   frontier-runner respond --run-id ID --response-file PATH
   frontier-runner resume --run-id ID
   frontier-runner review --run-id ID --review-prompt-file PATH
+  frontier-runner decide --run-id ID --decision-file PATH
   frontier-runner cleanup --run-id ID
   frontier-runner --help
 
@@ -223,6 +247,7 @@ Commands:
   respond  Send one exact private-file response to the recorded blocked worker.
   resume   Reconcile the recorded worker after timeout without resending the prompt.
   review   Start one fresh read-only Codex reviewer for one proved run.
+  decide   Record one state-bound accepted or declined operator decision.
   cleanup  Close only the panes recorded as owned by this run.
 
 Output:
@@ -434,6 +459,40 @@ function privateReviewPrompt(path: string): Uint8Array {
 		})
 	}
 	return bytes
+}
+
+function privateDecision(path: string): { classification: DecisionClassification; fileSha256: string } {
+	if (!existsSync(path) || !lstatSync(path).isFile()) {
+		throw new FrontierError({
+			message: "decision file is not an existing non-symlink regular file",
+			code: "DECISION_FILE_INVALID",
+			exitCode: 2,
+			nextAction: "Write exactly accepted or declined followed by one newline to a private regular file.",
+		})
+	}
+	const mode = statSync(path).mode & 0o777
+	if ((mode & 0o077) !== 0 || (mode & 0o400) === 0) {
+		throw new FrontierError({
+			message: "decision file permissions expose it beyond the owner",
+			code: "DECISION_FILE_NOT_PRIVATE",
+			exitCode: 2,
+			nextAction: "Set the decision file to owner-only permissions, such as mode 0600.",
+		})
+	}
+	const bytes = readFileSync(path)
+	const text = bytes.toString()
+	if (text !== "accepted\n" && text !== "declined\n") {
+		throw new FrontierError({
+			message: "decision file must contain exactly accepted or declined followed by one newline",
+			code: "DECISION_FILE_INVALID",
+			exitCode: 2,
+			nextAction: "Replace the file with exactly accepted or declined followed by one trailing newline.",
+		})
+	}
+	return {
+		classification: text.slice(0, -1) as DecisionClassification,
+		fileSha256: sha256(bytes),
+	}
 }
 
 function workspaceSha256(workspace: string): string {
@@ -732,11 +791,23 @@ function currentPane(workspace: string): CurrentPane {
 	const workspaceId = stringField(pane, "workspace_id")
 	const tabId = stringField(pane, "tab_id")
 	const foregroundCwd = stringField(pane, "foreground_cwd")
-	if (!paneId || !workspaceId || !tabId || !foregroundCwd) {
+	const agentSession = jsonObject(pane?.agent_session)
+	const sessionId = stringField(agentSession, "value")
+	if (
+		!paneId ||
+		!workspaceId ||
+		!tabId ||
+		!foregroundCwd ||
+		stringField(pane, "agent") !== "codex" ||
+		stringField(agentSession, "agent") !== "codex" ||
+		stringField(agentSession, "kind") !== "id" ||
+		stringField(agentSession, "source") !== "herdr:codex" ||
+		!sessionId
+	) {
 		throw new FrontierError({
-			message: "Herdr current pane omitted required identifiers or foreground cwd",
+			message: "Herdr current pane omitted the recognised Codex Controller identity or pane context",
 			code: "HERDR_CURRENT_INVALID",
-			nextAction: "Use a pane whose foreground process cwd Herdr can resolve.",
+			nextAction: "Use a recognised Codex Controller pane whose identity and foreground cwd Herdr can resolve.",
 		})
 	}
 	if (paneId !== process.env.HERDR_PANE_ID) {
@@ -761,7 +832,7 @@ function currentPane(workspace: string): CurrentPane {
 			nextAction: "Invoke from a pane whose foreground cwd is the explicitly granted workspace.",
 		})
 	}
-	return { paneId, workspaceId, tabId, foregroundCwd: workspace }
+	return { paneId, workspaceId, tabId, foregroundCwd: workspace, sessionId }
 }
 
 function stateRoot(): string {
@@ -950,11 +1021,35 @@ function reviewRecordValid(receipt: Receipt): boolean {
 	)
 }
 
+function decisionRecordValid(receipt: Receipt): boolean {
+	const decision = receipt.decision
+	const review = receipt.review
+	if (!decision || !review) return false
+	return Boolean(
+		["accepted", "declined"].includes(decision.classification) &&
+			sha256Pattern.test(decision.fileSha256) &&
+			decision.submissionAttempt === 1 &&
+			decision.runId === receipt.runId &&
+			decision.candidateSha256 === review.candidateBeforeSha256 &&
+			decision.candidateSha256 === review.candidateAfterSha256 &&
+			decision.reviewerName === receipt.resources.reviewerName &&
+			decision.verdict === "approve" &&
+			review.verdict === "approve" &&
+			decision.verdictMarkerSha256 === review.verdictMarkerSha256 &&
+			decision.controller.workspaceId === receipt.workspace.workspaceId &&
+			decision.controller.tabId === receipt.workspace.tabId &&
+			decision.controller.paneId === receipt.workspace.callerPaneId &&
+			decision.controller.sessionId.length > 0 &&
+			decision.submittedAt.length > 0,
+	)
+}
+
 function receiptStateInvariants(receipt: Receipt): boolean {
 	if (!initialEffectNames.every((effect) => receipt.effects[effect] !== undefined)) return false
 	if (!splitResourceInvariants(receipt)) return false
 	if (!responseEffectValid(receipt)) return false
 	if (receipt.review && !reviewRecordValid(receipt)) return false
+	if (receipt.decision && !decisionRecordValid(receipt)) return false
 
 	if (receipt.state === "prepared") {
 		return (
@@ -1023,6 +1118,16 @@ function receiptStateInvariants(receipt: Receipt): boolean {
 		}
 		return !receipt.review?.verdict
 	}
+	if (receipt.state === "decision_starting" || receipt.state === "decided") {
+		if (!decisionRecordValid(receipt)) return false
+		if (receipt.state === "decision_starting") {
+			return (
+				!receipt.decision?.recordedAt &&
+				effectIs(receipt, "decisionRecord", "planned", "unknown")
+			)
+		}
+		return Boolean(receipt.decision?.recordedAt && effectIs(receipt, "decisionRecord", "succeeded"))
+	}
 	if (receipt.state === "cleanup_pending" || receipt.state === "cleaned") {
 		for (const splitEffect of ["editorPane", "browserPane", "workerPane"] as const) {
 			if (effectIs(receipt, splitEffect, "unknown")) return false
@@ -1049,6 +1154,8 @@ function isReceipt(value: unknown): value is Receipt {
 	const resources = jsonObject(receipt?.resources)
 	const response = jsonObject(receipt?.response)
 	const review = jsonObject(receipt?.review)
+	const decision = jsonObject(receipt?.decision)
+	const controller = jsonObject(decision?.controller)
 	const effects = jsonObject(receipt?.effects)
 	if (
 		receipt?.schemaVersion !== receiptSchemaVersion ||
@@ -1073,6 +1180,21 @@ function isReceipt(value: unknown): value is Receipt {
 		!stringField(resources, "workerName") ||
 		(receipt?.response !== undefined && !sha256Pattern.test(stringField(response, "sha256") ?? "")) ||
 		(receipt?.review !== undefined && !review) ||
+		(receipt?.decision !== undefined &&
+			(!decision ||
+				!controller ||
+				!sha256Pattern.test(stringField(decision, "fileSha256") ?? "") ||
+				decision.submissionAttempt !== 1 ||
+				!stringField(decision, "runId") ||
+				!stringField(decision, "candidateSha256") ||
+				!stringField(decision, "reviewerName") ||
+				!stringField(decision, "verdict") ||
+				!stringField(decision, "verdictMarkerSha256") ||
+				!stringField(controller, "sessionId") ||
+				!stringField(controller, "workspaceId") ||
+				!stringField(controller, "tabId") ||
+				!stringField(controller, "paneId") ||
+				!stringField(decision, "submittedAt"))) ||
 		!effects
 	) {
 		return false
@@ -2049,6 +2171,151 @@ function reviewCommand(arguments_: string[]): ResultEnvelope {
 	}
 }
 
+function decisionController(receipt: Receipt): CurrentPane {
+	const controller = currentPane(receipt.workspace.path)
+	if (controller.paneId !== receipt.workspace.callerPaneId) {
+		throw new FrontierError({
+			message: "current Controller pane conflicts with the run's recorded caller pane",
+			code: "CONTROLLER_IDENTITY_CONFLICT",
+			runId: receipt.runId,
+			state: receipt.state,
+			nextAction: "Invoke the decision from the original recognised Controller pane recorded by the run.",
+		})
+	}
+	return controller
+}
+
+function requireDecisionCandidate(receipt: Receipt): void {
+	const resultFile = canonicalResultFile(receipt.workspace.path, receipt.inputs.resultFile)
+	if (
+		sha256(readFileSync(resultFile.path)) !== receipt.observation?.resultSha256 ||
+		workspaceSha256(receipt.workspace.path) !== receipt.review?.candidateAfterSha256
+	) {
+		throw new FrontierError({
+			message: "candidate workspace bytes conflict with the approved review receipt",
+			code: "CANDIDATE_CONFLICT",
+			runId: receipt.runId,
+			state: receipt.state,
+			nextAction: "Restore the exact approved disposable candidate; do not retarget this decision.",
+		})
+	}
+}
+
+function decisionRecorded(receipt: Receipt, command: "decide" | "resume"): ResultEnvelope {
+	receipt.state = "decided"
+	receipt.decision!.recordedAt = now()
+	receipt.effects.decisionRecord = { outcome: "succeeded", observedAt: now() }
+	writeReceipt(receipt)
+	return {
+		schemaVersion,
+		ok: true,
+		command,
+		code: "DECISION_RECORDED",
+		runId: receipt.runId,
+		state: receipt.state,
+		changedState: "complete",
+		sideEffects: ["operator-decision"],
+		retrySafe: true,
+		nextAction: `The ${receipt.decision?.classification} decision is recorded. Stop without repair, cleanup, Git, publication, or another unit.`,
+	}
+}
+
+function decideCommand(arguments_: string[]): ResultEnvelope {
+	const flags = parseFlags(arguments_, ["--run-id", "--decision-file"])
+	const runId = requiredFlag(flags, "--run-id")
+	const input = privateDecision(requiredFlag(flags, "--decision-file"))
+	const receipt = readReceipt(runId)
+	if (receipt.decision || receipt.effects.decisionRecord) {
+		throw new FrontierError({
+			message: "this run already has one recorded decision attempt",
+			code: "DECISION_ALREADY_ATTEMPTED",
+			runId,
+			state: receipt.state,
+			nextAction: `Run frontier-runner resume --run-id ${runId}; never replace or retarget the first decision.`,
+		})
+	}
+	validateReceiptContext(receipt)
+	if (receipt.state !== "reviewed") {
+		throw new FrontierError({
+			message: `only one proved, uncleaned reviewed run can receive a decision: ${receipt.state}`,
+			code: "DECISION_NOT_AVAILABLE",
+			runId,
+			state: receipt.state,
+			nextAction: "Complete and prove the existing run and review before requesting a decision.",
+		})
+	}
+	if (receipt.review?.verdict !== "approve" || !receipt.review.verdictMarkerSha256) {
+		throw new FrontierError({
+			message: `operator decision requires advisory approve, not ${receipt.review?.verdict ?? "missing"}`,
+			code: "REVIEW_NOT_APPROVED",
+			runId,
+			state: receipt.state,
+			nextAction: "Stop without acceptance or repair; this review did not approve the candidate.",
+		})
+	}
+	const uncertainEffect = unknownEffect(receipt)
+	if (uncertainEffect) {
+		throw new FrontierError({
+			message: `receipt contains an unknown external effect: ${uncertainEffect}`,
+			code: "EFFECT_UNKNOWN",
+			runId,
+			state: receipt.state,
+			nextAction: "Resolve the existing effect before decision; do not submit a decision.",
+		})
+	}
+	reconcileRunPanes(receipt)
+	reviewerObservation(receipt)
+	requireDecisionCandidate(receipt)
+	const controller = decisionController(receipt)
+	const submittedAt = now()
+	receipt.state = "decision_starting"
+	receipt.decision = {
+		classification: input.classification,
+		fileSha256: input.fileSha256,
+		submissionAttempt: 1,
+		runId,
+		candidateSha256: receipt.review.candidateBeforeSha256,
+		reviewerName: receipt.resources.reviewerName!,
+		verdict: "approve",
+		verdictMarkerSha256: receipt.review.verdictMarkerSha256,
+		controller: {
+			sessionId: controller.sessionId,
+			workspaceId: controller.workspaceId,
+			tabId: controller.tabId,
+			paneId: controller.paneId,
+		},
+		submittedAt,
+	}
+	receipt.effects.decisionRecord = { outcome: "planned", observedAt: submittedAt }
+	writeReceipt(receipt)
+	receipt.effects.decisionRecord = { outcome: "unknown", observedAt: now() }
+	writeReceipt(receipt)
+	try {
+		const confirmed = decisionController(receipt)
+		if (
+			confirmed.sessionId !== controller.sessionId ||
+			confirmed.workspaceId !== controller.workspaceId ||
+			confirmed.tabId !== controller.tabId ||
+			confirmed.paneId !== controller.paneId
+		) {
+			throw new Error("Controller identity changed after the decision checkpoint")
+		}
+	} catch {
+		throw new FrontierError({
+			message: "decision effect is unknown after the bound checkpoint",
+			code: "DECISION_EFFECT_UNKNOWN",
+			runId,
+			state: receipt.state,
+			changedState: "partial",
+			sideEffects: ["operator-decision-maybe-recorded"],
+			retrySafe: false,
+			nextAction: `Run frontier-runner resume --run-id ${runId}; never resubmit the decision file.`,
+		})
+	}
+	requireDecisionCandidate(receipt)
+	return decisionRecorded(receipt, "decide")
+}
+
 function resumeCommand(arguments_: string[]): ResultEnvelope {
 	const flags = parseFlags(arguments_, ["--run-id"])
 	const runId = requiredFlag(flags, "--run-id")
@@ -2067,6 +2334,39 @@ function resumeCommand(arguments_: string[]): ResultEnvelope {
 			retrySafe: true,
 			nextAction: "Use a new unit ID for another run.",
 		}
+	}
+	if (receipt.state === "decided") {
+		return {
+			schemaVersion,
+			ok: true,
+			command: "resume",
+			code: "DECISION_RECORDED",
+			runId,
+			state: receipt.state,
+			changedState: "none",
+			sideEffects: [],
+			retrySafe: true,
+			nextAction: `The ${receipt.decision?.classification} decision is already recorded. Stop without another action.`,
+		}
+	}
+	if (receipt.state === "decision_starting") {
+		const controller = decisionController(receipt)
+		if (
+			controller.sessionId !== receipt.decision?.controller.sessionId ||
+			controller.workspaceId !== receipt.decision?.controller.workspaceId ||
+			controller.tabId !== receipt.decision?.controller.tabId ||
+			controller.paneId !== receipt.decision?.controller.paneId
+		) {
+			throw new FrontierError({
+				message: "current Controller identity conflicts with the checkpointed decision",
+				code: "CONTROLLER_IDENTITY_CONFLICT",
+				runId,
+				state: receipt.state,
+				nextAction: "Resume from the same recognised Controller session; never resubmit the decision.",
+			})
+		}
+		requireDecisionCandidate(receipt)
+		return decisionRecorded(receipt, "resume")
 	}
 	if (receipt.state === "reviewed") {
 		return {
@@ -2319,7 +2619,7 @@ if (commandInput === undefined || commandInput === "--help" || commandInput === 
 	process.stdout.write(help())
 	process.exit(0)
 }
-if (!["run", "respond", "resume", "review", "cleanup"].includes(commandInput))
+if (!["run", "respond", "resume", "review", "decide", "cleanup"].includes(commandInput))
 	emitFailure(
 		"unknown",
 		new FrontierError({
@@ -2340,7 +2640,9 @@ try {
 					? resumeCommand(commandArguments)
 					: command === "review"
 						? reviewCommand(commandArguments)
-						: cleanupCommand(commandArguments)
+						: command === "decide"
+							? decideCommand(commandArguments)
+							: cleanupCommand(commandArguments)
 	emit(envelope)
 } catch (error) {
 	if (error instanceof FrontierError) emitFailure(command, error)
