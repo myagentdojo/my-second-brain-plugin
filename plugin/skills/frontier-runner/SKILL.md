@@ -48,6 +48,28 @@ Stop at `blocked`, `unknown`, identity conflict, unknown effect, trust,
 permission, or approval state. Show the named repair path and leave the visible
 decision to the user.
 
+## Review verdict
+
+Use `review` only for an existing `completed` bounded-run receipt that has not
+been cleaned or reviewed. The caller must remain in the recorded Herdr
+workspace and tab. Put the bounded review instructions in one owner-private
+file, then invoke exactly once:
+
+```sh
+<plugin-root>/bin/frontier-runner review \
+  --run-id <id> \
+  --review-prompt-file <private-path>
+```
+
+The transition starts one distinct Codex reviewer with `--sandbox read-only`,
+binds its advisory verdict to a before-and-after candidate workspace digest,
+and persists hashes, identities, effect classifications, and the verdict only.
+Continue a timeout or uncertain prompt outcome only with `resume --run-id
+<id>`; never repeat `review` or start a replacement reviewer. A workspace
+mutation is a terminal review breach. `approve`, `request_changes`, `reject`,
+and `cancelled` are advisory classifications and grant no authority to repair,
+accept, commit, publish, or begin another unit.
+
 ## Smoke checks
 
 ```sh

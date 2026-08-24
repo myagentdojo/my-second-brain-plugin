@@ -49,14 +49,22 @@ in worker readback. The full marker is absent from the submitted prompt.
 _Avoid_: terminal idle as completion, echoed input as proof
 
 **Owned pane**:
-A Terminal Code, terminal Chromium, or Codex pane whose opaque ID came from this
-run's Herdr split response and was checkpointed in its receipt.
+A Terminal Code, terminal Chromium, worker, or reviewer pane whose opaque ID
+came from this run's Herdr split response and was checkpointed in its receipt.
 _Avoid_: focused pane, inferred sidebar position, unrelated operator pane
+
+**Review verdict**:
+One independently generated advisory classification from one fresh, distinct
+Codex reviewer started with a read-only sandbox after the bounded run is proved.
+It is bound to an unchanged candidate workspace digest and is resumed through
+the same recorded identity without prompt replay or replacement.
+_Avoid_: acceptance, repair instruction, second opinion, implementation gate
 
 ## Boundary
 
 The V0 shell launcher owns session start and pane-derived editor launch. The
-bounded executable owns one validated run, private receipt, reconciliation, and
-owned-pane cleanup. Herdr owns terminal execution, observed agent state, and
-opaque identifiers. The user owns every human gate. Queueing, review,
-acceptance, repository publication, and a second unit require another goal.
+bounded executable owns one validated run, one optional read-only review
+transition, private receipt, reconciliation, and owned-pane cleanup. Herdr owns
+terminal execution, observed agent state, and opaque identifiers. The user owns
+every human gate. Queueing, acceptance, repair, repository publication, and a
+second unit require another goal.

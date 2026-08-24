@@ -5,7 +5,9 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
+  readlinkSync,
   realpathSync,
   renameSync,
   rmSync,
@@ -35,6 +37,11 @@ var runStateValues = [
   "responded",
   "settled_unproved",
   "completed",
+  "review_starting",
+  "review_timed_out",
+  "review_unproved",
+  "reviewed",
+  "review_breached",
   "cleanup_pending",
   "cleaned",
   "failed"
@@ -53,6 +60,11 @@ var effectNameValues = [
   ...initialEffectNames,
   "responseDispatch",
   "resumeWait",
+  "reviewerPane",
+  "reviewerStart",
+  "reviewPromptDispatch",
+  "reviewWait",
+  "reviewerPaneClose",
   "workerPaneClose",
   "browserPaneClose",
   "editorPaneClose",
@@ -90,6 +102,7 @@ Usage:
     --timeout-ms MS --browser-url URL --result-file RELATIVE_PATH
   frontier-runner respond --run-id ID --response-file PATH
   frontier-runner resume --run-id ID
+  frontier-runner review --run-id ID --review-prompt-file PATH
   frontier-runner cleanup --run-id ID
   frontier-runner --help
 
@@ -97,6 +110,7 @@ Commands:
   run      Create one Terminal Code pane, one Chromium pane, and one Codex worker.
   respond  Send one exact private-file response to the recorded blocked worker.
   resume   Reconcile the recorded worker after timeout without resending the prompt.
+  review   Start one fresh read-only Codex reviewer for one proved run.
   cleanup  Close only the panes recorded as owned by this run.
 
 Output:
@@ -267,6 +281,63 @@ function promptBytes(path) {
     });
   }
   return bytes;
+}
+function privateReviewPrompt(path) {
+  if (!existsSync(path) || !lstatSync(path).isFile()) {
+    throw new FrontierError({
+      message: "review prompt is not an existing non-symlink regular file",
+      code: "REVIEW_PROMPT_INVALID",
+      exitCode: 2,
+      nextAction: "Write the bounded review prompt to one private regular file."
+    });
+  }
+  const mode = statSync(path).mode & 511;
+  if ((mode & 63) !== 0 || (mode & 256) === 0) {
+    throw new FrontierError({
+      message: "review prompt permissions expose it beyond the owner",
+      code: "REVIEW_PROMPT_NOT_PRIVATE",
+      exitCode: 2,
+      nextAction: "Set the review prompt file to owner-only permissions, such as mode 0600."
+    });
+  }
+  const bytes = readFileSync(path);
+  if (bytes.length === 0 || bytes.length > maximumPromptBytes) {
+    throw new FrontierError({
+      message: `review prompt must contain 1 to ${maximumPromptBytes} bytes`,
+      code: "REVIEW_PROMPT_INVALID",
+      exitCode: 2,
+      nextAction: "Use one non-empty bounded review prompt no larger than 32 KiB."
+    });
+  }
+  return bytes;
+}
+function workspaceSha256(workspace) {
+  const hash = createHash("sha256");
+  const visit = (directory, prefix) => {
+    for (const name of readdirSync(directory).sort()) {
+      const path = join(directory, name);
+      const relativePath = prefix ? `${prefix}/${name}` : name;
+      const stat = lstatSync(path);
+      if (stat.isDirectory()) {
+        hash.update(`directory\x00${relativePath}\x00`);
+        visit(path, relativePath);
+      } else if (stat.isFile()) {
+        hash.update(`file\x00${relativePath}\x00`);
+        hash.update(readFileSync(path));
+        hash.update("\x00");
+      } else if (stat.isSymbolicLink()) {
+        hash.update(`symlink\x00${relativePath}\x00${readlinkSync(path)}\x00`);
+      } else {
+        throw new FrontierError({
+          message: `workspace contains an unsupported filesystem entry: ${relativePath}`,
+          code: "CANDIDATE_INVALID",
+          nextAction: "Remove sockets or other special files from the disposable candidate workspace."
+        });
+      }
+    }
+  };
+  visit(workspace, "");
+  return hash.digest("hex");
 }
 function responseInput(path) {
   if (!existsSync(path) || !lstatSync(path).isFile()) {
@@ -473,6 +544,10 @@ function responseAgentMatches(response, receipt) {
   const agent = jsonObject(response?.agent);
   return Boolean(receipt.resources.workerPaneId && stringField(agent, "name") === receipt.resources.workerName && stringField(agent, "pane_id") === receipt.resources.workerPaneId && stringField(agent, "workspace_id") === receipt.workspace.workspaceId && stringField(agent, "tab_id") === receipt.workspace.tabId);
 }
+function responseReviewerMatches(response, receipt) {
+  const agent = jsonObject(response?.agent);
+  return Boolean(receipt.resources.reviewerName && receipt.resources.reviewerPaneId && stringField(agent, "name") === receipt.resources.reviewerName && stringField(agent, "pane_id") === receipt.resources.reviewerPaneId && stringField(agent, "workspace_id") === receipt.workspace.workspaceId && stringField(agent, "tab_id") === receipt.workspace.tabId);
+}
 function currentPane(workspace) {
   const json = requireHerdrSuccess(runHerdr(["pane", "current", "--current"], workspace), "HERDR_CURRENT_FAILED", "Run herdr pane current --current and repair the current session before retrying.");
   const result = jsonObject(json.result);
@@ -643,12 +718,26 @@ function responseEffectValid(receipt) {
     return true;
   return Boolean(receipt.response && sha256Pattern.test(receipt.response.sha256) && effect && effect.outcome !== "planned");
 }
+function completedObservationValid(receipt) {
+  const resultSha256 = receipt.observation?.resultSha256 ?? "";
+  return completedRunEffects(receipt) && completedStatuses.has(receipt.observation?.agentStatus ?? "") && sha256Pattern.test(resultSha256) && resultSha256 !== receipt.inputs.resultBeforeSha256 && receipt.observation?.resultMarkerSha256 === sha256(`frontier-result:${resultSha256}`);
+}
+function reviewRecordValid(receipt) {
+  if (!receipt.review)
+    return false;
+  if (!sha256Pattern.test(receipt.review.promptSha256) || !sha256Pattern.test(receipt.review.candidateBeforeSha256) || receipt.review.candidateAfterSha256 !== undefined && !sha256Pattern.test(receipt.review.candidateAfterSha256) || receipt.review.verdictMarkerSha256 !== undefined && !sha256Pattern.test(receipt.review.verdictMarkerSha256) || receipt.review.verdict !== undefined && !["approve", "request_changes", "reject", "cancelled"].includes(receipt.review.verdict)) {
+    return false;
+  }
+  return Boolean(receipt.resources.reviewerName && completedObservationValid(receipt) && receipt.effects.reviewerPane && receipt.effects.reviewerStart && receipt.effects.reviewPromptDispatch);
+}
 function receiptStateInvariants(receipt) {
   if (!initialEffectNames.every((effect) => receipt.effects[effect] !== undefined))
     return false;
   if (!splitResourceInvariants(receipt))
     return false;
   if (!responseEffectValid(receipt))
+    return false;
+  if (receipt.review && !reviewRecordValid(receipt))
     return false;
   if (receipt.state === "prepared") {
     return !receiptHasRunResources(receipt) && !receipt.response && !receipt.effects.responseDispatch && initialEffectNames.every((effect) => effectIs(receipt, effect, "planned"));
@@ -668,8 +757,18 @@ function receiptStateInvariants(receipt) {
     return completedRunEffects(receipt) && completedStatuses.has(receipt.observation?.agentStatus ?? "") && sha256Pattern.test(receipt.observation?.resultSha256 ?? "") && receipt.observation?.resultMarkerSha256 === undefined;
   }
   if (receipt.state === "completed") {
-    const resultSha256 = receipt.observation?.resultSha256 ?? "";
-    return completedRunEffects(receipt) && completedStatuses.has(receipt.observation?.agentStatus ?? "") && sha256Pattern.test(resultSha256) && resultSha256 !== receipt.inputs.resultBeforeSha256 && receipt.observation?.resultMarkerSha256 === sha256(`frontier-result:${resultSha256}`);
+    return completedObservationValid(receipt) && !receipt.review;
+  }
+  if (receipt.state === "review_starting" || receipt.state === "review_timed_out" || receipt.state === "review_unproved" || receipt.state === "reviewed" || receipt.state === "review_breached") {
+    if (!reviewRecordValid(receipt))
+      return false;
+    if (receipt.state === "reviewed") {
+      return Boolean(receipt.review?.verdict && receipt.review.verdictMarkerSha256 && receipt.review.candidateAfterSha256 === receipt.review.candidateBeforeSha256);
+    }
+    if (receipt.state === "review_breached") {
+      return Boolean(receipt.review?.candidateAfterSha256 && receipt.review.candidateAfterSha256 !== receipt.review.candidateBeforeSha256 && !receipt.review.verdict);
+    }
+    return !receipt.review?.verdict;
   }
   if (receipt.state === "cleanup_pending" || receipt.state === "cleaned") {
     for (const splitEffect of ["editorPane", "browserPane", "workerPane"]) {
@@ -683,7 +782,8 @@ function receiptStateInvariants(receipt) {
     for (const [resource, closeEffect] of [
       ["editorPaneId", "editorPaneClose"],
       ["browserPaneId", "browserPaneClose"],
-      ["workerPaneId", "workerPaneClose"]
+      ["workerPaneId", "workerPaneClose"],
+      ["reviewerPaneId", "reviewerPaneClose"]
     ]) {
       if (receipt.resources[resource] && !effectIs(receipt, closeEffect, "succeeded"))
         return false;
@@ -698,13 +798,14 @@ function isReceipt(value) {
   const inputs = jsonObject(receipt?.inputs);
   const resources = jsonObject(receipt?.resources);
   const response = jsonObject(receipt?.response);
+  const review = jsonObject(receipt?.review);
   const effects = jsonObject(receipt?.effects);
-  if (receipt?.schemaVersion !== receiptSchemaVersion || !runIdPattern.test(stringField(receipt, "runId") ?? "") || !unitIdPattern.test(stringField(receipt, "unitId") ?? "") || !sha256Pattern.test(stringField(receipt, "requestHash") ?? "") || !runStates.has(stringField(receipt, "state") ?? "") || !stringField(receipt, "createdAt") || !stringField(receipt, "updatedAt") || !stringField(workspace, "path") || !stringField(workspace, "workspaceId") || !stringField(workspace, "tabId") || !stringField(workspace, "callerPaneId") || !sha256Pattern.test(stringField(inputs, "promptSha256") ?? "") || !sha256Pattern.test(stringField(inputs, "browserUrlSha256") ?? "") || !isSafeRelativeResultPath(stringField(inputs, "resultFile") ?? "") || !sha256Pattern.test(stringField(inputs, "resultBeforeSha256") ?? "") || typeof inputs?.timeoutMs !== "number" || !Number.isSafeInteger(inputs.timeoutMs) || inputs.timeoutMs < 1 || inputs.timeoutMs > 3600000 || !stringField(resources, "workerName") || receipt?.response !== undefined && !sha256Pattern.test(stringField(response, "sha256") ?? "") || !effects) {
+  if (receipt?.schemaVersion !== receiptSchemaVersion || !runIdPattern.test(stringField(receipt, "runId") ?? "") || !unitIdPattern.test(stringField(receipt, "unitId") ?? "") || !sha256Pattern.test(stringField(receipt, "requestHash") ?? "") || !runStates.has(stringField(receipt, "state") ?? "") || !stringField(receipt, "createdAt") || !stringField(receipt, "updatedAt") || !stringField(workspace, "path") || !stringField(workspace, "workspaceId") || !stringField(workspace, "tabId") || !stringField(workspace, "callerPaneId") || !sha256Pattern.test(stringField(inputs, "promptSha256") ?? "") || !sha256Pattern.test(stringField(inputs, "browserUrlSha256") ?? "") || !isSafeRelativeResultPath(stringField(inputs, "resultFile") ?? "") || !sha256Pattern.test(stringField(inputs, "resultBeforeSha256") ?? "") || typeof inputs?.timeoutMs !== "number" || !Number.isSafeInteger(inputs.timeoutMs) || inputs.timeoutMs < 1 || inputs.timeoutMs > 3600000 || !stringField(resources, "workerName") || receipt?.response !== undefined && !sha256Pattern.test(stringField(response, "sha256") ?? "") || receipt?.review !== undefined && !review || !effects) {
     return false;
   }
   if (!resources || !effects)
     return false;
-  for (const paneField of ["editorPaneId", "browserPaneId", "workerPaneId"]) {
+  for (const paneField of ["editorPaneId", "browserPaneId", "workerPaneId", "reviewerPaneId"]) {
     const paneId = resources[paneField];
     if (paneId !== undefined && (typeof paneId !== "string" || paneId.length === 0))
       return false;
@@ -726,7 +827,8 @@ function recordEffect(receipt, effect, outcome, code) {
   writeReceipt(receipt);
 }
 function splitPane(receipt, effect, resource, sourcePaneId, direction) {
-  receipt.state = "starting";
+  if (receipt.state !== "review_starting")
+    receipt.state = "starting";
   recordEffect(receipt, effect, "unknown");
   const result = runHerdr(["pane", "split", sourcePaneId, "--direction", direction, "--cwd", receipt.workspace.path, "--no-focus"], receipt.workspace.path);
   const response = herdrResponseResult(result, "pane_info");
@@ -750,7 +852,8 @@ function splitPane(receipt, effect, resource, sourcePaneId, direction) {
     sourcePaneId,
     receipt.resources.editorPaneId,
     receipt.resources.browserPaneId,
-    receipt.resources.workerPaneId
+    receipt.resources.workerPaneId,
+    receipt.resources.reviewerPaneId
   ]);
   if (!paneId || forbiddenPaneIds.has(paneId)) {
     throw new FrontierError({
@@ -1285,6 +1388,309 @@ function respondCommand(arguments_) {
     nextAction: `Run frontier-runner resume --run-id ${runId}; do not repeat respond.`
   });
 }
+function reviewerObservation(receipt) {
+  const reviewerName = receipt.resources.reviewerName;
+  if (!reviewerName || !receipt.resources.reviewerPaneId) {
+    throw new FrontierError({
+      message: "receipt has no confirmed reviewer identity",
+      code: "REVIEWER_IDENTITY_LOST",
+      runId: receipt.runId,
+      state: receipt.state,
+      nextAction: "Inspect the private receipt and Herdr layout; do not create a replacement reviewer."
+    });
+  }
+  const result = runHerdr(["agent", "get", reviewerName], receipt.workspace.path);
+  const response = herdrResponseResult(result, "agent_info");
+  if (!responseReviewerMatches(response, receipt)) {
+    throw new FrontierError({
+      message: "Herdr returned a reviewer observation for a missing or conflicting identity",
+      code: "REVIEWER_IDENTITY_CONFLICT",
+      runId: receipt.runId,
+      state: receipt.state,
+      nextAction: "Inspect the recorded reviewer and receipt; do not prompt or replace it."
+    });
+  }
+  const agent = jsonObject(response.agent);
+  const status = stringField(agent, "agent_status");
+  if (!status || !agentStatuses.has(status)) {
+    throw new FrontierError({
+      message: "Herdr returned an unsupported reviewer state",
+      code: "HERDR_PROTOCOL_INVALID",
+      runId: receipt.runId,
+      state: receipt.state,
+      nextAction: "Inspect herdr agent get output and verify client/server compatibility."
+    });
+  }
+  return { paneId: receipt.resources.reviewerPaneId, status };
+}
+function waitForReviewer(receipt) {
+  const result = runHerdr(["agent", "wait", receipt.resources.reviewerName, "--timeout", String(receipt.inputs.timeoutMs)], receipt.workspace.path);
+  if (result.exitCode !== 0) {
+    if (result.errorCode === "timeout") {
+      receipt.state = "review_timed_out";
+      recordEffect(receipt, "reviewWait", "timed_out", result.errorCode);
+      throw new FrontierError({
+        message: "recorded reviewer has not settled within the resume timeout",
+        code: "REVIEW_TIMEOUT",
+        exitCode: 124,
+        runId: receipt.runId,
+        state: receipt.state,
+        retrySafe: true,
+        nextAction: `Run frontier-runner resume --run-id ${receipt.runId}; the review prompt will not be resent.`
+      });
+    }
+    throw new FrontierError({
+      message: `reviewer wait failed${result.errorCode ? `: ${result.errorCode}` : ""}`,
+      code: "REVIEWER_WAIT_FAILED",
+      runId: receipt.runId,
+      state: receipt.state,
+      nextAction: `Inspect ${receipt.resources.reviewerName}; do not create a replacement reviewer.`
+    });
+  }
+  recordEffect(receipt, "reviewWait", "succeeded");
+  return reviewerObservation(receipt);
+}
+function reviewMarkers(readback) {
+  const prefix = "frontier-review:";
+  const lines = readback.split(/\r?\n/);
+  const markers = [];
+  for (let index = 0;index < lines.length; index += 1) {
+    const first = (lines[index] ?? "").trim();
+    if (!first.startsWith(prefix))
+      continue;
+    let jsonText = first.slice(prefix.length);
+    for (let end = index;end < Math.min(lines.length, index + 24); end += 1) {
+      if (end > index)
+        jsonText += (lines[end] ?? "").trim();
+      if (!jsonText.startsWith("{"))
+        continue;
+      const parsed = parseJson(jsonText);
+      if (!parsed)
+        continue;
+      const keys = Object.keys(parsed).sort().join(",");
+      const verdict = stringField(parsed, "verdict");
+      if (keys === "candidateSha256,schemaVersion,verdict" && parsed.schemaVersion === 1 && sha256Pattern.test(stringField(parsed, "candidateSha256") ?? "") && ["approve", "request_changes", "reject", "cancelled"].includes(verdict ?? "")) {
+        markers.push({ marker: `${prefix}${jsonText}`, parsed });
+      }
+      index = end;
+      break;
+    }
+  }
+  return markers;
+}
+function proveReview(receipt, observation) {
+  if (observation.status === "working")
+    observation = waitForReviewer(receipt);
+  if (!completedStatuses.has(observation.status)) {
+    throw new FrontierError({
+      message: `recorded reviewer is not settled: ${observation.status}`,
+      code: observation.status === "blocked" ? "REVIEWER_BLOCKED" : "REVIEWER_NOT_SETTLED",
+      runId: receipt.runId,
+      state: receipt.state,
+      retrySafe: true,
+      nextAction: `Inspect ${receipt.resources.reviewerName}; resume later without resending the prompt.`
+    });
+  }
+  const read = runHerdr(["agent", "read", receipt.resources.reviewerName, "--source", "recent-unwrapped", "--lines", "120"], receipt.workspace.path);
+  if (read.exitCode !== 0) {
+    throw new FrontierError({
+      message: "could not read the recorded reviewer",
+      code: "REVIEWER_READ_FAILED",
+      runId: receipt.runId,
+      state: receipt.state,
+      retrySafe: true,
+      nextAction: `Inspect ${receipt.resources.reviewerName}, then resume without resending the prompt.`
+    });
+  }
+  const candidateAfterSha256 = workspaceSha256(receipt.workspace.path);
+  receipt.review.candidateAfterSha256 = candidateAfterSha256;
+  if (candidateAfterSha256 !== receipt.review.candidateBeforeSha256) {
+    receipt.state = "review_breached";
+    writeReceipt(receipt);
+    throw new FrontierError({
+      message: "the read-only reviewer changed candidate workspace bytes",
+      code: "REVIEW_WORKSPACE_MUTATED",
+      runId: receipt.runId,
+      state: receipt.state,
+      changedState: "partial",
+      nextAction: "Stop and inspect the disposable workspace; this run cannot yield a reviewed verdict."
+    });
+  }
+  const markers = reviewMarkers(read.stdout);
+  if (markers.length !== 1) {
+    receipt.state = "review_unproved";
+    writeReceipt(receipt);
+    throw new FrontierError({
+      message: "reviewer settled without exactly one standalone review marker",
+      code: "REVIEW_NOT_PROVED",
+      runId: receipt.runId,
+      state: receipt.state,
+      retrySafe: true,
+      nextAction: `Inspect ${receipt.resources.reviewerName}; resume reads again but never resends the prompt.`
+    });
+  }
+  const { marker, parsed } = markers[0];
+  const verdict = stringField(parsed, "verdict");
+  if (stringField(parsed, "candidateSha256") !== receipt.review.candidateBeforeSha256) {
+    receipt.state = "review_unproved";
+    writeReceipt(receipt);
+    throw new FrontierError({
+      message: "review verdict names a different candidate workspace",
+      code: "REVIEW_CANDIDATE_MISMATCH",
+      runId: receipt.runId,
+      state: receipt.state,
+      nextAction: `Inspect ${receipt.resources.reviewerName}; no verdict was persisted.`
+    });
+  }
+  receipt.review.verdict = verdict;
+  receipt.review.verdictMarkerSha256 = sha256(marker);
+  receipt.state = "reviewed";
+  writeReceipt(receipt);
+  return {
+    schemaVersion,
+    ok: true,
+    command: "review",
+    code: "REVIEW_COMPLETED",
+    runId: receipt.runId,
+    state: receipt.state,
+    changedState: "complete",
+    sideEffects: [],
+    retrySafe: true,
+    nextAction: `The ${verdict} verdict is advisory. Run frontier-runner cleanup --run-id ${receipt.runId} when ready.`
+  };
+}
+function reviewCommand(arguments_) {
+  const flags = parseFlags(arguments_, ["--run-id", "--review-prompt-file"]);
+  const runId = requiredFlag(flags, "--run-id");
+  const prompt = privateReviewPrompt(requiredFlag(flags, "--review-prompt-file"));
+  const receipt = readReceipt(runId);
+  if (receipt.review || receipt.resources.reviewerName || receipt.effects.reviewerPane) {
+    throw new FrontierError({
+      message: "this run already has one recorded review attempt",
+      code: "REVIEW_ALREADY_ATTEMPTED",
+      runId,
+      state: receipt.state,
+      nextAction: `Run frontier-runner resume --run-id ${runId}; never start a replacement reviewer.`
+    });
+  }
+  validateReceiptContext(receipt);
+  if (receipt.state !== "completed") {
+    throw new FrontierError({
+      message: `only a proved, uncleaned completed run can be reviewed: ${receipt.state}`,
+      code: "REVIEW_NOT_AVAILABLE",
+      runId,
+      state: receipt.state,
+      nextAction: `Complete the existing run with frontier-runner resume --run-id ${runId} before review.`
+    });
+  }
+  const uncertainEffect = unknownEffect(receipt);
+  if (uncertainEffect) {
+    throw new FrontierError({
+      message: `receipt contains an unknown external effect: ${uncertainEffect}`,
+      code: "EFFECT_UNKNOWN",
+      runId,
+      state: receipt.state,
+      nextAction: "Resolve the existing effect before review; do not create a reviewer."
+    });
+  }
+  reconcileRunPanes(receipt);
+  agentObservation(receipt);
+  const resultFile = canonicalResultFile(receipt.workspace.path, receipt.inputs.resultFile);
+  if (sha256(readFileSync(resultFile.path)) !== receipt.observation?.resultSha256) {
+    throw new FrontierError({
+      message: "candidate result bytes conflict with the proved run receipt",
+      code: "CANDIDATE_CONFLICT",
+      runId,
+      state: receipt.state,
+      nextAction: "Restore the exact proved disposable candidate or create a new bounded run."
+    });
+  }
+  const candidateBeforeSha256 = workspaceSha256(receipt.workspace.path);
+  const createdAt = now();
+  receipt.state = "review_starting";
+  receipt.resources.reviewerName = `frr_${sha256(`${runId}\x00review`).slice(0, 12)}`;
+  receipt.review = { promptSha256: sha256(prompt), candidateBeforeSha256 };
+  receipt.effects.reviewerPane = { outcome: "planned", observedAt: createdAt };
+  receipt.effects.reviewerStart = { outcome: "planned", observedAt: createdAt };
+  receipt.effects.reviewPromptDispatch = { outcome: "planned", observedAt: createdAt };
+  writeReceipt(receipt);
+  receipt.resources.reviewerPaneId = splitPane(receipt, "reviewerPane", "reviewerPaneId", receipt.workspace.callerPaneId, "down");
+  recordEffect(receipt, "reviewerStart", "unknown");
+  const started = runHerdr([
+    "agent",
+    "start",
+    receipt.resources.reviewerName,
+    "--kind",
+    "codex",
+    "--pane",
+    receipt.resources.reviewerPaneId,
+    "--",
+    "--sandbox",
+    "read-only"
+  ], receipt.workspace.path);
+  if (!responseReviewerMatches(herdrResponseResult(started, "agent_started"), receipt)) {
+    throw new FrontierError({
+      message: "Herdr could not confirm the fresh read-only reviewer identity",
+      code: "REVIEWER_START_UNKNOWN",
+      runId,
+      state: receipt.state,
+      changedState: "partial",
+      nextAction: "Inspect the recorded reviewer pane; do not start a replacement reviewer."
+    });
+  }
+  recordEffect(receipt, "reviewerStart", "succeeded");
+  const promptText = new TextDecoder().decode(prompt).trimEnd();
+  const reviewPrompt = `${promptText}
+
+Frontier Runner review contract:
+- Review only; do not modify files, run acceptance, repair, commit, or publish.
+Candidate workspace SHA-256: ${candidateBeforeSha256}
+- Finish with exactly one standalone line: frontier-review:{"schemaVersion":1,"candidateSha256":"${candidateBeforeSha256}","verdict":"approve|request_changes|reject|cancelled"}
+- Replace the verdict placeholder with exactly one allowed classification and do not repeat the marker.
+`;
+  recordEffect(receipt, "reviewPromptDispatch", "unknown");
+  const prompted = runHerdr([
+    "agent",
+    "prompt",
+    receipt.resources.reviewerName,
+    reviewPrompt,
+    "--wait",
+    "--timeout",
+    String(receipt.inputs.timeoutMs)
+  ], receipt.workspace.path);
+  if (responseReviewerMatches(herdrResponseResult(prompted, "agent_prompted"), receipt)) {
+    recordEffect(receipt, "reviewPromptDispatch", "succeeded");
+  } else if (prompted.errorCode && promptUncertainCodes.has(prompted.errorCode)) {
+    receipt.state = "review_timed_out";
+    recordEffect(receipt, "reviewPromptDispatch", "timed_out", prompted.errorCode);
+    throw new FrontierError({
+      message: "review prompt delivery is classified but unsettled",
+      code: "REVIEW_TIMEOUT",
+      exitCode: 124,
+      runId,
+      state: receipt.state,
+      changedState: "partial",
+      sideEffects: ["reviewer-pane", "codex-reviewer", "review-prompt-maybe-delivered"],
+      nextAction: `Run frontier-runner resume --run-id ${runId}; never resend the review prompt.`
+    });
+  } else {
+    throw new FrontierError({
+      message: "review prompt dispatch outcome is unknown",
+      code: "REVIEW_EFFECT_UNKNOWN",
+      runId,
+      state: receipt.state,
+      changedState: "partial",
+      sideEffects: ["review-prompt-maybe-delivered"],
+      nextAction: `Run frontier-runner resume --run-id ${runId}; never resend the review prompt.`
+    });
+  }
+  const result = proveReview(receipt, reviewerObservation(receipt));
+  return {
+    ...result,
+    command: "review",
+    sideEffects: ["reviewer-pane", "codex-reviewer", "review-prompt"]
+  };
+}
 function resumeCommand(arguments_) {
   const flags = parseFlags(arguments_, ["--run-id"]);
   const runId = requiredFlag(flags, "--run-id");
@@ -1303,6 +1709,52 @@ function resumeCommand(arguments_) {
       retrySafe: true,
       nextAction: "Use a new unit ID for another run."
     };
+  }
+  if (receipt.state === "reviewed") {
+    return {
+      schemaVersion,
+      ok: true,
+      command: "resume",
+      code: "REVIEW_COMPLETED",
+      runId,
+      state: receipt.state,
+      changedState: "none",
+      sideEffects: [],
+      retrySafe: true,
+      nextAction: `The ${receipt.review?.verdict} verdict is advisory. Run frontier-runner cleanup --run-id ${runId} when ready.`
+    };
+  }
+  if (receipt.state === "review_breached") {
+    throw new FrontierError({
+      message: "reviewer workspace mutation permanently breached this review attempt",
+      code: "REVIEW_WORKSPACE_MUTATED",
+      runId,
+      state: receipt.state,
+      nextAction: `Inspect the disposable workspace, then run frontier-runner cleanup --run-id ${runId}.`
+    });
+  }
+  if (receipt.state === "review_starting" || receipt.state === "review_timed_out" || receipt.state === "review_unproved") {
+    const uncertainEffect2 = unknownEffect(receipt, ["reviewPromptDispatch"]);
+    if (uncertainEffect2) {
+      throw new FrontierError({
+        message: `receipt contains an unknown external effect: ${uncertainEffect2}`,
+        code: "EFFECT_UNKNOWN",
+        runId,
+        state: receipt.state,
+        nextAction: "Inspect the reviewer pane and receipt; automatic replacement or replay is unsafe."
+      });
+    }
+    reconcileRunPanes(receipt);
+    if (!receipt.resources.reviewerPaneId || !paneExists(receipt, receipt.resources.reviewerPaneId)) {
+      throw new FrontierError({
+        message: "recorded reviewer pane identity is unavailable",
+        code: "REVIEWER_IDENTITY_LOST",
+        runId,
+        state: receipt.state,
+        nextAction: "Inspect the Herdr layout; do not create a replacement reviewer."
+      });
+    }
+    return { ...proveReview(receipt, reviewerObservation(receipt)), command: "resume" };
   }
   if (receipt.state === "completed") {
     return {
@@ -1443,7 +1895,8 @@ function cleanupCommand(arguments_) {
   if ([
     receipt.resources.editorPaneId,
     receipt.resources.browserPaneId,
-    receipt.resources.workerPaneId
+    receipt.resources.workerPaneId,
+    receipt.resources.reviewerPaneId
   ].includes(process.env.HERDR_PANE_ID)) {
     throw new FrontierError({
       message: "cleanup was invoked from a pane owned by the run",
@@ -1453,7 +1906,7 @@ function cleanupCommand(arguments_) {
       nextAction: "Invoke cleanup from the original caller pane so the controller cannot close itself mid-receipt."
     });
   }
-  for (const splitEffect of ["editorPane", "browserPane", "workerPane"]) {
+  for (const splitEffect of ["editorPane", "browserPane", "workerPane", "reviewerPane"]) {
     if (receipt.effects[splitEffect]?.outcome === "unknown") {
       throw new FrontierError({
         message: `cannot clean an unaddressed pane after unknown split: ${splitEffect}`,
@@ -1467,6 +1920,7 @@ function cleanupCommand(arguments_) {
   receipt.state = "cleanup_pending";
   writeReceipt(receipt);
   const closed = [
+    closeOwnedPane(receipt, "reviewerPaneId", "reviewerPaneClose"),
     closeOwnedPane(receipt, "workerPaneId", "workerPaneClose"),
     closeOwnedPane(receipt, "browserPaneId", "browserPaneClose"),
     closeOwnedPane(receipt, "editorPaneId", "editorPaneClose")
@@ -1492,7 +1946,7 @@ if (commandInput === undefined || commandInput === "--help" || commandInput === 
   process.stdout.write(help());
   process.exit(0);
 }
-if (!["run", "respond", "resume", "cleanup"].includes(commandInput))
+if (!["run", "respond", "resume", "review", "cleanup"].includes(commandInput))
   emitFailure("unknown", new FrontierError({
     message: `unknown command: ${commandInput}`,
     code: "USAGE",
@@ -1501,7 +1955,7 @@ if (!["run", "respond", "resume", "cleanup"].includes(commandInput))
   }));
 var command = commandInput;
 try {
-  const envelope = command === "run" ? runCommand(commandArguments) : command === "respond" ? respondCommand(commandArguments) : command === "resume" ? resumeCommand(commandArguments) : cleanupCommand(commandArguments);
+  const envelope = command === "run" ? runCommand(commandArguments) : command === "respond" ? respondCommand(commandArguments) : command === "resume" ? resumeCommand(commandArguments) : command === "review" ? reviewCommand(commandArguments) : cleanupCommand(commandArguments);
   emit(envelope);
 } catch (error) {
   if (error instanceof FrontierError)

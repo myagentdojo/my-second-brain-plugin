@@ -22,6 +22,7 @@ interface Fixture {
 	bin: string
 	workspace: string
 	promptFile: string
+	reviewPromptFile: string
 	responseFile: string
 	resultFile: string
 	stateHome: string
@@ -30,6 +31,7 @@ interface Fixture {
 	livePanes: string
 	splitCount: string
 	transcript: string
+	reviewTranscript: string
 	currentPaneJson: string
 }
 
@@ -60,6 +62,7 @@ function fixture(): Fixture {
 	const workspace = join(fixtureRoot, "workspace")
 	const stateHome = join(fixtureRoot, "state")
 	const promptFile = join(fixtureRoot, "prompt.md")
+	const reviewPromptFile = join(fixtureRoot, "review-prompt.md")
 	const responseFile = join(fixtureRoot, "response.txt")
 	const resultFile = join(workspace, "fixture.txt")
 	const commandLog = join(fixtureRoot, "commands.log")
@@ -67,9 +70,14 @@ function fixture(): Fixture {
 	const livePanes = join(fixtureRoot, "live-panes")
 	const splitCount = join(fixtureRoot, "split-count")
 	const transcript = join(fixtureRoot, "transcript.txt")
+	const reviewTranscript = join(fixtureRoot, "review-transcript.txt")
 	mkdirSync(bin)
 	mkdirSync(workspace)
 	writeFileSync(promptFile, "Replace fixture.txt with the requested final bytes. PROMPT_BODY_PRIVATE\n")
+	writeFileSync(reviewPromptFile, "Review the completed fixture for correctness. REVIEW_PROMPT_PRIVATE\n", {
+		mode: 0o600,
+	})
+	chmodSync(reviewPromptFile, 0o600)
 	writeFileSync(responseFile, "Proceed once", { mode: 0o600 })
 	chmodSync(responseFile, 0o600)
 	writeFileSync(resultFile, "before\n")
@@ -78,6 +86,7 @@ function fixture(): Fixture {
 	writeFileSync(livePanes, "w1:p1\n")
 	writeFileSync(splitCount, "0\n")
 	writeFileSync(transcript, "")
+	writeFileSync(reviewTranscript, "")
 
 	createExecutable(
 		join(bin, "tode"),
@@ -152,11 +161,41 @@ case "\${1:-} \${2:-}" in
 		;;
 	"agent start")
 		pane='w1:p4'
+		previous=''
+		for argument in "\${@:4}"; do
+			if [[ "$previous" == "--pane" ]]; then pane="$argument"; break; fi
+			previous="$argument"
+		done
 		if [[ "$FR_TEST_PROTOCOL_MODE" == "start_wrong_pane" ]]; then pane='w1:p9'; fi
 		printf '{"id":"cli:agent:start","result":{"type":"agent_started","agent":{"name":"%s","pane_id":"%s","terminal_id":"term:%s","workspace_id":"w1","tab_id":"w1:t1","agent_status":"idle","interactive_ready":true,"focused":false,"revision":1},"argv":["codex"]}}\n' "\${3:-}" "$pane" "$pane"
 		;;
 	"agent prompt")
 		printf '%s' "\${4:-}" > "$FR_TEST_DELIVERED_PROMPT"
+		if [[ "\${3:-}" == frr_* ]]; then
+			candidate=$(printf '%s' "\${4:-}" | sed -n 's/^Candidate workspace SHA-256: //p' | head -n 1)
+			case "$FR_TEST_REVIEW_TRANSCRIPT_MODE" in
+				approve) verdict='approve' ;;
+				request_changes) verdict='request_changes' ;;
+				reject) verdict='reject' ;;
+				cancelled) verdict='cancelled' ;;
+				mismatch) candidate='ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff'; verdict='approve' ;;
+				malformed) printf 'review finished without a valid marker\n' > "$FR_TEST_REVIEW_TRANSCRIPT"; verdict='' ;;
+				duplicate) verdict='approve' ;;
+				wrapped) printf 'reviewed fixture\n  frontier-review:\n  {"schemaVersion":1,"candidateSha256":"%s\n  ","verdict":"approve"}\n' "$candidate" > "$FR_TEST_REVIEW_TRANSCRIPT"; verdict='' ;;
+				*) verdict='approve' ;;
+			esac
+			if [[ -n "$verdict" ]]; then
+				printf 'frontier-review:{"schemaVersion":1,"candidateSha256":"%s","verdict":"%s"}\n' "$candidate" "$verdict" > "$FR_TEST_REVIEW_TRANSCRIPT"
+				if [[ "$FR_TEST_REVIEW_TRANSCRIPT_MODE" == "duplicate" ]]; then cat "$FR_TEST_REVIEW_TRANSCRIPT" >> "$FR_TEST_REVIEW_TRANSCRIPT".copy; cat "$FR_TEST_REVIEW_TRANSCRIPT".copy >> "$FR_TEST_REVIEW_TRANSCRIPT"; fi
+			fi
+			if [[ "$FR_TEST_REVIEW_MUTATION" == "1" ]]; then printf 'reviewer mutation\n' > "$FR_TEST_RESULT_FILE"; fi
+			case "$FR_TEST_REVIEW_PROMPT_MODE" in
+				timeout) printf '{"id":"cli:agent:prompt","error":{"code":"timeout","message":"timed out"}}\n' >&2; exit 1 ;;
+				unknown) printf '{"id":"cli:agent:prompt","error":{"code":"socket_closed","message":"unknown"}}\n' >&2; exit 1 ;;
+			esac
+			printf '{"id":"cli:agent:prompt","result":{"type":"agent_prompted","agent":{"name":"%s","pane_id":"w1:p5","terminal_id":"term:w1:p5","workspace_id":"w1","tab_id":"w1:t1","agent_status":"idle","interactive_ready":true,"focused":false,"revision":1}}}\n' "\${3:-}"
+			exit 0
+		fi
 		if [[ "$FR_TEST_PROMPT_MODE" != "error" ]]; then
 			printf 'after\n' > "$FR_TEST_RESULT_FILE"
 			case "$FR_TEST_TRANSCRIPT_MODE" in
@@ -212,17 +251,19 @@ case "\${1:-} \${2:-}" in
 		esac
 		;;
 	"agent get")
-		printf '{"id":"cli:agent:get","result":{"type":"agent_info","agent":{"name":"%s","pane_id":"%s","terminal_id":"term:%s","workspace_id":"w1","tab_id":"w1:t1","agent_status":"%s","interactive_ready":true,"focused":false,"revision":1}}}\n' "\${3:-}" "$FR_TEST_AGENT_PANE" "$FR_TEST_AGENT_PANE" "$FR_TEST_AGENT_STATUS"
+		if [[ "\${3:-}" == frr_* ]]; then pane="$FR_TEST_REVIEWER_PANE"; status="$FR_TEST_REVIEWER_STATUS"; else pane="$FR_TEST_AGENT_PANE"; status="$FR_TEST_AGENT_STATUS"; fi
+		printf '{"id":"cli:agent:get","result":{"type":"agent_info","agent":{"name":"%s","pane_id":"%s","terminal_id":"term:%s","workspace_id":"w1","tab_id":"w1:t1","agent_status":"%s","interactive_ready":true,"focused":false,"revision":1}}}\n' "\${3:-}" "$pane" "$pane" "$status"
 		;;
 	"agent wait")
 		if [[ "$FR_TEST_WAIT_MODE" == "timeout" ]]; then
 			printf '{"id":"cli:agent:wait","error":{"code":"timeout","message":"timed out"}}\n' >&2
 			exit 1
 		fi
-		printf '{"id":"cli:agent:wait","result":{"type":"agent_info","agent":{"name":"%s","pane_id":"%s","terminal_id":"term:%s","workspace_id":"w1","tab_id":"w1:t1","agent_status":"%s","interactive_ready":true,"focused":false,"revision":1}}}\n' "\${3:-}" "$FR_TEST_AGENT_PANE" "$FR_TEST_AGENT_PANE" "$FR_TEST_AGENT_STATUS"
+		if [[ "\${3:-}" == frr_* ]]; then pane="$FR_TEST_REVIEWER_PANE"; status="$FR_TEST_REVIEWER_STATUS"; else pane="$FR_TEST_AGENT_PANE"; status="$FR_TEST_AGENT_STATUS"; fi
+		printf '{"id":"cli:agent:wait","result":{"type":"agent_info","agent":{"name":"%s","pane_id":"%s","terminal_id":"term:%s","workspace_id":"w1","tab_id":"w1:t1","agent_status":"%s","interactive_ready":true,"focused":false,"revision":1}}}\n' "\${3:-}" "$pane" "$pane" "$status"
 		;;
 	"agent read")
-		cat "$FR_TEST_TRANSCRIPT"
+		if [[ "\${3:-}" == frr_* ]]; then cat "$FR_TEST_REVIEW_TRANSCRIPT"; else cat "$FR_TEST_TRANSCRIPT"; fi
 		;;
 	*)
 		printf '{"error":{"code":"unexpected_fake_command","message":"unsupported"}}\n' >&2
@@ -237,6 +278,7 @@ esac
 		bin,
 		workspace,
 		promptFile,
+		reviewPromptFile,
 		responseFile,
 		resultFile,
 		stateHome,
@@ -245,6 +287,7 @@ esac
 		livePanes,
 		splitCount,
 		transcript,
+		reviewTranscript,
 		currentPaneJson: JSON.stringify({
 			id: "cli:pane:current",
 			result: {
@@ -278,6 +321,7 @@ function environment(testFixture: Fixture, overrides: Record<string, string | un
 		FR_TEST_LIVE_PANES: testFixture.livePanes,
 		FR_TEST_SPLIT_COUNT: testFixture.splitCount,
 		FR_TEST_TRANSCRIPT: testFixture.transcript,
+		FR_TEST_REVIEW_TRANSCRIPT: testFixture.reviewTranscript,
 		FR_TEST_CURRENT_PANE_JSON: testFixture.currentPaneJson,
 		FR_TEST_WORKSPACE: testFixture.workspace,
 		FR_TEST_RESULT_FILE: testFixture.resultFile,
@@ -289,6 +333,11 @@ function environment(testFixture: Fixture, overrides: Record<string, string | un
 		FR_TEST_AGENT_PANE: "w1:p4",
 		FR_TEST_AGENT_STATUS: "idle",
 		FR_TEST_WAIT_MODE: "settled",
+		FR_TEST_REVIEW_PROMPT_MODE: "success",
+		FR_TEST_REVIEW_TRANSCRIPT_MODE: "approve",
+		FR_TEST_REVIEW_MUTATION: "0",
+		FR_TEST_REVIEWER_PANE: "w1:p5",
+		FR_TEST_REVIEWER_STATUS: "idle",
 		...overrides,
 	}
 }
@@ -324,6 +373,10 @@ function responseArguments(testFixture: Fixture, runId: string): string[] {
 	return ["respond", "--run-id", runId, "--response-file", testFixture.responseFile]
 }
 
+function reviewArguments(testFixture: Fixture, runId: string): string[] {
+	return ["review", "--run-id", runId, "--review-prompt-file", testFixture.reviewPromptFile]
+}
+
 function envelope(result: ReturnType<typeof Bun.spawnSync>): Record<string, unknown> {
 	return JSON.parse(result.stdout.toString()) as Record<string, unknown>
 }
@@ -336,7 +389,16 @@ function count(text: string, pattern: RegExp): number {
 	return text.match(pattern)?.length ?? 0
 }
 
-test("bundled public executable exposes run, respond, resume, and cleanup", () => {
+function completeRun(testFixture: Fixture): string {
+	const timedOut = runCli(testFixture, runArguments(testFixture))
+	expect(timedOut.exitCode, timedOut.stderr.toString()).toBe(124)
+	const runId = envelope(timedOut).runId as string
+	const resumed = runCli(testFixture, ["resume", "--run-id", runId])
+	expect(resumed.exitCode, resumed.stderr.toString()).toBe(0)
+	return runId
+}
+
+test("bundled public executable exposes run, respond, resume, review, and cleanup", () => {
 	const testFixture = fixture()
 	const result = runCli(testFixture, ["--help"])
 
@@ -344,7 +406,185 @@ test("bundled public executable exposes run, respond, resume, and cleanup", () =
 	expect(result.stdout.toString()).toContain("frontier-runner run")
 	expect(result.stdout.toString()).toContain("frontier-runner resume")
 	expect(result.stdout.toString()).toContain("frontier-runner respond")
+	expect(result.stdout.toString()).toContain("frontier-runner review")
 	expect(result.stdout.toString()).toContain("frontier-runner cleanup")
+})
+
+test("review starts exactly one fresh read-only Codex reviewer and stores only an advisory verdict receipt", () => {
+	const testFixture = fixture()
+	const runId = completeRun(testFixture)
+	const candidateBefore = readFileSync(testFixture.resultFile)
+	writeFileSync(testFixture.commandLog, "")
+
+	const reviewed = runCli(testFixture, reviewArguments(testFixture, runId))
+
+	expect(reviewed.exitCode, reviewed.stderr.toString()).toBe(0)
+	expect(envelope(reviewed)).toMatchObject({
+		ok: true,
+		command: "review",
+		code: "REVIEW_COMPLETED",
+		runId,
+		state: "reviewed",
+		changedState: "complete",
+		sideEffects: ["reviewer-pane", "codex-reviewer", "review-prompt"],
+	})
+	expect(readFileSync(testFixture.resultFile)).toEqual(candidateBefore)
+	const commands = readFileSync(testFixture.commandLog, "utf8")
+	expect(count(commands, /^pane <split>/gm)).toBe(1)
+	expect(count(commands, /^agent <start>/gm)).toBe(1)
+	expect(count(commands, /^agent prompt/gm)).toBe(1)
+	expect(commands).toMatch(
+		/^agent <start> <frr_[a-f0-9]{12}> <--kind> <codex> <--pane> <w1:p5> <--> <--sandbox> <read-only>$/m,
+	)
+	const receiptText = readFileSync(receiptPath(testFixture, runId), "utf8")
+	const receipt = JSON.parse(receiptText) as {
+		state: string
+		resources: { workerName: string; reviewerName: string; reviewerPaneId: string }
+		review: {
+			promptSha256: string
+			candidateBeforeSha256: string
+			candidateAfterSha256: string
+			verdict: string
+			verdictMarkerSha256: string
+		}
+	}
+	expect(receipt).toMatchObject({
+		state: "reviewed",
+		resources: { reviewerPaneId: "w1:p5" },
+		review: { verdict: "approve" },
+	})
+	expect(receipt.resources.reviewerName).toMatch(/^frr_[a-f0-9]{12}$/)
+	expect(receipt.resources.reviewerName).not.toBe(receipt.resources.workerName)
+	expect(receipt.review.promptSha256).toMatch(/^[a-f0-9]{64}$/)
+	expect(receipt.review.candidateBeforeSha256).toBe(receipt.review.candidateAfterSha256)
+	expect(receipt.review.verdictMarkerSha256).toMatch(/^[a-f0-9]{64}$/)
+	expect(receiptText).not.toContain("REVIEW_PROMPT_PRIVATE")
+	expect(receiptText).not.toContain("Review the completed fixture")
+	expect(receiptText).not.toContain("frontier-review:")
+})
+
+test("review validates the completed run, result evidence, private prompt, and owned identities before mutation", () => {
+	for (const [prepare, code] of [
+		[(testFixture: Fixture) => chmodSync(testFixture.reviewPromptFile, 0o644), "REVIEW_PROMPT_NOT_PRIVATE"],
+		[(testFixture: Fixture) => writeFileSync(testFixture.resultFile, "changed again\n"), "CANDIDATE_CONFLICT"],
+		[(testFixture: Fixture) => writeFileSync(testFixture.livePanes, "w1:p1\nw1:p2\nw1:p3\n"), "PANE_IDENTITY_LOST"],
+	] as const) {
+		const testFixture = fixture()
+		const runId = completeRun(testFixture)
+		prepare(testFixture)
+		writeFileSync(testFixture.commandLog, "")
+
+		const reviewed = runCli(testFixture, reviewArguments(testFixture, runId))
+
+		expect(reviewed.exitCode, code).toBeGreaterThan(0)
+		expect(envelope(reviewed)).toMatchObject({ ok: false, command: "review", code })
+		expect(readFileSync(testFixture.commandLog, "utf8"), code).not.toContain("agent <start>")
+	}
+})
+
+test("review refuses an external caller outside Herdr before reviewer creation", () => {
+	const testFixture = fixture()
+	const runId = completeRun(testFixture)
+	writeFileSync(testFixture.commandLog, "")
+
+	const reviewed = runCli(testFixture, reviewArguments(testFixture, runId), { HERDR_ENV: undefined })
+
+	expect(reviewed.exitCode).toBe(1)
+	expect(envelope(reviewed)).toMatchObject({
+		ok: false,
+		command: "review",
+		code: "HERDR_REQUIRED",
+		changedState: "none",
+	})
+	expect(readFileSync(testFixture.commandLog, "utf8")).toBe("")
+	const receipt = JSON.parse(readFileSync(receiptPath(testFixture, runId), "utf8")) as {
+		state: string
+		resources: { reviewerName?: string }
+		review?: unknown
+	}
+	expect(receipt).toMatchObject({ state: "completed" })
+	expect(receipt.resources.reviewerName).toBeUndefined()
+	expect(receipt.review).toBeUndefined()
+})
+
+test("review admits one exact classified verdict and rejects malformed, mismatched, or duplicate markers", () => {
+	for (const [mode, expectedExit, expectedCode, verdict] of [
+		["request_changes", 0, "REVIEW_COMPLETED", "request_changes"],
+		["reject", 0, "REVIEW_COMPLETED", "reject"],
+		["cancelled", 0, "REVIEW_COMPLETED", "cancelled"],
+		["wrapped", 0, "REVIEW_COMPLETED", "approve"],
+		["malformed", 1, "REVIEW_NOT_PROVED", undefined],
+		["mismatch", 1, "REVIEW_CANDIDATE_MISMATCH", undefined],
+		["duplicate", 1, "REVIEW_NOT_PROVED", undefined],
+	] as const) {
+		const testFixture = fixture()
+		const runId = completeRun(testFixture)
+		const reviewed = runCli(testFixture, reviewArguments(testFixture, runId), {
+			FR_TEST_REVIEW_TRANSCRIPT_MODE: mode,
+		})
+		expect(reviewed.exitCode, mode).toBe(expectedExit)
+		expect(envelope(reviewed)).toMatchObject({ command: "review", code: expectedCode })
+		const receipt = JSON.parse(readFileSync(receiptPath(testFixture, runId), "utf8")) as {
+			state: string
+			review?: { verdict?: string }
+		}
+		if (verdict) {
+			expect(receipt).toMatchObject({ state: "reviewed", review: { verdict } })
+		} else {
+			expect(receipt.state).not.toBe("reviewed")
+			expect(receipt.review?.verdict).toBeUndefined()
+		}
+	}
+}, 15_000)
+
+test("a timed-out review resumes the same reviewer without replay or replacement", () => {
+	const testFixture = fixture()
+	const runId = completeRun(testFixture)
+	const timedOut = runCli(testFixture, reviewArguments(testFixture, runId), {
+		FR_TEST_REVIEW_PROMPT_MODE: "timeout",
+	})
+	expect(timedOut.exitCode).toBe(124)
+	expect(envelope(timedOut)).toMatchObject({ code: "REVIEW_TIMEOUT", state: "review_timed_out" })
+
+	const resumed = runCli(testFixture, ["resume", "--run-id", runId])
+	expect(resumed.exitCode, resumed.stderr.toString()).toBe(0)
+	expect(envelope(resumed)).toMatchObject({ code: "REVIEW_COMPLETED", state: "reviewed" })
+	const commands = readFileSync(testFixture.commandLog, "utf8")
+	expect(count(commands, /^agent <start> <frr_/gm)).toBe(1)
+	expect(count(commands, /^agent prompt <frr_/gm)).toBe(1)
+})
+
+test("an unknown review dispatch and repeated review cannot replay or create a replacement reviewer", () => {
+	for (const promptMode of ["unknown", "success"] as const) {
+		const testFixture = fixture()
+		const runId = completeRun(testFixture)
+		const first = runCli(testFixture, reviewArguments(testFixture, runId), {
+			FR_TEST_REVIEW_PROMPT_MODE: promptMode,
+		})
+		expect(first.exitCode, promptMode).toBe(promptMode === "success" ? 0 : 1)
+		writeFileSync(testFixture.commandLog, "")
+
+		const repeated = runCli(testFixture, reviewArguments(testFixture, runId))
+		expect(repeated.exitCode).toBe(1)
+		expect(envelope(repeated)).toMatchObject({ code: "REVIEW_ALREADY_ATTEMPTED" })
+		expect(readFileSync(testFixture.commandLog, "utf8")).toBe("")
+	}
+})
+
+test("reviewer workspace mutation is a terminal breach and cleanup closes its owned pane", () => {
+	const testFixture = fixture()
+	const runId = completeRun(testFixture)
+	const reviewed = runCli(testFixture, reviewArguments(testFixture, runId), {
+		FR_TEST_REVIEW_MUTATION: "1",
+	})
+	expect(reviewed.exitCode).toBe(1)
+	expect(envelope(reviewed)).toMatchObject({ code: "REVIEW_WORKSPACE_MUTATED", state: "review_breached" })
+	writeFileSync(testFixture.commandLog, "")
+
+	const cleaned = runCli(testFixture, ["cleanup", "--run-id", runId])
+	expect(cleaned.exitCode, cleaned.stderr.toString()).toBe(0)
+	expect(readFileSync(testFixture.commandLog, "utf8")).toContain("pane <close> <w1:p5>")
+	expect(readFileSync(testFixture.livePanes, "utf8")).toBe("w1:p1\n")
 })
 
 test("respond rejects a non-private response file before contacting the worker", () => {
