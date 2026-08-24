@@ -27,8 +27,18 @@ var completedStatuses = new Set(["idle", "done"]);
 var agentStatuses = new Set(["idle", "working", "blocked", "done", "unknown"]);
 var promptUncertainCodes = new Set(["timeout", "agent_prompt_stalled"]);
 var responseFailedCodes = new Set(["agent_not_found", "agent_not_ready", "invalid_key", "agent_send_keys_failed"]);
+var agentStartBusyCode = "agent_pane_busy";
+var agentStartAttemptBudget = 10;
+var agentStartRetryDelayMs = 100;
 var effectOutcomeValues = ["planned", "unknown", "succeeded", "timed_out", "failed"];
 var effectOutcomes = new Set(effectOutcomeValues);
+var resumableRepairStateValues = [
+  "repair_starting",
+  "repair_timed_out",
+  "repair_blocked",
+  "repair_responded",
+  "repair_unproved"
+];
 var runStateValues = [
   "prepared",
   "starting",
@@ -44,6 +54,8 @@ var runStateValues = [
   "review_breached",
   "decision_starting",
   "decided",
+  ...resumableRepairStateValues,
+  "repaired",
   "cleanup_pending",
   "cleaned",
   "failed"
@@ -67,6 +79,9 @@ var effectNameValues = [
   "reviewPromptDispatch",
   "reviewWait",
   "decisionRecord",
+  "repairPromptDispatch",
+  "repairWait",
+  "repairResponseDispatch",
   "reviewerPaneClose",
   "workerPaneClose",
   "browserPaneClose",
@@ -74,6 +89,7 @@ var effectNameValues = [
   "cleanupComplete"
 ];
 var effectNames = new Set(effectNameValues);
+var resumableRepairStates = new Set(resumableRepairStateValues);
 
 class FrontierError extends Error {
   code;
@@ -107,6 +123,7 @@ Usage:
   frontier-runner resume --run-id ID
   frontier-runner review --run-id ID --review-prompt-file PATH
   frontier-runner decide --run-id ID --decision-file PATH
+  frontier-runner repair --run-id ID --repair-prompt-file PATH
   frontier-runner cleanup --run-id ID
   frontier-runner --help
 
@@ -116,6 +133,7 @@ Commands:
   resume   Reconcile the recorded worker after timeout without resending the prompt.
   review   Start one fresh read-only Codex reviewer for one proved run.
   decide   Record one state-bound accepted or declined operator decision.
+  repair   Dispatch one private repair prompt to the same recorded worker.
   cleanup  Close only the panes recorded as owned by this run.
 
 Output:
@@ -287,31 +305,32 @@ function promptBytes(path) {
   }
   return bytes;
 }
-function privateReviewPrompt(path) {
+function privateTransitionPrompt(path, transition) {
+  const codePrefix = transition.toUpperCase();
   if (!existsSync(path) || !lstatSync(path).isFile()) {
     throw new FrontierError({
-      message: "review prompt is not an existing non-symlink regular file",
-      code: "REVIEW_PROMPT_INVALID",
+      message: `${transition} prompt is not an existing non-symlink regular file`,
+      code: `${codePrefix}_PROMPT_INVALID`,
       exitCode: 2,
-      nextAction: "Write the bounded review prompt to one private regular file."
+      nextAction: transition === "review" ? "Write the bounded review prompt to one private regular file." : "Write Nathan's exact approved repair prompt to one private regular file."
     });
   }
   const mode = statSync(path).mode & 511;
   if ((mode & 63) !== 0 || (mode & 256) === 0) {
     throw new FrontierError({
-      message: "review prompt permissions expose it beyond the owner",
-      code: "REVIEW_PROMPT_NOT_PRIVATE",
+      message: `${transition} prompt permissions expose it beyond the owner`,
+      code: `${codePrefix}_PROMPT_NOT_PRIVATE`,
       exitCode: 2,
-      nextAction: "Set the review prompt file to owner-only permissions, such as mode 0600."
+      nextAction: `Set the ${transition} prompt file to owner-only permissions, such as mode 0600.`
     });
   }
   const bytes = readFileSync(path);
   if (bytes.length === 0 || bytes.length > maximumPromptBytes) {
     throw new FrontierError({
-      message: `review prompt must contain 1 to ${maximumPromptBytes} bytes`,
-      code: "REVIEW_PROMPT_INVALID",
+      message: `${transition} prompt must contain 1 to ${maximumPromptBytes} bytes`,
+      code: `${codePrefix}_PROMPT_INVALID`,
       exitCode: 2,
-      nextAction: "Use one non-empty bounded review prompt no larger than 32 KiB."
+      nextAction: `Use one non-empty ${transition} prompt no larger than 32 KiB.`
     });
   }
   return bytes;
@@ -545,6 +564,19 @@ function runHerdr(arguments_, cwd) {
     errorCode: parseHerdrErrorCode(stderr)
   };
 }
+function runAgentStart(arguments_, cwd) {
+  let result = runHerdr(arguments_, cwd);
+  for (let attempt = 1;attempt < agentStartAttemptBudget; attempt += 1) {
+    if (result.exitCode === 0 || result.errorCode !== agentStartBusyCode)
+      return result;
+    Bun.sleepSync(agentStartRetryDelayMs);
+    result = runHerdr(arguments_, cwd);
+  }
+  return result;
+}
+function agentStartRejectedBusy(result) {
+  return result.exitCode !== 0 && result.errorCode === agentStartBusyCode;
+}
 function requireHerdrSuccess(result, code, repair) {
   if (result.exitCode !== 0) {
     throw new FrontierError({
@@ -635,6 +667,15 @@ function currentPane(workspace) {
     });
   }
   return { paneId, workspaceId, tabId, foregroundCwd: workspace, sessionId };
+}
+function controllerMatchesCheckpoint(controller, checkpoint) {
+  return Boolean(checkpoint && controller.sessionId === checkpoint.sessionId && controller.workspaceId === checkpoint.workspaceId && controller.tabId === checkpoint.tabId && controller.paneId === checkpoint.paneId);
+}
+function controllerIdentityValid(controller, workspace) {
+  return controller.sessionId.length > 0 && controller.workspaceId === workspace.workspaceId && controller.tabId === workspace.tabId && controller.paneId === workspace.callerPaneId;
+}
+function controllerIdentityRecordValid(controller) {
+  return Boolean(stringField(controller, "sessionId") && stringField(controller, "workspaceId") && stringField(controller, "tabId") && stringField(controller, "paneId"));
 }
 function stateRoot() {
   const base = process.env.XDG_STATE_HOME ? resolve(process.env.XDG_STATE_HOME) : process.env.HOME ? join(resolve(process.env.HOME), ".local", "state") : undefined;
@@ -777,7 +818,24 @@ function decisionRecordValid(receipt) {
   const review = receipt.review;
   if (!decision || !review)
     return false;
-  return Boolean(["accepted", "declined"].includes(decision.classification) && sha256Pattern.test(decision.fileSha256) && decision.submissionAttempt === 1 && decision.runId === receipt.runId && decision.candidateSha256 === review.candidateBeforeSha256 && decision.candidateSha256 === review.candidateAfterSha256 && decision.reviewerName === receipt.resources.reviewerName && decision.verdict === "approve" && review.verdict === "approve" && decision.verdictMarkerSha256 === review.verdictMarkerSha256 && decision.controller.workspaceId === receipt.workspace.workspaceId && decision.controller.tabId === receipt.workspace.tabId && decision.controller.paneId === receipt.workspace.callerPaneId && decision.controller.sessionId.length > 0 && decision.submittedAt.length > 0);
+  return Boolean(["accepted", "declined"].includes(decision.classification) && sha256Pattern.test(decision.fileSha256) && decision.submissionAttempt === 1 && decision.runId === receipt.runId && decision.candidateSha256 === review.candidateBeforeSha256 && decision.candidateSha256 === review.candidateAfterSha256 && decision.reviewerName === receipt.resources.reviewerName && decision.verdict === "approve" && review.verdict === "approve" && decision.verdictMarkerSha256 === review.verdictMarkerSha256 && controllerIdentityValid(decision.controller, receipt.workspace) && decision.submittedAt.length > 0);
+}
+function repairRecordValid(receipt) {
+  const repair = receipt.repair;
+  const review = receipt.review;
+  if (!repair || !review)
+    return false;
+  return Boolean(sha256Pattern.test(repair.promptSha256) && repair.submissionAttempt === 1 && repair.runId === receipt.runId && sha256Pattern.test(repair.candidateBeforeSha256) && (repair.candidateAfterSha256 === undefined || sha256Pattern.test(repair.candidateAfterSha256)) && (repair.resultSha256 === undefined || sha256Pattern.test(repair.resultSha256)) && (repair.resultMarkerSha256 === undefined || sha256Pattern.test(repair.resultMarkerSha256)) && repair.candidateBeforeSha256 === review.candidateBeforeSha256 && repair.candidateBeforeSha256 === review.candidateAfterSha256 && repair.reviewerName === receipt.resources.reviewerName && repair.verdict === "request_changes" && review.verdict === "request_changes" && repair.verdictMarkerSha256 === review.verdictMarkerSha256 && repair.workerName === receipt.resources.workerName && repair.workerPaneId === receipt.resources.workerPaneId && controllerIdentityValid(repair.controller, receipt.workspace) && repair.submittedAt.length > 0 && (repair.completedAt === undefined || repair.completedAt.length > 0) && (repair.responseSha256 === undefined || sha256Pattern.test(repair.responseSha256)) && (repair.workerStatus === undefined || agentStatuses.has(repair.workerStatus)));
+}
+function repairResponseEffectValid(receipt) {
+  const responseSha256 = receipt.repair?.responseSha256;
+  const effect = receipt.effects.repairResponseDispatch;
+  if (!responseSha256 && !effect)
+    return true;
+  return Boolean(responseSha256 && sha256Pattern.test(responseSha256) && effect && effect.outcome !== "planned");
+}
+function isResumableRepairState(state) {
+  return resumableRepairStates.has(state);
 }
 function receiptStateInvariants(receipt) {
   if (!initialEffectNames.every((effect) => receipt.effects[effect] !== undefined))
@@ -789,6 +847,10 @@ function receiptStateInvariants(receipt) {
   if (receipt.review && !reviewRecordValid(receipt))
     return false;
   if (receipt.decision && !decisionRecordValid(receipt))
+    return false;
+  if (receipt.repair && !repairRecordValid(receipt))
+    return false;
+  if (!repairResponseEffectValid(receipt))
     return false;
   if (receipt.state === "prepared") {
     return !receiptHasRunResources(receipt) && !receipt.response && !receipt.effects.responseDispatch && initialEffectNames.every((effect) => effectIs(receipt, effect, "planned"));
@@ -829,6 +891,26 @@ function receiptStateInvariants(receipt) {
     }
     return Boolean(receipt.decision?.recordedAt && effectIs(receipt, "decisionRecord", "succeeded"));
   }
+  if (isResumableRepairState(receipt.state) || receipt.state === "repaired") {
+    if (!repairRecordValid(receipt))
+      return false;
+    if (receipt.state === "repair_starting") {
+      return effectIs(receipt, "repairPromptDispatch", "planned", "unknown");
+    }
+    if (receipt.state === "repair_timed_out") {
+      return effectIs(receipt, "repairPromptDispatch", "timed_out") || effectIs(receipt, "repairWait", "timed_out") || effectIs(receipt, "repairResponseDispatch", "timed_out", "unknown");
+    }
+    if (receipt.state === "repair_blocked") {
+      return Boolean(receipt.repair?.workerStatus === "blocked" && (!receipt.repair.responseSha256 || effectIs(receipt, "repairResponseDispatch", "unknown")));
+    }
+    if (receipt.state === "repair_responded") {
+      return effectIs(receipt, "repairResponseDispatch", "succeeded");
+    }
+    if (receipt.state === "repair_unproved") {
+      return Boolean(receipt.repair?.candidateAfterSha256 && receipt.repair.resultSha256 && !receipt.repair.resultMarkerSha256 && !receipt.repair.completedAt);
+    }
+    return Boolean(receipt.repair?.candidateAfterSha256 && receipt.repair.candidateAfterSha256 !== receipt.repair.candidateBeforeSha256 && receipt.repair.resultSha256 && receipt.repair.resultSha256 !== receipt.observation?.resultSha256 && receipt.repair.resultMarkerSha256 === sha256(`frontier-result:${receipt.repair.resultSha256}`) && receipt.repair.completedAt && effectIs(receipt, "repairPromptDispatch", "succeeded") && !receipt.decision);
+  }
   if (receipt.state === "cleanup_pending" || receipt.state === "cleaned") {
     for (const splitEffect of ["editorPane", "browserPane", "workerPane"]) {
       if (effectIs(receipt, splitEffect, "unknown"))
@@ -859,9 +941,11 @@ function isReceipt(value) {
   const response = jsonObject(receipt?.response);
   const review = jsonObject(receipt?.review);
   const decision = jsonObject(receipt?.decision);
-  const controller = jsonObject(decision?.controller);
+  const decisionControllerRecord = jsonObject(decision?.controller);
+  const repair = jsonObject(receipt?.repair);
+  const repairControllerRecord = jsonObject(repair?.controller);
   const effects = jsonObject(receipt?.effects);
-  if (receipt?.schemaVersion !== receiptSchemaVersion || !runIdPattern.test(stringField(receipt, "runId") ?? "") || !unitIdPattern.test(stringField(receipt, "unitId") ?? "") || !sha256Pattern.test(stringField(receipt, "requestHash") ?? "") || !runStates.has(stringField(receipt, "state") ?? "") || !stringField(receipt, "createdAt") || !stringField(receipt, "updatedAt") || !stringField(workspace, "path") || !stringField(workspace, "workspaceId") || !stringField(workspace, "tabId") || !stringField(workspace, "callerPaneId") || !sha256Pattern.test(stringField(inputs, "promptSha256") ?? "") || !sha256Pattern.test(stringField(inputs, "browserUrlSha256") ?? "") || !isSafeRelativeResultPath(stringField(inputs, "resultFile") ?? "") || !sha256Pattern.test(stringField(inputs, "resultBeforeSha256") ?? "") || typeof inputs?.timeoutMs !== "number" || !Number.isSafeInteger(inputs.timeoutMs) || inputs.timeoutMs < 1 || inputs.timeoutMs > 3600000 || !stringField(resources, "workerName") || receipt?.response !== undefined && !sha256Pattern.test(stringField(response, "sha256") ?? "") || receipt?.review !== undefined && !review || receipt?.decision !== undefined && (!decision || !controller || !sha256Pattern.test(stringField(decision, "fileSha256") ?? "") || decision.submissionAttempt !== 1 || !stringField(decision, "runId") || !stringField(decision, "candidateSha256") || !stringField(decision, "reviewerName") || !stringField(decision, "verdict") || !stringField(decision, "verdictMarkerSha256") || !stringField(controller, "sessionId") || !stringField(controller, "workspaceId") || !stringField(controller, "tabId") || !stringField(controller, "paneId") || !stringField(decision, "submittedAt")) || !effects) {
+  if (receipt?.schemaVersion !== receiptSchemaVersion || !runIdPattern.test(stringField(receipt, "runId") ?? "") || !unitIdPattern.test(stringField(receipt, "unitId") ?? "") || !sha256Pattern.test(stringField(receipt, "requestHash") ?? "") || !runStates.has(stringField(receipt, "state") ?? "") || !stringField(receipt, "createdAt") || !stringField(receipt, "updatedAt") || !stringField(workspace, "path") || !stringField(workspace, "workspaceId") || !stringField(workspace, "tabId") || !stringField(workspace, "callerPaneId") || !sha256Pattern.test(stringField(inputs, "promptSha256") ?? "") || !sha256Pattern.test(stringField(inputs, "browserUrlSha256") ?? "") || !isSafeRelativeResultPath(stringField(inputs, "resultFile") ?? "") || !sha256Pattern.test(stringField(inputs, "resultBeforeSha256") ?? "") || typeof inputs?.timeoutMs !== "number" || !Number.isSafeInteger(inputs.timeoutMs) || inputs.timeoutMs < 1 || inputs.timeoutMs > 3600000 || !stringField(resources, "workerName") || receipt?.response !== undefined && !sha256Pattern.test(stringField(response, "sha256") ?? "") || receipt?.review !== undefined && !review || receipt?.decision !== undefined && (!decision || !controllerIdentityRecordValid(decisionControllerRecord) || !sha256Pattern.test(stringField(decision, "fileSha256") ?? "") || decision.submissionAttempt !== 1 || !stringField(decision, "runId") || !stringField(decision, "candidateSha256") || !stringField(decision, "reviewerName") || !stringField(decision, "verdict") || !stringField(decision, "verdictMarkerSha256") || !stringField(decision, "submittedAt")) || receipt?.repair !== undefined && (!repair || !controllerIdentityRecordValid(repairControllerRecord) || !sha256Pattern.test(stringField(repair, "promptSha256") ?? "") || repair.submissionAttempt !== 1 || !stringField(repair, "runId") || !sha256Pattern.test(stringField(repair, "candidateBeforeSha256") ?? "") || !stringField(repair, "reviewerName") || stringField(repair, "verdict") !== "request_changes" || !sha256Pattern.test(stringField(repair, "verdictMarkerSha256") ?? "") || !stringField(repair, "workerName") || !stringField(repair, "workerPaneId") || !stringField(repair, "submittedAt") || repair.candidateAfterSha256 !== undefined && !sha256Pattern.test(stringField(repair, "candidateAfterSha256") ?? "") || repair.resultSha256 !== undefined && !sha256Pattern.test(stringField(repair, "resultSha256") ?? "") || repair.resultMarkerSha256 !== undefined && !sha256Pattern.test(stringField(repair, "resultMarkerSha256") ?? "") || repair.completedAt !== undefined && !stringField(repair, "completedAt") || repair.workerStatus !== undefined && !stringField(repair, "workerStatus") || repair.responseSha256 !== undefined && !sha256Pattern.test(stringField(repair, "responseSha256") ?? "")) || !effects) {
     return false;
   }
   if (!resources || !effects)
@@ -970,7 +1054,7 @@ Frontier Runner completion contract:
 }
 function startWorker(receipt) {
   recordEffect(receipt, "workerStart", "unknown");
-  const result = runHerdr([
+  const result = runAgentStart([
     "agent",
     "start",
     receipt.resources.workerName,
@@ -985,6 +1069,17 @@ function startWorker(receipt) {
   const response = herdrResponseResult(result, "agent_started");
   const startedAgent = jsonObject(response?.agent);
   if (!responseAgentMatches(response, receipt) || !completedStatuses.has(stringField(startedAgent, "agent_status") ?? "")) {
+    if (agentStartRejectedBusy(result)) {
+      recordEffect(receipt, "workerStart", "failed", agentStartBusyCode);
+      throw new FrontierError({
+        message: `Herdr rejected the worker start before launch: the pane stayed busy across ${agentStartAttemptBudget} attempts`,
+        code: "WORKER_START_REJECTED",
+        runId: receipt.runId,
+        state: receipt.state,
+        changedState: "partial",
+        nextAction: `Inspect pane ${receipt.resources.workerPaneId}; no worker was started and none may be started outside this run.`
+      });
+    }
     throw new FrontierError({
       message: `Herdr could not confirm Codex worker start${result.errorCode ? `: ${result.errorCode}` : ""}`,
       code: "WORKER_START_UNKNOWN",
@@ -1040,7 +1135,7 @@ function agentObservation(receipt) {
   if (result.exitCode !== 0 || !result.json) {
     throw new FrontierError({
       message: `recorded worker identity is unavailable${result.errorCode ? `: ${result.errorCode}` : ""}`,
-      code: "WORKER_IDENTITY_LOST",
+      code: result.errorCode === "ambiguous" ? "WORKER_IDENTITY_CONFLICT" : "WORKER_IDENTITY_LOST",
       runId: receipt.runId,
       state: receipt.state,
       nextAction: `Inspect pane ${receipt.resources.workerPaneId}; do not create a replacement worker for this run.`
@@ -1088,32 +1183,34 @@ function agentObservation(receipt) {
   }
   return { paneId, status };
 }
-function waitForWorker(receipt) {
+function waitForWorker(receipt, phase = "run") {
+  const repair = phase === "repair";
+  const waitEffect = repair ? "repairWait" : "resumeWait";
   const result = runHerdr(["agent", "wait", receipt.resources.workerName, "--timeout", String(receipt.inputs.timeoutMs)], receipt.workspace.path);
   if (result.exitCode !== 0) {
     if (result.errorCode === "timeout") {
-      receipt.state = "timed_out";
-      recordEffect(receipt, "resumeWait", "timed_out", result.errorCode);
+      receipt.state = repair ? "repair_timed_out" : "timed_out";
+      recordEffect(receipt, waitEffect, "timed_out", result.errorCode);
       throw new FrontierError({
-        message: "recorded worker has not settled within the resume timeout",
-        code: "PROMPT_TIMEOUT",
+        message: `recorded ${repair ? "repair " : ""}worker has not settled within the resume timeout`,
+        code: repair ? "REPAIR_TIMEOUT" : "PROMPT_TIMEOUT",
         exitCode: 124,
         runId: receipt.runId,
         state: receipt.state,
-        changedState: "none",
+        changedState: repair ? "partial" : "none",
         retrySafe: true,
-        nextAction: `Run frontier-runner resume --run-id ${receipt.runId} again later; no prompt will be resent.`
+        nextAction: repair ? `Run frontier-runner resume --run-id ${receipt.runId}; the repair prompt will not be resent.` : `Run frontier-runner resume --run-id ${receipt.runId} again later; no prompt will be resent.`
       });
     }
     throw new FrontierError({
-      message: `worker wait failed${result.errorCode ? `: ${result.errorCode}` : ""}`,
-      code: "WORKER_WAIT_FAILED",
+      message: `${repair ? "repair " : ""}worker wait failed${result.errorCode ? `: ${result.errorCode}` : ""}`,
+      code: repair ? "REPAIR_WORKER_WAIT_FAILED" : "WORKER_WAIT_FAILED",
       runId: receipt.runId,
       state: receipt.state,
-      nextAction: `Inspect ${receipt.resources.workerName} with herdr agent get and agent read.`
+      nextAction: repair ? `Inspect ${receipt.resources.workerName}; do not replace it or resend the repair prompt.` : `Inspect ${receipt.resources.workerName} with herdr agent get and agent read.`
     });
   }
-  recordEffect(receipt, "resumeWait", "succeeded");
+  recordEffect(receipt, waitEffect, "succeeded");
   return agentObservation(receipt);
 }
 function exactMarkerCount(readback, marker) {
@@ -1141,6 +1238,34 @@ function exactMarkerCount(readback, marker) {
   }
   return count;
 }
+function readSettledWorker(receipt, observation, phase) {
+  const repair = phase === "repair";
+  if (!completedStatuses.has(observation.status)) {
+    throw new FrontierError({
+      message: `recorded ${repair ? "repair " : ""}worker is not settled: ${observation.status}`,
+      code: repair ? "REPAIR_WORKER_NOT_SETTLED" : "AGENT_NOT_SETTLED",
+      runId: receipt.runId,
+      state: receipt.state,
+      retrySafe: true,
+      nextAction: repair ? `Inspect ${receipt.resources.workerName}; resume later without resending the repair prompt.` : `Run frontier-runner resume --run-id ${receipt.runId} to wait without resending the prompt.`
+    });
+  }
+  const resultFile = canonicalResultFile(receipt.workspace.path, receipt.inputs.resultFile);
+  const resultSha256 = sha256(readFileSync(resultFile.path));
+  const marker = `frontier-result:${resultSha256}`;
+  const read = runHerdr(["agent", "read", receipt.resources.workerName, "--source", "recent-unwrapped", "--lines", "120"], receipt.workspace.path);
+  if (read.exitCode !== 0) {
+    throw new FrontierError({
+      message: `could not read the ${repair ? "same recorded repair" : "recorded"} worker${read.errorCode ? `: ${read.errorCode}` : ""}`,
+      code: repair ? "REPAIR_WORKER_READ_FAILED" : "WORKER_READ_FAILED",
+      runId: receipt.runId,
+      state: receipt.state,
+      retrySafe: true,
+      nextAction: repair ? `Inspect ${receipt.resources.workerName}, then resume without resending the repair prompt.` : `Inspect ${receipt.resources.workerName} directly, then resume without resending the prompt.`
+    });
+  }
+  return { resultSha256, marker, readback: read.stdout };
+}
 function proveResult(receipt, observation) {
   if (observation.status === "blocked") {
     receipt.state = "blocked";
@@ -1165,31 +1290,8 @@ function proveResult(receipt, observation) {
       nextAction: `Inspect ${receipt.resources.workerName} with herdr agent get and agent read; terminal status does not prove completion.`
     });
   }
-  if (!completedStatuses.has(observation.status)) {
-    throw new FrontierError({
-      message: `recorded worker is not settled: ${observation.status}`,
-      code: "AGENT_NOT_SETTLED",
-      runId: receipt.runId,
-      state: receipt.state,
-      retrySafe: true,
-      nextAction: `Run frontier-runner resume --run-id ${receipt.runId} to wait without resending the prompt.`
-    });
-  }
-  const resultFile = canonicalResultFile(receipt.workspace.path, receipt.inputs.resultFile);
-  const resultSha256 = sha256(readFileSync(resultFile.path));
-  const marker = `frontier-result:${resultSha256}`;
-  const read = runHerdr(["agent", "read", receipt.resources.workerName, "--source", "recent-unwrapped", "--lines", "120"], receipt.workspace.path);
-  if (read.exitCode !== 0) {
-    throw new FrontierError({
-      message: `could not read the recorded worker${read.errorCode ? `: ${read.errorCode}` : ""}`,
-      code: "WORKER_READ_FAILED",
-      runId: receipt.runId,
-      state: receipt.state,
-      retrySafe: true,
-      nextAction: `Inspect ${receipt.resources.workerName} directly, then resume without resending the prompt.`
-    });
-  }
-  const exactMarkerLines = exactMarkerCount(read.stdout, marker);
+  const { resultSha256, marker, readback } = readSettledWorker(receipt, observation, "run");
+  const exactMarkerLines = exactMarkerCount(readback, marker);
   if (resultSha256 === receipt.inputs.resultBeforeSha256 || exactMarkerLines !== 1) {
     receipt.state = "settled_unproved";
     receipt.observation = { agentStatus: observation.status, resultSha256 };
@@ -1344,7 +1446,10 @@ function respondCommand(arguments_) {
   const receipt = readReceipt(runId);
   const response = responseInput(requiredFlag(flags, "--response-file"));
   validateReceiptContext(receipt);
-  if (receipt.response || receipt.effects.responseDispatch) {
+  const repairResponse = receipt.state === "repair_blocked" && receipt.repair !== undefined;
+  if (repairResponse)
+    requireCheckpointedRepairController(receipt);
+  if (repairResponse && (receipt.repair?.responseSha256 || receipt.effects.repairResponseDispatch) || !repairResponse && (receipt.response || receipt.effects.responseDispatch)) {
     throw new FrontierError({
       message: "this run already has one recorded response attempt",
       code: "RESPONSE_ALREADY_ATTEMPTED",
@@ -1353,16 +1458,16 @@ function respondCommand(arguments_) {
       nextAction: `Run frontier-runner resume --run-id ${runId}; the response will not be sent again.`
     });
   }
-  if (receipt.state === "completed" || receipt.state === "cleaned") {
+  if (receipt.state === "completed" || receipt.state === "repaired" || receipt.state === "cleaned") {
     throw new FrontierError({
       message: `cannot respond to a run in terminal state ${receipt.state}`,
       code: "RESPONSE_NOT_AVAILABLE",
       runId,
       state: receipt.state,
-      nextAction: receipt.state === "completed" ? `Run frontier-runner cleanup --run-id ${runId} when the panes are no longer needed.` : "Use a new unit ID for another bounded run."
+      nextAction: receipt.state === "completed" || receipt.state === "repaired" ? `Run frontier-runner cleanup --run-id ${runId} when the panes are no longer needed.` : "Use a new unit ID for another bounded run."
     });
   }
-  const uncertainEffect = unknownEffect(receipt);
+  const uncertainEffect = unknownEffect(receipt, repairResponse ? ["repairPromptDispatch"] : []);
   if (uncertainEffect) {
     throw new FrontierError({
       message: `receipt contains an unknown external effect: ${uncertainEffect}`,
@@ -1392,14 +1497,20 @@ function respondCommand(arguments_) {
       nextAction: `Inspect ${receipt.resources.workerName}; do not send input unless Herdr reports blocked.`
     });
   }
-  receipt.state = "blocked";
-  receipt.observation = { agentStatus: observation.status };
-  receipt.response = { sha256: response.sha256 };
-  recordEffect(receipt, "responseDispatch", "unknown");
+  receipt.state = repairResponse ? "repair_blocked" : "blocked";
+  if (repairResponse) {
+    receipt.repair.workerStatus = observation.status;
+    receipt.repair.responseSha256 = response.sha256;
+  } else {
+    receipt.observation = { agentStatus: observation.status };
+    receipt.response = { sha256: response.sha256 };
+  }
+  const responseEffect = repairResponse ? "repairResponseDispatch" : "responseDispatch";
+  recordEffect(receipt, responseEffect, "unknown");
   const result = runHerdr(["agent", "send-keys", receipt.resources.workerName, ...response.keys, "enter"], receipt.workspace.path);
   if (herdrResponseResult(result, "ok")) {
-    receipt.state = "responded";
-    recordEffect(receipt, "responseDispatch", "succeeded");
+    receipt.state = repairResponse ? "repair_responded" : "responded";
+    recordEffect(receipt, responseEffect, "succeeded");
     return {
       schemaVersion,
       ok: true,
@@ -1414,8 +1525,8 @@ function respondCommand(arguments_) {
     };
   }
   if (result.errorCode === "timeout") {
-    receipt.state = "timed_out";
-    recordEffect(receipt, "responseDispatch", "timed_out", result.errorCode);
+    receipt.state = repairResponse ? "repair_timed_out" : "timed_out";
+    recordEffect(receipt, responseEffect, "timed_out", result.errorCode);
     throw new FrontierError({
       message: "response delivery timed out after it may have taken effect",
       code: "RESPONSE_TIMEOUT",
@@ -1429,7 +1540,7 @@ function respondCommand(arguments_) {
   }
   if (result.errorCode && responseFailedCodes.has(result.errorCode)) {
     receipt.state = "failed";
-    recordEffect(receipt, "responseDispatch", "failed", result.errorCode);
+    recordEffect(receipt, responseEffect, "failed", result.errorCode);
     throw new FrontierError({
       message: `Herdr rejected the response before accepting input: ${result.errorCode}`,
       code: "RESPONSE_DISPATCH_FAILED",
@@ -1438,6 +1549,10 @@ function respondCommand(arguments_) {
       changedState: "partial",
       nextAction: `Inspect ${receipt.resources.workerName}; do not repeat respond or create a replacement worker.`
     });
+  }
+  if (repairResponse) {
+    receipt.state = "repair_timed_out";
+    writeReceipt(receipt);
   }
   throw new FrontierError({
     message: `response dispatch outcome is unknown${result.errorCode ? `: ${result.errorCode}` : ""}`,
@@ -1623,7 +1738,7 @@ function proveReview(receipt, observation) {
 function reviewCommand(arguments_) {
   const flags = parseFlags(arguments_, ["--run-id", "--review-prompt-file"]);
   const runId = requiredFlag(flags, "--run-id");
-  const prompt = privateReviewPrompt(requiredFlag(flags, "--review-prompt-file"));
+  const prompt = privateTransitionPrompt(requiredFlag(flags, "--review-prompt-file"), "review");
   const receipt = readReceipt(runId);
   if (receipt.review || receipt.resources.reviewerName || receipt.effects.reviewerPane) {
     throw new FrontierError({
@@ -1677,7 +1792,7 @@ function reviewCommand(arguments_) {
   writeReceipt(receipt);
   receipt.resources.reviewerPaneId = splitPane(receipt, "reviewerPane", "reviewerPaneId", receipt.workspace.callerPaneId, "down");
   recordEffect(receipt, "reviewerStart", "unknown");
-  const started = runHerdr([
+  const started = runAgentStart([
     "agent",
     "start",
     receipt.resources.reviewerName,
@@ -1690,6 +1805,17 @@ function reviewCommand(arguments_) {
     "read-only"
   ], receipt.workspace.path);
   if (!responseReviewerMatches(herdrResponseResult(started, "agent_started"), receipt)) {
+    if (agentStartRejectedBusy(started)) {
+      recordEffect(receipt, "reviewerStart", "failed", agentStartBusyCode);
+      throw new FrontierError({
+        message: `Herdr rejected the reviewer start before launch: the pane stayed busy across ${agentStartAttemptBudget} attempts`,
+        code: "REVIEWER_START_REJECTED",
+        runId,
+        state: receipt.state,
+        changedState: "partial",
+        nextAction: "Inspect the recorded reviewer pane; no reviewer was started. Do not start a replacement reviewer."
+      });
+    }
     throw new FrontierError({
       message: "Herdr could not confirm the fresh read-only reviewer identity",
       code: "REVIEWER_START_UNKNOWN",
@@ -1752,7 +1878,7 @@ Candidate workspace SHA-256: ${candidateBeforeSha256}
     sideEffects: ["reviewer-pane", "codex-reviewer", "review-prompt"]
   };
 }
-function decisionController(receipt) {
+function recordedController(receipt, transition) {
   const controller = currentPane(receipt.workspace.path);
   if (controller.paneId !== receipt.workspace.callerPaneId) {
     throw new FrontierError({
@@ -1760,20 +1886,34 @@ function decisionController(receipt) {
       code: "CONTROLLER_IDENTITY_CONFLICT",
       runId: receipt.runId,
       state: receipt.state,
-      nextAction: "Invoke the decision from the original recognised Controller pane recorded by the run."
+      nextAction: `Invoke the ${transition} from the original recognised Controller pane recorded by the run.`
     });
   }
   return controller;
 }
-function requireDecisionCandidate(receipt) {
+function requireCheckpointedRepairController(receipt) {
+  const controller = recordedController(receipt, "repair");
+  const checkpoint = receipt.repair?.controller;
+  if (!controllerMatchesCheckpoint(controller, checkpoint)) {
+    throw new FrontierError({
+      message: "current Controller identity conflicts with the checkpointed repair",
+      code: "CONTROLLER_IDENTITY_CONFLICT",
+      runId: receipt.runId,
+      state: receipt.state,
+      nextAction: "Resume or respond from the same recognised Controller session; never replay or retarget the repair."
+    });
+  }
+  return controller;
+}
+function requireReviewedCandidate(receipt, transition) {
   const resultFile = canonicalResultFile(receipt.workspace.path, receipt.inputs.resultFile);
   if (sha256(readFileSync(resultFile.path)) !== receipt.observation?.resultSha256 || workspaceSha256(receipt.workspace.path) !== receipt.review?.candidateAfterSha256) {
     throw new FrontierError({
-      message: "candidate workspace bytes conflict with the approved review receipt",
+      message: `candidate workspace bytes conflict with the reviewed ${transition} receipt`,
       code: "CANDIDATE_CONFLICT",
       runId: receipt.runId,
       state: receipt.state,
-      nextAction: "Restore the exact approved disposable candidate; do not retarget this decision."
+      nextAction: `Restore the exact reviewed disposable candidate; do not retarget this ${transition}.`
     });
   }
 }
@@ -1840,8 +1980,8 @@ function decideCommand(arguments_) {
   }
   reconcileRunPanes(receipt);
   reviewerObservation(receipt);
-  requireDecisionCandidate(receipt);
-  const controller = decisionController(receipt);
+  requireReviewedCandidate(receipt, "decision");
+  const controller = recordedController(receipt, "decision");
   const submittedAt = now();
   receipt.state = "decision_starting";
   receipt.decision = {
@@ -1866,8 +2006,8 @@ function decideCommand(arguments_) {
   receipt.effects.decisionRecord = { outcome: "unknown", observedAt: now() };
   writeReceipt(receipt);
   try {
-    const confirmed = decisionController(receipt);
-    if (confirmed.sessionId !== controller.sessionId || confirmed.workspaceId !== controller.workspaceId || confirmed.tabId !== controller.tabId || confirmed.paneId !== controller.paneId) {
+    const confirmed = recordedController(receipt, "decision");
+    if (!controllerMatchesCheckpoint(confirmed, controller)) {
       throw new Error("Controller identity changed after the decision checkpoint");
     }
   } catch {
@@ -1882,8 +2022,254 @@ function decideCommand(arguments_) {
       nextAction: `Run frontier-runner resume --run-id ${runId}; never resubmit the decision file.`
     });
   }
-  requireDecisionCandidate(receipt);
+  requireReviewedCandidate(receipt, "decision");
   return decisionRecorded(receipt, "decide");
+}
+function proveRepair(receipt, observation, command) {
+  if (observation.status === "working")
+    observation = waitForWorker(receipt, "repair");
+  if (observation.status === "blocked") {
+    receipt.state = "repair_blocked";
+    receipt.repair.workerStatus = observation.status;
+    writeReceipt(receipt);
+    throw new FrontierError({
+      message: "the same recorded worker is blocked during the repair attempt",
+      code: "REPAIR_WORKER_BLOCKED",
+      runId: receipt.runId,
+      state: receipt.state,
+      changedState: "partial",
+      sideEffects: ["repair-prompt"],
+      nextAction: `Inspect ${receipt.resources.workerName}, obtain exact operator approval, then use frontier-runner respond for this same attempt.`
+    });
+  }
+  const { resultSha256, marker, readback } = readSettledWorker(receipt, observation, "repair");
+  const candidateAfterSha256 = workspaceSha256(receipt.workspace.path);
+  receipt.repair.candidateAfterSha256 = candidateAfterSha256;
+  receipt.repair.resultSha256 = resultSha256;
+  receipt.repair.workerStatus = observation.status;
+  if (candidateAfterSha256 === receipt.repair.candidateBeforeSha256 || resultSha256 === receipt.observation?.resultSha256 || exactMarkerCount(readback, marker) !== 1) {
+    receipt.state = "repair_unproved";
+    delete receipt.repair.resultMarkerSha256;
+    delete receipt.repair.completedAt;
+    writeReceipt(receipt);
+    throw new FrontierError({
+      message: "repair settled without one independently proved changed candidate",
+      code: "REPAIR_NOT_PROVED",
+      runId: receipt.runId,
+      state: receipt.state,
+      changedState: "partial",
+      retrySafe: true,
+      nextAction: `Inspect ${receipt.resources.workerName} and the candidate; resume reads again but never resends the repair prompt.`
+    });
+  }
+  receipt.repair.resultMarkerSha256 = sha256(marker);
+  receipt.repair.completedAt = now();
+  receipt.state = "repaired";
+  if (!effectIs(receipt, "repairPromptDispatch", "succeeded")) {
+    receipt.effects.repairPromptDispatch = {
+      outcome: "succeeded",
+      observedAt: now(),
+      code: "reconciled_by_result"
+    };
+  }
+  writeReceipt(receipt);
+  return {
+    schemaVersion,
+    ok: true,
+    command,
+    code: "REPAIR_COMPLETED",
+    runId: receipt.runId,
+    state: receipt.state,
+    changedState: "complete",
+    sideEffects: [],
+    retrySafe: true,
+    nextAction: `The same worker produced one changed candidate. Stop before re-review, acceptance, Git, publication, or another worker; cleanup only when the native proof is complete.`
+  };
+}
+function repairCommand(arguments_) {
+  const flags = parseFlags(arguments_, ["--run-id", "--repair-prompt-file"]);
+  const runId = requiredFlag(flags, "--run-id");
+  const prompt = privateTransitionPrompt(requiredFlag(flags, "--repair-prompt-file"), "repair");
+  const receipt = readReceipt(runId);
+  if (receipt.repair || receipt.effects.repairPromptDispatch) {
+    throw new FrontierError({
+      message: "this run already has one recorded repair attempt",
+      code: "REPAIR_ALREADY_ATTEMPTED",
+      runId,
+      state: receipt.state,
+      nextAction: `Run frontier-runner resume --run-id ${runId}; never replace or retarget the first repair prompt.`
+    });
+  }
+  validateReceiptContext(receipt);
+  if (receipt.state !== "reviewed") {
+    throw new FrontierError({
+      message: `only one proved, uncleaned reviewed run can be repaired: ${receipt.state}`,
+      code: "REPAIR_NOT_AVAILABLE",
+      runId,
+      state: receipt.state,
+      nextAction: "Complete and prove one request_changes review before repair."
+    });
+  }
+  if (receipt.review?.verdict !== "request_changes" || !receipt.review.verdictMarkerSha256) {
+    throw new FrontierError({
+      message: `repair requires advisory request_changes, not ${receipt.review?.verdict ?? "missing"}`,
+      code: "REPAIR_NOT_REQUESTED",
+      runId,
+      state: receipt.state,
+      nextAction: "Stop without repair; this review did not request changes."
+    });
+  }
+  if (receipt.decision) {
+    throw new FrontierError({
+      message: "a run with an operator decision cannot enter repair",
+      code: "REPAIR_NOT_AVAILABLE",
+      runId,
+      state: receipt.state,
+      nextAction: "Stop without repair; do not replace the recorded decision."
+    });
+  }
+  const uncertainEffect = unknownEffect(receipt);
+  if (uncertainEffect) {
+    throw new FrontierError({
+      message: `receipt contains an unknown external effect: ${uncertainEffect}`,
+      code: "EFFECT_UNKNOWN",
+      runId,
+      state: receipt.state,
+      nextAction: "Resolve the existing effect before repair; do not submit a repair prompt."
+    });
+  }
+  reconcileRunPanes(receipt);
+  reviewerObservation(receipt);
+  requireReviewedCandidate(receipt, "repair");
+  const worker = agentObservation(receipt);
+  if (worker.status === "blocked") {
+    throw new FrontierError({
+      message: "recorded worker is blocked before repair dispatch",
+      code: "REPAIR_WORKER_BLOCKED",
+      runId,
+      state: receipt.state,
+      nextAction: "Resolve the existing blocked state before starting the one repair attempt."
+    });
+  }
+  if (!completedStatuses.has(worker.status)) {
+    throw new FrontierError({
+      message: `recorded worker is not ready for repair: ${worker.status}`,
+      code: "REPAIR_WORKER_NOT_READY",
+      runId,
+      state: receipt.state,
+      nextAction: "Wait for the same recorded worker to settle; do not replace or retarget it."
+    });
+  }
+  const controller = recordedController(receipt, "repair");
+  const submittedAt = now();
+  receipt.state = "repair_starting";
+  receipt.repair = {
+    promptSha256: sha256(prompt),
+    submissionAttempt: 1,
+    runId,
+    candidateBeforeSha256: receipt.review.candidateAfterSha256,
+    reviewerName: receipt.resources.reviewerName,
+    verdict: "request_changes",
+    verdictMarkerSha256: receipt.review.verdictMarkerSha256,
+    workerName: receipt.resources.workerName,
+    workerPaneId: receipt.resources.workerPaneId,
+    controller: {
+      sessionId: controller.sessionId,
+      workspaceId: controller.workspaceId,
+      tabId: controller.tabId,
+      paneId: controller.paneId
+    },
+    submittedAt
+  };
+  receipt.effects.repairPromptDispatch = { outcome: "planned", observedAt: submittedAt };
+  writeReceipt(receipt);
+  const confirmedController = recordedController(receipt, "repair");
+  if (!controllerMatchesCheckpoint(confirmedController, controller)) {
+    receipt.state = "failed";
+    recordEffect(receipt, "repairPromptDispatch", "failed", "controller_identity_changed");
+    throw new FrontierError({
+      message: "Controller identity changed after the repair checkpoint",
+      code: "CONTROLLER_IDENTITY_CONFLICT",
+      runId,
+      state: receipt.state,
+      changedState: "partial",
+      nextAction: "Inspect the checkpointed receipt; do not resubmit the repair prompt."
+    });
+  }
+  const confirmedWorker = agentObservation(receipt);
+  if (!completedStatuses.has(confirmedWorker.status)) {
+    receipt.state = "failed";
+    recordEffect(receipt, "repairPromptDispatch", "failed", "worker_identity_changed");
+    throw new FrontierError({
+      message: "same-worker identity or readiness changed after the repair checkpoint",
+      code: "WORKER_IDENTITY_CONFLICT",
+      runId,
+      state: receipt.state,
+      changedState: "partial",
+      nextAction: "Inspect the checkpointed worker; do not resubmit or retarget the repair prompt."
+    });
+  }
+  const promptText = new TextDecoder().decode(prompt).trimEnd();
+  const repairPrompt = `${promptText}
+
+Frontier Runner repair contract:
+- Apply only the exact private repair instructions to this existing candidate.
+- Reuse this same worker; do not start a reviewer, replacement worker, acceptance, Git, or publication.
+Reviewed candidate workspace SHA-256: ${receipt.repair.candidateBeforeSha256}
+Result file: ${receipt.inputs.resultFile}
+- Finish by independently deriving the result file SHA-256 and emitting exactly one standalone frontier-result:<sha256> line.
+- Do not repeat the marker.
+`;
+  recordEffect(receipt, "repairPromptDispatch", "unknown");
+  const prompted = runHerdr([
+    "agent",
+    "prompt",
+    receipt.resources.workerName,
+    repairPrompt,
+    "--wait",
+    "--timeout",
+    String(receipt.inputs.timeoutMs)
+  ], receipt.workspace.path);
+  if (responseAgentMatches(herdrResponseResult(prompted, "agent_prompted"), receipt)) {
+    recordEffect(receipt, "repairPromptDispatch", "succeeded");
+  } else if (prompted.errorCode && promptUncertainCodes.has(prompted.errorCode)) {
+    receipt.state = "repair_timed_out";
+    recordEffect(receipt, "repairPromptDispatch", "timed_out", prompted.errorCode);
+    throw new FrontierError({
+      message: "repair prompt delivery is classified but unsettled",
+      code: "REPAIR_TIMEOUT",
+      exitCode: 124,
+      runId,
+      state: receipt.state,
+      changedState: "partial",
+      sideEffects: ["repair-prompt-maybe-delivered"],
+      nextAction: `Run frontier-runner resume --run-id ${runId}; never resend the repair prompt.`
+    });
+  } else if (prompted.errorCode && responseFailedCodes.has(prompted.errorCode)) {
+    receipt.state = "failed";
+    recordEffect(receipt, "repairPromptDispatch", "failed", prompted.errorCode);
+    throw new FrontierError({
+      message: `Herdr rejected the repair prompt before accepting it: ${prompted.errorCode}`,
+      code: "REPAIR_DISPATCH_FAILED",
+      runId,
+      state: receipt.state,
+      changedState: "partial",
+      nextAction: "Inspect the same worker and receipt; do not repeat or retarget repair."
+    });
+  } else {
+    throw new FrontierError({
+      message: "repair prompt dispatch outcome is unknown",
+      code: "REPAIR_EFFECT_UNKNOWN",
+      runId,
+      state: receipt.state,
+      changedState: "partial",
+      sideEffects: ["repair-prompt-maybe-delivered"],
+      retrySafe: false,
+      nextAction: `Run frontier-runner resume --run-id ${runId}; never resend the repair prompt.`
+    });
+  }
+  const result = proveRepair(receipt, agentObservation(receipt), "repair");
+  return { ...result, sideEffects: ["repair-prompt"] };
 }
 function resumeCommand(arguments_) {
   const flags = parseFlags(arguments_, ["--run-id"]);
@@ -1919,8 +2305,8 @@ function resumeCommand(arguments_) {
     };
   }
   if (receipt.state === "decision_starting") {
-    const controller = decisionController(receipt);
-    if (controller.sessionId !== receipt.decision?.controller.sessionId || controller.workspaceId !== receipt.decision?.controller.workspaceId || controller.tabId !== receipt.decision?.controller.tabId || controller.paneId !== receipt.decision?.controller.paneId) {
+    const controller = recordedController(receipt, "decision");
+    if (!controllerMatchesCheckpoint(controller, receipt.decision?.controller)) {
       throw new FrontierError({
         message: "current Controller identity conflicts with the checkpointed decision",
         code: "CONTROLLER_IDENTITY_CONFLICT",
@@ -1929,8 +2315,37 @@ function resumeCommand(arguments_) {
         nextAction: "Resume from the same recognised Controller session; never resubmit the decision."
       });
     }
-    requireDecisionCandidate(receipt);
+    requireReviewedCandidate(receipt, "decision");
     return decisionRecorded(receipt, "resume");
+  }
+  if (receipt.state === "repaired") {
+    return {
+      schemaVersion,
+      ok: true,
+      command: "resume",
+      code: "REPAIR_COMPLETED",
+      runId,
+      state: receipt.state,
+      changedState: "none",
+      sideEffects: [],
+      retrySafe: true,
+      nextAction: "The same worker already produced one changed candidate. Stop before re-review, acceptance, Git, publication, or another worker."
+    };
+  }
+  if (isResumableRepairState(receipt.state)) {
+    requireCheckpointedRepairController(receipt);
+    const uncertainEffect2 = unknownEffect(receipt, ["repairPromptDispatch", "repairResponseDispatch"]);
+    if (uncertainEffect2) {
+      throw new FrontierError({
+        message: `receipt contains an unknown external effect: ${uncertainEffect2}`,
+        code: "EFFECT_UNKNOWN",
+        runId,
+        state: receipt.state,
+        nextAction: "Inspect the same worker and private receipt; replay or replacement is unsafe."
+      });
+    }
+    reconcileRunPanes(receipt);
+    return proveRepair(receipt, agentObservation(receipt), "resume");
   }
   if (receipt.state === "reviewed") {
     return {
@@ -2168,7 +2583,7 @@ if (commandInput === undefined || commandInput === "--help" || commandInput === 
   process.stdout.write(help());
   process.exit(0);
 }
-if (!["run", "respond", "resume", "review", "decide", "cleanup"].includes(commandInput))
+if (!["run", "respond", "resume", "review", "decide", "repair", "cleanup"].includes(commandInput))
   emitFailure("unknown", new FrontierError({
     message: `unknown command: ${commandInput}`,
     code: "USAGE",
@@ -2177,7 +2592,7 @@ if (!["run", "respond", "resume", "review", "decide", "cleanup"].includes(comman
   }));
 var command = commandInput;
 try {
-  const envelope = command === "run" ? runCommand(commandArguments) : command === "respond" ? respondCommand(commandArguments) : command === "resume" ? resumeCommand(commandArguments) : command === "review" ? reviewCommand(commandArguments) : command === "decide" ? decideCommand(commandArguments) : cleanupCommand(commandArguments);
+  const envelope = command === "run" ? runCommand(commandArguments) : command === "respond" ? respondCommand(commandArguments) : command === "resume" ? resumeCommand(commandArguments) : command === "review" ? reviewCommand(commandArguments) : command === "decide" ? decideCommand(commandArguments) : command === "repair" ? repairCommand(commandArguments) : cleanupCommand(commandArguments);
   emit(envelope);
 } catch (error) {
   if (error instanceof FrontierError)

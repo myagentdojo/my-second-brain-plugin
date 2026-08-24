@@ -17,6 +17,9 @@ import { afterEach, expect, test } from "bun:test"
 
 const root = resolve(import.meta.dir, "..")
 const afterHash = "7b9a72466d3960eb2aacccfc848939453490db0678bd4725def3f789b891c919"
+// Independent test-oracle literals. Do not derive these through production or test helpers.
+const repairedHash = "aa6083f3a3c96f3860a4977f429ed51841511a3716ea3537472fea4365781e2b"
+const repairedMarkerHash = "f2853ba42f7706bfb26e86a4414e46ac619f9bd6a24e45f7354e3ed80ebd06f5"
 const temporaryRoots: string[] = []
 
 interface Fixture {
@@ -25,6 +28,7 @@ interface Fixture {
 	workspace: string
 	promptFile: string
 	reviewPromptFile: string
+	repairPromptFile: string
 	decisionFile: string
 	responseFile: string
 	resultFile: string
@@ -33,6 +37,7 @@ interface Fixture {
 	deliveredPrompt: string
 	livePanes: string
 	splitCount: string
+	startCount: string
 	transcript: string
 	reviewTranscript: string
 	currentPaneJson: string
@@ -67,6 +72,7 @@ function fixture(): Fixture {
 	const stateHome = join(fixtureRoot, "state")
 	const promptFile = join(fixtureRoot, "prompt.md")
 	const reviewPromptFile = join(fixtureRoot, "review-prompt.md")
+	const repairPromptFile = join(fixtureRoot, "repair-prompt.md")
 	const decisionFile = join(fixtureRoot, "decision.txt")
 	const responseFile = join(fixtureRoot, "response.txt")
 	const resultFile = join(workspace, "fixture.txt")
@@ -74,6 +80,7 @@ function fixture(): Fixture {
 	const deliveredPrompt = join(fixtureRoot, "delivered-prompt.md")
 	const livePanes = join(fixtureRoot, "live-panes")
 	const splitCount = join(fixtureRoot, "split-count")
+	const startCount = join(fixtureRoot, "start-count")
 	const transcript = join(fixtureRoot, "transcript.txt")
 	const reviewTranscript = join(fixtureRoot, "review-transcript.txt")
 	const currentPaneCount = join(fixtureRoot, "current-pane-count")
@@ -84,6 +91,10 @@ function fixture(): Fixture {
 		mode: 0o600,
 	})
 	chmodSync(reviewPromptFile, 0o600)
+	writeFileSync(repairPromptFile, "Apply Nathan's approved repair to fixture.txt. REPAIR_PROMPT_PRIVATE\n", {
+		mode: 0o600,
+	})
+	chmodSync(repairPromptFile, 0o600)
 	writeFileSync(decisionFile, "accepted\n", { mode: 0o600 })
 	chmodSync(decisionFile, 0o600)
 	writeFileSync(responseFile, "Proceed once", { mode: 0o600 })
@@ -93,6 +104,7 @@ function fixture(): Fixture {
 	writeFileSync(deliveredPrompt, "")
 	writeFileSync(livePanes, "w1:p1\n")
 	writeFileSync(splitCount, "0\n")
+	writeFileSync(startCount, "0\n")
 	writeFileSync(transcript, "")
 	writeFileSync(reviewTranscript, "")
 	writeFileSync(currentPaneCount, "0\n")
@@ -176,6 +188,16 @@ case "\${1:-} \${2:-}" in
 		fi
 		;;
 	"agent start")
+		count=$(tr -d '\\n' < "$FR_TEST_START_COUNT")
+		count=$((count + 1))
+		printf '%s\n' "$count" > "$FR_TEST_START_COUNT"
+		busy=0
+		if [[ "$FR_TEST_START_MODE" == "busy_persistent" ]]; then busy=1; fi
+		if [[ "$FR_TEST_START_MODE" == "busy_then_success" && "$count" -le 2 ]]; then busy=1; fi
+		if [[ "$busy" == "1" ]]; then
+			printf '{"id":"cli:agent:start","error":{"code":"agent_pane_busy","message":"pane is busy"}}\n' >&2
+			exit 1
+		fi
 		pane='w1:p4'
 		previous=''
 		for argument in "\${@:4}"; do
@@ -187,6 +209,24 @@ case "\${1:-} \${2:-}" in
 		;;
 	"agent prompt")
 		printf '%s' "\${4:-}" > "$FR_TEST_DELIVERED_PROMPT"
+		if [[ "\${4:-}" == *"Frontier Runner repair contract:"* ]]; then
+			if [[ "$FR_TEST_REPAIR_RESULT_MODE" == "changed" ]]; then
+				printf 'repaired\n' > "$FR_TEST_RESULT_FILE"
+				printf 'frontier-result:%s\n' "$FR_TEST_REPAIR_HASH" > "$FR_TEST_TRANSCRIPT"
+			elif [[ "$FR_TEST_REPAIR_RESULT_MODE" == "missing_marker" ]]; then
+				printf 'repaired\n' > "$FR_TEST_RESULT_FILE"
+				printf 'repair finished without proof\n' > "$FR_TEST_TRANSCRIPT"
+			else
+				printf 'frontier-result:%s\n' "$FR_TEST_AFTER_HASH" > "$FR_TEST_TRANSCRIPT"
+			fi
+			case "$FR_TEST_REPAIR_PROMPT_MODE" in
+				timeout) printf '{"id":"cli:agent:prompt","error":{"code":"timeout","message":"timed out"}}\n' >&2; exit 1 ;;
+				unknown) printf '{"id":"cli:agent:prompt","error":{"code":"socket_closed","message":"unknown"}}\n' >&2; exit 1 ;;
+			rejected) printf '{"id":"cli:agent:prompt","error":{"code":"agent_not_ready","message":"not ready"}}\n' >&2; exit 1 ;;
+			esac
+			printf '{"id":"cli:agent:prompt","result":{"type":"agent_prompted","agent":{"name":"%s","pane_id":"w1:p4","terminal_id":"term:w1:p4","workspace_id":"w1","tab_id":"w1:t1","agent_status":"idle","interactive_ready":true,"focused":false,"revision":1}}}\n' "\${3:-}"
+			exit 0
+		fi
 		if [[ "\${3:-}" == frr_* ]]; then
 			candidate=$(printf '%s' "\${4:-}" | sed -n 's/^Candidate workspace SHA-256: //p' | head -n 1)
 			case "$FR_TEST_REVIEW_TRANSCRIPT_MODE" in
@@ -246,7 +286,11 @@ case "\${1:-} \${2:-}" in
 		;;
 	"agent send-keys")
 		if [[ "$FR_TEST_RESPONSE_MODE" != "failed" ]]; then
-			printf 'frontier-result:%s\n' "$FR_TEST_AFTER_HASH" > "$FR_TEST_TRANSCRIPT"
+			if grep -Fq 'Frontier Runner repair contract:' "$FR_TEST_DELIVERED_PROMPT"; then
+				printf 'frontier-result:%s\n' "$FR_TEST_REPAIR_HASH" > "$FR_TEST_TRANSCRIPT"
+			else
+				printf 'frontier-result:%s\n' "$FR_TEST_AFTER_HASH" > "$FR_TEST_TRANSCRIPT"
+			fi
 		fi
 		case "$FR_TEST_RESPONSE_MODE" in
 			timeout)
@@ -267,7 +311,13 @@ case "\${1:-} \${2:-}" in
 		esac
 		;;
 	"agent get")
-		if [[ "\${3:-}" == frr_* ]]; then pane="$FR_TEST_REVIEWER_PANE"; status="$FR_TEST_REVIEWER_STATUS"; else pane="$FR_TEST_AGENT_PANE"; status="$FR_TEST_AGENT_STATUS"; fi
+		if [[ "\${3:-}" == frr_* ]]; then
+			pane="$FR_TEST_REVIEWER_PANE"; status="$FR_TEST_REVIEWER_STATUS"
+		else
+			pane="$FR_TEST_AGENT_PANE"; status="$FR_TEST_AGENT_STATUS"
+			if grep -Fq 'Frontier Runner repair contract:' "$FR_TEST_DELIVERED_PROMPT"; then status="$FR_TEST_REPAIR_AGENT_STATUS"; fi
+			if [[ "$FR_TEST_PROTOCOL_MODE" == "agent_get_ambiguous" ]]; then printf '{"id":"cli:agent:get","error":{"code":"ambiguous","message":"multiple agents"}}\n' >&2; exit 1; fi
+		fi
 		printf '{"id":"cli:agent:get","result":{"type":"agent_info","agent":{"name":"%s","pane_id":"%s","terminal_id":"term:%s","workspace_id":"w1","tab_id":"w1:t1","agent_status":"%s","interactive_ready":true,"focused":false,"revision":1}}}\n' "\${3:-}" "$pane" "$pane" "$status"
 		;;
 	"agent wait")
@@ -275,7 +325,12 @@ case "\${1:-} \${2:-}" in
 			printf '{"id":"cli:agent:wait","error":{"code":"timeout","message":"timed out"}}\n' >&2
 			exit 1
 		fi
-		if [[ "\${3:-}" == frr_* ]]; then pane="$FR_TEST_REVIEWER_PANE"; status="$FR_TEST_REVIEWER_STATUS"; else pane="$FR_TEST_AGENT_PANE"; status="$FR_TEST_AGENT_STATUS"; fi
+		if [[ "\${3:-}" == frr_* ]]; then
+			pane="$FR_TEST_REVIEWER_PANE"; status="$FR_TEST_REVIEWER_STATUS"
+		else
+			pane="$FR_TEST_AGENT_PANE"; status="$FR_TEST_AGENT_STATUS"
+			if grep -Fq 'Frontier Runner repair contract:' "$FR_TEST_DELIVERED_PROMPT"; then status="$FR_TEST_REPAIR_AGENT_STATUS"; fi
+		fi
 		printf '{"id":"cli:agent:wait","result":{"type":"agent_info","agent":{"name":"%s","pane_id":"%s","terminal_id":"term:%s","workspace_id":"w1","tab_id":"w1:t1","agent_status":"%s","interactive_ready":true,"focused":false,"revision":1}}}\n' "\${3:-}" "$pane" "$pane" "$status"
 		;;
 	"agent read")
@@ -295,6 +350,7 @@ esac
 		workspace,
 		promptFile,
 		reviewPromptFile,
+		repairPromptFile,
 		decisionFile,
 		responseFile,
 		resultFile,
@@ -303,6 +359,7 @@ esac
 		deliveredPrompt,
 		livePanes,
 		splitCount,
+		startCount,
 		transcript,
 		reviewTranscript,
 		currentPaneJson: JSON.stringify({
@@ -345,6 +402,8 @@ function environment(testFixture: Fixture, overrides: Record<string, string | un
 		FR_TEST_DELIVERED_PROMPT: testFixture.deliveredPrompt,
 		FR_TEST_LIVE_PANES: testFixture.livePanes,
 		FR_TEST_SPLIT_COUNT: testFixture.splitCount,
+		FR_TEST_START_COUNT: testFixture.startCount,
+		FR_TEST_START_MODE: "success",
 		FR_TEST_TRANSCRIPT: testFixture.transcript,
 		FR_TEST_REVIEW_TRANSCRIPT: testFixture.reviewTranscript,
 		FR_TEST_CURRENT_PANE_JSON: testFixture.currentPaneJson,
@@ -364,6 +423,10 @@ function environment(testFixture: Fixture, overrides: Record<string, string | un
 		FR_TEST_REVIEW_MUTATION: "0",
 		FR_TEST_REVIEWER_PANE: "w1:p5",
 		FR_TEST_REVIEWER_STATUS: "idle",
+		FR_TEST_REPAIR_PROMPT_MODE: "success",
+		FR_TEST_REPAIR_RESULT_MODE: "changed",
+		FR_TEST_REPAIR_AGENT_STATUS: "idle",
+		FR_TEST_REPAIR_HASH: repairedHash,
 		...overrides,
 	}
 }
@@ -403,6 +466,10 @@ function reviewArguments(testFixture: Fixture, runId: string): string[] {
 	return ["review", "--run-id", runId, "--review-prompt-file", testFixture.reviewPromptFile]
 }
 
+function repairArguments(testFixture: Fixture, runId: string): string[] {
+	return ["repair", "--run-id", runId, "--repair-prompt-file", testFixture.repairPromptFile]
+}
+
 function decisionArguments(testFixture: Fixture, runId: string): string[] {
 	return ["decide", "--run-id", runId, "--decision-file", testFixture.decisionFile]
 }
@@ -437,6 +504,10 @@ function completeReview(testFixture: Fixture, verdict = "approve"): string {
 	return runId
 }
 
+function completeRequestedReview(testFixture: Fixture): string {
+	return completeReview(testFixture, "request_changes")
+}
+
 function workspaceSnapshot(rootPath: string): unknown[] {
 	const visit = (path: string, relativePath: string): unknown[] => {
 		const entries = readdirSync(path).sort()
@@ -465,7 +536,7 @@ function workspaceSnapshot(rootPath: string): unknown[] {
 	return visit(rootPath, "")
 }
 
-test("bundled public executable exposes run, respond, resume, review, decide, and cleanup", () => {
+test("bundled public executable exposes run, respond, resume, review, decide, repair, and cleanup", () => {
 	const testFixture = fixture()
 	const result = runCli(testFixture, ["--help"])
 
@@ -475,6 +546,7 @@ test("bundled public executable exposes run, respond, resume, review, decide, an
 	expect(result.stdout.toString()).toContain("frontier-runner respond")
 	expect(result.stdout.toString()).toContain("frontier-runner review")
 	expect(result.stdout.toString()).toContain("frontier-runner decide")
+	expect(result.stdout.toString()).toContain("frontier-runner repair")
 	expect(result.stdout.toString()).toContain("frontier-runner cleanup")
 })
 
@@ -849,6 +921,320 @@ test("an unknown decision effect resumes the same checkpoint without resubmittin
 		effects: { decisionRecord: { outcome: "succeeded" } },
 	})
 })
+
+test("repair dispatches one private prompt to the exact recorded worker and proves a changed candidate", () => {
+	const testFixture = fixture()
+	const runId = completeRequestedReview(testFixture)
+	const reviewedReceipt = JSON.parse(readFileSync(receiptPath(testFixture, runId), "utf8")) as {
+		resources: { workerName: string; workerPaneId: string; reviewerName: string }
+		review: { candidateAfterSha256: string; verdictMarkerSha256: string }
+	}
+	writeFileSync(testFixture.commandLog, "")
+
+	const result = runCli(testFixture, repairArguments(testFixture, runId))
+
+	expect(result.exitCode, result.stderr.toString()).toBe(0)
+	expect(result.stderr.toString()).toBe("")
+	expect(envelope(result)).toMatchObject({
+		ok: true,
+		command: "repair",
+		code: "REPAIR_COMPLETED",
+		runId,
+		state: "repaired",
+		changedState: "complete",
+		sideEffects: ["repair-prompt"],
+		retrySafe: true,
+	})
+	expect(readFileSync(testFixture.resultFile, "utf8")).toBe("repaired\n")
+	const commands = readFileSync(testFixture.commandLog, "utf8")
+	expect(count(commands, /^agent prompt <fr_[a-f0-9]{12}>/gm)).toBe(1)
+	expect(count(commands, /^agent <start>/gm)).toBe(0)
+	expect(count(commands, /^pane <split>/gm)).toBe(0)
+	const receiptText = readFileSync(receiptPath(testFixture, runId), "utf8")
+	const receipt = JSON.parse(receiptText) as {
+		state: string
+		resources: { workerName: string; workerPaneId: string; reviewerName: string }
+		repair: {
+			promptSha256: string
+			submissionAttempt: number
+			runId: string
+			candidateBeforeSha256: string
+			candidateAfterSha256: string
+			resultSha256: string
+			resultMarkerSha256: string
+			reviewerName: string
+			verdict: string
+			verdictMarkerSha256: string
+			workerName: string
+			workerPaneId: string
+			controller: { sessionId: string; workspaceId: string; tabId: string; paneId: string }
+		}
+		effects: { repairPromptDispatch: { outcome: string } }
+	}
+	expect(receipt).toMatchObject({
+		state: "repaired",
+		repair: {
+			promptSha256: "92caab0a4a4170c4831b60aeed47ffb269824b5f048f3c902c4f163bf0a5647c",
+			submissionAttempt: 1,
+			runId,
+			candidateBeforeSha256: reviewedReceipt.review.candidateAfterSha256,
+			resultSha256: repairedHash,
+			reviewerName: reviewedReceipt.resources.reviewerName,
+			verdict: "request_changes",
+			verdictMarkerSha256: reviewedReceipt.review.verdictMarkerSha256,
+			workerName: reviewedReceipt.resources.workerName,
+			workerPaneId: reviewedReceipt.resources.workerPaneId,
+			controller: {
+				sessionId: "controller-session-1",
+				workspaceId: "w1",
+				tabId: "w1:t1",
+				paneId: "w1:p1",
+			},
+		},
+		effects: { repairPromptDispatch: { outcome: "succeeded" } },
+	})
+	expect(receipt.repair.candidateAfterSha256).not.toBe(receipt.repair.candidateBeforeSha256)
+	expect(receipt.repair.resultMarkerSha256).toBe(repairedMarkerHash)
+	expect(receiptText).not.toContain("REPAIR_PROMPT_PRIVATE")
+	expect(receiptText).not.toContain("Apply Nathan's approved repair")
+}, 15_000)
+
+test("repair validates the private prompt, request_changes verdict, and reviewed candidate before mutation", () => {
+	for (const [prepare, verdict, code, expectedExit] of [
+		[(testFixture: Fixture) => chmodSync(testFixture.repairPromptFile, 0o644), "request_changes", "REPAIR_PROMPT_NOT_PRIVATE", 2],
+		[(_: Fixture) => {}, "approve", "REPAIR_NOT_REQUESTED", 1],
+		[(testFixture: Fixture) => writeFileSync(testFixture.resultFile, "changed after review\n"), "request_changes", "CANDIDATE_CONFLICT", 1],
+	] as const) {
+		const testFixture = fixture()
+		const runId = completeReview(testFixture, verdict)
+		prepare(testFixture)
+		writeFileSync(testFixture.commandLog, "")
+		const before = readFileSync(receiptPath(testFixture, runId), "utf8")
+
+		const result = runCli(testFixture, repairArguments(testFixture, runId))
+
+		expect(result.exitCode, code).toBe(expectedExit)
+		expect(envelope(result)).toMatchObject({ ok: false, command: "repair", code })
+		expect(readFileSync(testFixture.commandLog, "utf8"), code).not.toContain("agent prompt <fr_")
+		expect(readFileSync(receiptPath(testFixture, runId), "utf8"), code).toBe(before)
+	}
+}, 15_000)
+
+test("repair refuses an external caller outside Herdr before receipt mutation", () => {
+	const testFixture = fixture()
+	const runId = completeRequestedReview(testFixture)
+	const before = readFileSync(receiptPath(testFixture, runId), "utf8")
+	writeFileSync(testFixture.commandLog, "")
+
+	const result = runCli(testFixture, repairArguments(testFixture, runId), { HERDR_ENV: undefined })
+
+	expect(result.exitCode).toBe(1)
+	expect(envelope(result)).toMatchObject({
+		ok: false,
+		command: "repair",
+		code: "HERDR_REQUIRED",
+		changedState: "none",
+	})
+	expect(readFileSync(testFixture.commandLog, "utf8")).toBe("")
+	expect(readFileSync(receiptPath(testFixture, runId), "utf8")).toBe(before)
+})
+
+test("repair fails closed before dispatch for missing, replaced, ambiguous, or blocked worker identity", () => {
+	for (const [prepare, overrides, code] of [
+		[
+			(testFixture: Fixture) => writeFileSync(testFixture.livePanes, "w1:p1\nw1:p2\nw1:p3\nw1:p5\n"),
+			{},
+			"PANE_IDENTITY_LOST",
+		],
+		[(_: Fixture) => {}, { FR_TEST_AGENT_PANE: "w1:p9" }, "WORKER_IDENTITY_CONFLICT"],
+		[(_: Fixture) => {}, { FR_TEST_PROTOCOL_MODE: "agent_get_ambiguous" }, "WORKER_IDENTITY_CONFLICT"],
+		[(_: Fixture) => {}, { FR_TEST_AGENT_STATUS: "blocked" }, "REPAIR_WORKER_BLOCKED"],
+	] as const) {
+		const testFixture = fixture()
+		const runId = completeRequestedReview(testFixture)
+		prepare(testFixture)
+		writeFileSync(testFixture.commandLog, "")
+
+		const result = runCli(testFixture, repairArguments(testFixture, runId), overrides)
+
+		expect(result.exitCode, code).toBe(1)
+		expect(envelope(result)).toMatchObject({ ok: false, command: "repair", code })
+		expect(readFileSync(testFixture.commandLog, "utf8"), code).not.toContain("agent prompt <fr_")
+	}
+}, 20_000)
+
+test("a timed-out repair resumes the same checkpoint and proves the changed candidate without replay", () => {
+	const testFixture = fixture()
+	const runId = completeRequestedReview(testFixture)
+	writeFileSync(testFixture.commandLog, "")
+
+	const timedOut = runCli(testFixture, repairArguments(testFixture, runId), {
+		FR_TEST_REPAIR_PROMPT_MODE: "timeout",
+	})
+
+	expect(timedOut.exitCode).toBe(124)
+	expect(envelope(timedOut)).toMatchObject({ code: "REPAIR_TIMEOUT", state: "repair_timed_out" })
+	rmSync(testFixture.repairPromptFile)
+	const resumed = runCli(testFixture, ["resume", "--run-id", runId])
+	expect(resumed.exitCode, resumed.stderr.toString()).toBe(0)
+	expect(envelope(resumed)).toMatchObject({ code: "REPAIR_COMPLETED", state: "repaired" })
+	const commands = readFileSync(testFixture.commandLog, "utf8")
+	expect(count(commands, /^agent prompt <fr_[a-f0-9]{12}>/gm)).toBe(1)
+	expect(count(commands, /^agent <start>/gm)).toBe(0)
+}, 15_000)
+
+test("repair resume refuses a different Controller session before observing the worker", () => {
+	const testFixture = fixture()
+	const runId = completeRequestedReview(testFixture)
+	const timedOut = runCli(testFixture, repairArguments(testFixture, runId), {
+		FR_TEST_REPAIR_PROMPT_MODE: "timeout",
+	})
+	expect(timedOut.exitCode).toBe(124)
+	const before = readFileSync(receiptPath(testFixture, runId), "utf8")
+	writeFileSync(testFixture.commandLog, "")
+
+	const resumed = runCli(testFixture, ["resume", "--run-id", runId], {
+		FR_TEST_CURRENT_PANE_JSON: testFixture.currentPaneJson.replace(
+			"controller-session-1",
+			"controller-session-2",
+		),
+	})
+
+	expect(resumed.exitCode).toBe(1)
+	expect(envelope(resumed)).toMatchObject({
+		ok: false,
+		command: "resume",
+		code: "CONTROLLER_IDENTITY_CONFLICT",
+		state: "repair_timed_out",
+		changedState: "none",
+	})
+	const commands = readFileSync(testFixture.commandLog, "utf8")
+	expect(commands).toContain("pane <current> <--current>")
+	expect(commands).not.toContain("agent <get>")
+	expect(commands).not.toContain("agent <wait>")
+	expect(commands).not.toContain("agent <read>")
+	expect(readFileSync(receiptPath(testFixture, runId), "utf8")).toBe(before)
+}, 15_000)
+
+test("an unknown repair effect reconciles the same checkpoint without prompt replay or retargeting", () => {
+	const testFixture = fixture()
+	const runId = completeRequestedReview(testFixture)
+	writeFileSync(testFixture.commandLog, "")
+
+	const uncertain = runCli(testFixture, repairArguments(testFixture, runId), {
+		FR_TEST_REPAIR_PROMPT_MODE: "unknown",
+	})
+
+	expect(uncertain.exitCode).toBe(1)
+	expect(envelope(uncertain)).toMatchObject({
+		code: "REPAIR_EFFECT_UNKNOWN",
+		state: "repair_starting",
+		retrySafe: false,
+	})
+	rmSync(testFixture.repairPromptFile)
+	const resumed = runCli(testFixture, ["resume", "--run-id", runId])
+	expect(resumed.exitCode, resumed.stderr.toString()).toBe(0)
+	expect(envelope(resumed)).toMatchObject({ code: "REPAIR_COMPLETED", state: "repaired" })
+	const commands = readFileSync(testFixture.commandLog, "utf8")
+	expect(count(commands, /^agent prompt <fr_[a-f0-9]{12}>/gm)).toBe(1)
+}, 15_000)
+
+test("a repair-blocked worker uses the inherited operator response and resumes the same attempt", () => {
+	const testFixture = fixture()
+	const runId = completeRequestedReview(testFixture)
+	writeFileSync(testFixture.commandLog, "")
+
+	const blocked = runCli(testFixture, repairArguments(testFixture, runId), {
+		FR_TEST_REPAIR_AGENT_STATUS: "blocked",
+	})
+	expect(blocked.exitCode).toBe(1)
+	expect(envelope(blocked)).toMatchObject({ code: "REPAIR_WORKER_BLOCKED", state: "repair_blocked" })
+
+	const responded = runCli(testFixture, responseArguments(testFixture, runId), {
+		FR_TEST_REPAIR_AGENT_STATUS: "blocked",
+	})
+	expect(responded.exitCode, responded.stderr.toString()).toBe(0)
+	expect(envelope(responded)).toMatchObject({ code: "RESPONSE_DISPATCHED", state: "repair_responded" })
+	rmSync(testFixture.repairPromptFile)
+	const resumed = runCli(testFixture, ["resume", "--run-id", runId])
+	expect(resumed.exitCode, resumed.stderr.toString()).toBe(0)
+	expect(envelope(resumed)).toMatchObject({ code: "REPAIR_COMPLETED", state: "repaired" })
+	const commands = readFileSync(testFixture.commandLog, "utf8")
+	expect(count(commands, /^agent prompt <fr_[a-f0-9]{12}>/gm)).toBe(1)
+	expect(count(commands, /^agent <send-keys> <fr_[a-f0-9]{12}>/gm)).toBe(1)
+}, 15_000)
+
+test("repair respond refuses a different Controller session before sending input", () => {
+	const testFixture = fixture()
+	const runId = completeRequestedReview(testFixture)
+	const blocked = runCli(testFixture, repairArguments(testFixture, runId), {
+		FR_TEST_REPAIR_AGENT_STATUS: "blocked",
+	})
+	expect(blocked.exitCode).toBe(1)
+	expect(envelope(blocked)).toMatchObject({ code: "REPAIR_WORKER_BLOCKED", state: "repair_blocked" })
+	const before = readFileSync(receiptPath(testFixture, runId), "utf8")
+	writeFileSync(testFixture.commandLog, "")
+
+	const responded = runCli(testFixture, responseArguments(testFixture, runId), {
+		FR_TEST_REPAIR_AGENT_STATUS: "blocked",
+		FR_TEST_CURRENT_PANE_JSON: testFixture.currentPaneJson.replace(
+			"controller-session-1",
+			"controller-session-2",
+		),
+	})
+
+	expect(responded.exitCode).toBe(1)
+	expect(envelope(responded)).toMatchObject({
+		ok: false,
+		command: "respond",
+		code: "CONTROLLER_IDENTITY_CONFLICT",
+		state: "repair_blocked",
+		changedState: "none",
+	})
+	const commands = readFileSync(testFixture.commandLog, "utf8")
+	expect(commands).toContain("pane <current> <--current>")
+	expect(commands).not.toContain("agent <send-keys>")
+	expect(readFileSync(receiptPath(testFixture, runId), "utf8")).toBe(before)
+}, 15_000)
+
+test("unproved, repeated, stale, and cleaned repair requests cannot create another attempt", () => {
+	for (const mode of ["same", "missing_marker"] as const) {
+		const testFixture = fixture()
+		const runId = completeRequestedReview(testFixture)
+		const result = runCli(testFixture, repairArguments(testFixture, runId), {
+			FR_TEST_REPAIR_RESULT_MODE: mode,
+		})
+		expect(result.exitCode, mode).toBe(1)
+		expect(envelope(result)).toMatchObject({ code: "REPAIR_NOT_PROVED", state: "repair_unproved" })
+	}
+
+	const repeatedFixture = fixture()
+	const repeatedRunId = completeRequestedReview(repeatedFixture)
+	expect(runCli(repeatedFixture, repairArguments(repeatedFixture, repeatedRunId)).exitCode).toBe(0)
+	writeFileSync(repeatedFixture.commandLog, "")
+	const repeated = runCli(repeatedFixture, repairArguments(repeatedFixture, repeatedRunId))
+	expect(repeated.exitCode).toBe(1)
+	expect(envelope(repeated)).toMatchObject({ code: "REPAIR_ALREADY_ATTEMPTED" })
+	expect(readFileSync(repeatedFixture.commandLog, "utf8")).toBe("")
+
+	const cleanedFixture = fixture()
+	const cleanedRunId = completeRequestedReview(cleanedFixture)
+	expect(runCli(cleanedFixture, ["cleanup", "--run-id", cleanedRunId]).exitCode).toBe(0)
+	writeFileSync(cleanedFixture.commandLog, "")
+	const cleaned = runCli(cleanedFixture, repairArguments(cleanedFixture, cleanedRunId))
+	expect(cleaned.exitCode).toBe(1)
+	expect(envelope(cleaned)).toMatchObject({ code: "REPAIR_NOT_AVAILABLE", state: "cleaned" })
+	expect(readFileSync(cleanedFixture.commandLog, "utf8")).toBe("")
+
+	const decidedFixture = fixture()
+	const decidedRunId = completeReview(decidedFixture)
+	expect(runCli(decidedFixture, decisionArguments(decidedFixture, decidedRunId)).exitCode).toBe(0)
+	writeFileSync(decidedFixture.commandLog, "")
+	const decided = runCli(decidedFixture, repairArguments(decidedFixture, decidedRunId))
+	expect(decided.exitCode).toBe(1)
+	expect(envelope(decided)).toMatchObject({ code: "REPAIR_NOT_AVAILABLE", state: "decided" })
+	expect(readFileSync(decidedFixture.commandLog, "utf8")).toBe("")
+}, 30_000)
 
 test("respond rejects a non-private response file before contacting the worker", () => {
 	const testFixture = fixture()
@@ -1231,6 +1617,79 @@ test("starts the dedicated Codex worker with its question surface enabled", () =
 	expect(readFileSync(testFixture.commandLog, "utf8")).toMatch(
 		/^agent <start> <fr_[a-f0-9]{12}> <--kind> <codex> <--pane> <w1:p4> <--> <--enable> <default_mode_request_user_input>$/m,
 	)
+})
+
+test("a transiently busy pane retries the same worker start until Herdr confirms it", () => {
+	const testFixture = fixture()
+	const result = runCli(testFixture, runArguments(testFixture), {
+		FR_TEST_START_MODE: "busy_then_success",
+	})
+
+	expect(result.exitCode, `${result.stderr.toString()}\n${result.stdout.toString()}`).toBe(124)
+	expect(envelope(result)).toMatchObject({ ok: false, code: "PROMPT_TIMEOUT", state: "timed_out" })
+	const commands = readFileSync(testFixture.commandLog, "utf8")
+	const starts =
+		commands.match(/^agent <start> <fr_[a-f0-9]{12}> <--kind> <codex> <--pane> <w1:p4> .*$/gm) ?? []
+	expect(starts).toHaveLength(3)
+	expect(new Set(starts).size).toBe(1)
+	expect(count(commands, /^agent prompt/gm)).toBe(1)
+	const receipt = JSON.parse(
+		readFileSync(receiptPath(testFixture, envelope(result).runId as string), "utf8"),
+	) as { effects: { workerStart: { outcome: string } } }
+	expect(receipt.effects.workerStart).toEqual(expect.objectContaining({ outcome: "succeeded" }))
+})
+
+test("a persistently busy pane fails closed after a bounded number of identical start attempts", () => {
+	const testFixture = fixture()
+	const result = runCli(testFixture, runArguments(testFixture), {
+		FR_TEST_START_MODE: "busy_persistent",
+	})
+
+	expect(result.exitCode, result.stdout.toString()).toBe(1)
+	const report = envelope(result)
+	expect(report).toMatchObject({
+		ok: false,
+		command: "run",
+		code: "WORKER_START_REJECTED",
+		state: "starting",
+	})
+	const commands = readFileSync(testFixture.commandLog, "utf8")
+	// Independent oracle: the bounded attempt budget is deliberately restated as a literal.
+	expect(count(commands, /^agent <start>/gm)).toBe(10)
+	expect(count(commands, /^agent prompt/gm)).toBe(0)
+	const receipt = JSON.parse(
+		readFileSync(receiptPath(testFixture, report.runId as string), "utf8"),
+	) as { state: string; effects: { workerStart: { outcome: string; code?: string } } }
+	expect(receipt.state).toBe("starting")
+	expect(receipt.effects.workerStart).toEqual(
+		expect.objectContaining({ outcome: "failed", code: "agent_pane_busy" }),
+	)
+	expect(report.nextAction).toContain("no worker was started")
+
+	writeFileSync(testFixture.commandLog, "")
+	const resumed = runCli(testFixture, ["resume", "--run-id", report.runId as string])
+	expect(resumed.exitCode).toBe(1)
+	expect(envelope(resumed)).toMatchObject({ ok: false, code: "WORKER_IDENTITY_LOST" })
+	expect(count(readFileSync(testFixture.commandLog, "utf8"), /^agent <start>/gm)).toBe(0)
+})
+
+test("a transiently busy pane retries the same reviewer start without a replacement reviewer", () => {
+	const testFixture = fixture()
+	const runId = completeRun(testFixture)
+	writeFileSync(testFixture.startCount, "0\n")
+	writeFileSync(testFixture.commandLog, "")
+
+	const reviewed = runCli(testFixture, reviewArguments(testFixture, runId), {
+		FR_TEST_START_MODE: "busy_then_success",
+	})
+
+	expect(reviewed.exitCode, reviewed.stderr.toString()).toBe(0)
+	expect(envelope(reviewed)).toMatchObject({ ok: true, code: "REVIEW_COMPLETED", state: "reviewed" })
+	const commands = readFileSync(testFixture.commandLog, "utf8")
+	const starts =
+		commands.match(/^agent <start> <frr_[a-f0-9]{12}> <--kind> <codex> <--pane> <w1:p5> .*$/gm) ?? []
+	expect(starts).toHaveLength(3)
+	expect(new Set(starts).size).toBe(1)
 })
 
 test("the worker prompt requires a final shell action that emits the independently derived marker", () => {

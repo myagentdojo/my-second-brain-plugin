@@ -1,6 +1,6 @@
 ---
 name: frontier-runner
-description: "Start Frontier Runner V0 or drive one receipt-backed bounded Codex run, review, or operator decision in Herdr."
+description: "Start Frontier Runner V0 or drive one receipt-backed bounded Codex run, review, operator decision, or same-worker repair in Herdr."
 disable-model-invocation: true
 ---
 
@@ -88,6 +88,33 @@ If the result is unknown, continue only with `resume --run-id <id>`; never
 resubmit or replace the decision file. `accepted` records Nathan's decision
 for the bound run, candidate, and verdict. It grants no repair, cleanup, Git,
 publication, or next-unit authority. `declined` records the decision and stops.
+
+## Same-worker repair
+
+Use `repair` only for one proved, uncleaned run whose receipt-backed advisory
+verdict is `request_changes`. Re-resolve the recognised Controller in the
+recorded workspace, tab, and caller pane. Put Nathan's exact approved repair
+instructions in one owner-private file, then invoke once:
+
+```sh
+<plugin-root>/bin/frontier-runner repair \
+  --run-id <id> \
+  --repair-prompt-file <private-path>
+```
+
+The transition checkpoints submission attempt 1, re-resolves the exact
+recorded worker and pane, and dispatches no replacement worker or reviewer.
+Continue timeout, unknown, or unproved results only with `resume --run-id
+<id>`; never repeat `repair` or replace the repair prompt. If the same attempt
+blocks after dispatch, use the existing exact `respond` transition after the
+user approves its private response. Success requires a changed candidate and
+one independently derived result marker. Stop before re-review, acceptance,
+Git, publication, or another worker.
+
+Repair is not one of Safe Ghostty's Public Controller Interface operations.
+That interface cannot express or invoke it. A direct executable call outside
+the recognised Herdr Controller is an External Caller and returns
+`HERDR_REQUIRED` before receipt mutation.
 
 ## Smoke checks
 
