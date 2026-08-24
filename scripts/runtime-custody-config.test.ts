@@ -53,6 +53,7 @@ test("renders one custody launcher for every catalog skill", () => {
 		.map((file) => file.path)
 
 	expect(launchers).toEqual([
+		"plugin/bin/frontier-runner",
 		"plugin/bin/hello-world",
 		"plugin/bin/skill-a",
 		"plugin/bin/skill-b",

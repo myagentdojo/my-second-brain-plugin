@@ -1639,10 +1639,12 @@ const capabilityAssetFiles = [
 	"assets/logo.svg",
 	"assets/vault.svg",
 ].sort(compareCodeUnits)
-const modelOnlySkillFiles = [
+const nonBundledSkillPayloadFiles = [
 	"skills/capability-tour/SKILL.md",
 	"skills/capability-tour/references/capability-reviewer.md",
 	"skills/dev-mode/SKILL.md",
+	"skills/frontier-runner/CONTEXT.md",
+	"skills/frontier-runner/scripts/frontier-runner.sh",
 	"skills/handoff-to-opus/SKILL.md",
 	"skills/handoff-to-opus/references/coderabbit-exact-range.md",
 	"skills/handoff-to-opus/references/supervised-delivery.md",
@@ -1697,7 +1699,7 @@ export function validateBunOnlyPayload(root: string): void {
 		"runtime/skill-catalog.sh",
 		...capabilityHookFiles,
 		...capabilityAssetFiles,
-		...modelOnlySkillFiles,
+		...nonBundledSkillPayloadFiles,
 	]
 	const bundleInventory = JSON.parse(
 		readFileSync(join(root, "plugin", "runtime", "bundle-inventory.json"), "utf8"),
@@ -1724,10 +1726,14 @@ export function validateBunOnlyPayload(root: string): void {
 	const catalogSkillFiles = Object.keys(catalog.skills)
 		.sort(compareCodeUnits)
 		.map((skillId) => `skills/${skillId}/SKILL.md`)
-	const expectedSkillFiles = [...modelOnlySkillFiles, ...catalogSkillFiles].sort(compareCodeUnits)
+	const expectedSkillFiles = [...nonBundledSkillPayloadFiles, ...catalogSkillFiles].sort(
+		compareCodeUnits,
+	)
 	const skillFiles = inventory.filter((path) => path.startsWith("skills/"))
 	if (skillFiles.join("\0") !== expectedSkillFiles.join("\0")) {
-		throw new Error("Bun payload closure: skill sidecar inventory does not match the catalog and model-only allowlist")
+		throw new Error(
+			"Bun payload closure: skill sidecar inventory does not match the catalog and non-bundled skill payload files",
+		)
 	}
 
 	const drifted = checkRuntimeCustodyFiles(root)

@@ -2,6 +2,11 @@
 # Generated from bundle-inventory.json by scripts/build.ts. Edit workspace sources, then run bun run build.
 runtime_inventory_select_bundle() {
 	case "$1" in
+	'frontier-runner')
+		RUNTIME_BUNDLE_PATH='runtime/frontier-runner-659b5dedecb84722.js'
+		RUNTIME_BUNDLE_BYTES='109683'
+		RUNTIME_BUNDLE_SHA256='659b5dedecb84722818a2ea09f5c34bdeb58ebe07c27cb1ba59b836bb639d9db'
+		;;
 	'hello-world')
 		RUNTIME_BUNDLE_PATH='runtime/hello-world.js'
 		RUNTIME_BUNDLE_BYTES='995'

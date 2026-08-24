@@ -243,6 +243,7 @@ const PORTABLE_SKILLS_WITHOUT_HOOKS = [
 	"runtime-custody",
 	"capability-tour",
 	"dev-mode",
+	"frontier-runner",
 	"handoff-to-opus",
 	"new-note",
 	"new-project",
@@ -1296,7 +1297,7 @@ export function proveInstalledCapabilityEvidence(
 	if (JSON.stringify(installedSkills) !== JSON.stringify(portableSkills)) {
 		throw new Error(`${client} installed portable skill inventory differs`)
 	}
-	const executableSkills = ["hello-world", "skill-a", "skill-b"]
+	const executableSkills = ["frontier-runner", "hello-world", "skill-a", "skill-b"]
 	const launchers = installedInventory
 		.filter((path) => path.startsWith("bin/"))
 		.map((path) => path.slice("bin/".length))

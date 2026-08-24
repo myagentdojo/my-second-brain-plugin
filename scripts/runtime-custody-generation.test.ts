@@ -74,6 +74,11 @@ test("runtime custody sources generate one thin launcher and checked shell proje
 	expect(catalog).toEqual({
 		schemaVersion: 1,
 		skills: {
+			"frontier-runner": {
+				entry: "runtime/frontier-runner.js",
+				runtimeProfile: "bun",
+				workspace: "packages/frontier-runner",
+			},
 			"hello-world": {
 				entry: "runtime/hello-world.js",
 				runtimeProfile: "bun",
@@ -93,9 +98,11 @@ test("runtime custody sources generate one thin launcher and checked shell proje
 	const installedSkills = readdirSync(
 		fileURLToPath(new URL("../plugin/skills", import.meta.url)),
 	).sort()
+	// Independent oracle: do not import the build allowlist that this inventory checks.
 	expect(installedSkills).toEqual([
 		"capability-tour",
 		"dev-mode",
+		"frontier-runner",
 		"handoff-to-opus",
 		"hello-world",
 		"new-note",
@@ -133,15 +140,20 @@ test("runtime custody sources generate one thin launcher and checked shell proje
 		).text()
 		expect(skillDocument).not.toContain("Status: not yet invocable")
 	}
-	expect(generated.filter((file) => file.path.startsWith("plugin/bin/")).length).toBe(3)
+	expect(generated.filter((file) => file.path.startsWith("plugin/bin/")).length).toBe(4)
 	const launcherNames = readdirSync(
 		fileURLToPath(new URL("../plugin/bin", import.meta.url)),
 	).sort()
-	expect(launcherNames).toEqual(["hello-world", "skill-a", "skill-b"])
+	expect(launcherNames).toEqual(["frontier-runner", "hello-world", "skill-a", "skill-b"])
 	const bundleInventory = await Bun.file(
 		new URL("../plugin/runtime/bundle-inventory.json", import.meta.url),
 	).json()
-	expect(Object.keys(bundleInventory.bundles).sort()).toEqual(["hello-world", "skill-a", "skill-b"])
+	expect(Object.keys(bundleInventory.bundles).sort()).toEqual([
+		"frontier-runner",
+		"hello-world",
+		"skill-a",
+		"skill-b",
+	])
 	expect(bundleInventory.bundles).not.toHaveProperty("capability-tour")
 
 	const lockProjection = await Bun.file(

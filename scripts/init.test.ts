@@ -648,5 +648,5 @@ test("initialized repository development plan uses configured plugin identity", 
 	})
 	expect(dryRun.exitCode, dryRun.stderr.toString()).toBe(0)
 	const plan = JSON.parse(dryRun.stdout.toString().trim().split("\n").at(-1) ?? "")
-	expect(plan.install).toContain("codex plugin add dojo-hello@dojo-hello-dev")
+	expect(plan.install).toContain("codex plugin add dojo-hello-dev@dojo-hello-dev")
 })

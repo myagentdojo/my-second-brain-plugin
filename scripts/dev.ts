@@ -22,9 +22,14 @@ export { claudeWatchSources }
 const root = resolve(import.meta.dir, "..")
 const pluginConfig = loadPluginConfig(root)
 const pluginName = pluginConfig.name
-const developmentMarketplaceName = `${pluginName}-dev`
+const developmentPluginName = `${pluginName}-dev`
+const developmentMarketplaceName = developmentPluginName
+const developmentDisplayName = `${pluginConfig.displayName} Dev`
+const developmentPluginId = `${developmentPluginName}@${developmentMarketplaceName}`
+const supersededDevelopmentPluginId = `${pluginName}@${developmentMarketplaceName}`
 const developmentRoot = join(root, ".dev", "codex-marketplace")
-const stagedPluginRoot = join(developmentRoot, "plugins", pluginName)
+const stagedPluginRoot = join(developmentRoot, "plugins", developmentPluginName)
+const supersededStagedPluginRoot = join(developmentRoot, "plugins", pluginName)
 
 const topLevelHelp = `Develop the complete Plugin Payload through each native harness.
 
@@ -185,22 +190,25 @@ function cachebuster(): string {
 }
 
 function stageCodexPlugin(): string {
+	rmSync(supersededStagedPluginRoot, { recursive: true, force: true })
 	rmSync(stagedPluginRoot, { recursive: true, force: true })
 	mkdirSync(stagedPluginRoot, { recursive: true })
 	copyPluginPayload(root, stagedPluginRoot)
 
 	const manifestPath = join(stagedPluginRoot, ".codex-plugin", "plugin.json")
 	const manifest = JSON.parse(readFileSync(manifestPath, "utf8"))
+	manifest.name = developmentPluginName
 	manifest.version = `${manifest.version}+codex.local-${cachebuster()}`
+	manifest.interface = { ...manifest.interface, displayName: developmentDisplayName }
 	writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
 
 	const marketplace = {
 		name: developmentMarketplaceName,
-		interface: { displayName: `${pluginConfig.displayName} Development` },
+		interface: { displayName: developmentDisplayName },
 		plugins: [
 			{
-				name: pluginName,
-				source: { source: "local", path: `./plugins/${pluginName}` },
+				name: developmentPluginName,
+				source: { source: "local", path: `./plugins/${developmentPluginName}` },
 				policy: { installation: "AVAILABLE", authentication: "ON_INSTALL" },
 				category: "Developer Tools",
 			},
@@ -248,7 +256,8 @@ function runCodex(options: CodexInvocation): void {
 	if (!codexMarketplaceExists()) {
 		run(["codex", "plugin", "marketplace", "add", developmentRoot])
 	}
-	run(["codex", "plugin", "add", `${pluginName}@${developmentMarketplaceName}`, "--json"])
+	run(["codex", "plugin", "add", developmentPluginId, "--json"])
+	run(["codex", "plugin", "remove", supersededDevelopmentPluginId, "--json"])
 	console.error("Codex installed the staged skills, hooks, manifests, and runtime.")
 	console.error("A fresh task is the reload boundary.")
 	if (options.launch) run(["codex"])
@@ -369,7 +378,7 @@ async function main(arguments_: string[]): Promise<number> {
 			harness: invocation.harness,
 			build: "bun run build",
 			source: stagedPluginRoot,
-			install: `codex plugin add ${pluginName}@${developmentMarketplaceName}`,
+			install: `codex plugin add ${developmentPluginId}`,
 			reload: "Start a fresh Codex task after reinstall",
 		}
 		if (invocation.json) console.log(JSON.stringify(plan))
