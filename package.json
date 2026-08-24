@@ -17,7 +17,7 @@
     "build": "bun run scripts/build.ts",
     "dev": "bun run scripts/dev.ts",
     "dev:claude": "bun run scripts/dev.ts claude watch",
-    "dev:codex": "bun run scripts/dev.ts codex",
+    "dev:codex": "bun run scripts/dev.ts codex install",
     "ship:canary": "bun run scripts/ship-canary.ts",
     "readiness": "bun run scripts/repository-readiness.ts",
     "package": "bun run build && bun run scripts/package.ts",

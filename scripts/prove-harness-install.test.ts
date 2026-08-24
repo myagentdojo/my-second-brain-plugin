@@ -375,7 +375,11 @@ test("automated install evidence binds bytes without claiming native activation"
 				"frontier-runner",
 				"handoff-to-opus",
 				"new-note",
+				"new-plugin",
 				"new-project",
+				"new-skill",
+				"orchestrate-spec",
+				"orchestration-design",
 				"ultragoal",
 			],
 		})

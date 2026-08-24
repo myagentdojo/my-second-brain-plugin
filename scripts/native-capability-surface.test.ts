@@ -238,7 +238,20 @@ test("capability tour skill inventory names every shipped skill and its runtime 
 	expect([...listed.slice(bunBacked.length)].sort()).toEqual(modelOnly)
 
 	// The prose spells the split in words, so compare against the spelled form.
-	const spelled = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight"]
+	const spelled = [
+		"zero",
+		"one",
+		"two",
+		"three",
+		"four",
+		"five",
+		"six",
+		"seven",
+		"eight",
+		"nine",
+		"ten",
+		"eleven",
+	]
 	expect(inventory).toContain(`first ${spelled[bunBacked.length]}`)
 	expect(inventory).toContain(`last ${spelled[modelOnly.length]}`)
 })

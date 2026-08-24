@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto"
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
-import { join, resolve } from "node:path"
+import { resolve } from "node:path"
 
 import {
 	ClaudeDevelopmentInstallationError,
@@ -14,33 +13,26 @@ import {
 	QUALIFICATION_CLIENT_HARNESSES,
 	type HarnessId,
 } from "./harness-identity"
-import { copyPluginPayload } from "./plugin-files"
-import { loadPluginConfig } from "./plugin-config"
+import {
+	CodexDevelopmentInstallationError,
+	runCodexDevelopmentInstallation,
+	type CodexDevelopmentErrorAction,
+} from "./codex-development-installation"
 
 export { claudeWatchSources }
 
 const root = resolve(import.meta.dir, "..")
-const pluginConfig = loadPluginConfig(root)
-const pluginName = pluginConfig.name
-const developmentPluginName = `${pluginName}-dev`
-const developmentMarketplaceName = developmentPluginName
-const developmentDisplayName = `${pluginConfig.displayName} Dev`
-const developmentPluginId = `${developmentPluginName}@${developmentMarketplaceName}`
-const supersededDevelopmentPluginId = `${pluginName}@${developmentMarketplaceName}`
-const developmentRoot = join(root, ".dev", "codex-marketplace")
-const stagedPluginRoot = join(developmentRoot, "plugins", developmentPluginName)
-const supersededStagedPluginRoot = join(developmentRoot, "plugins", pluginName)
 
 const topLevelHelp = `Develop the complete Plugin Payload through each native harness.
 
 Usage:
   bun run dev -- claude <check|install|restore|watch> [options]
-  bun run dev -- codex [--check] [--no-launch] [--dry-run] [--json]
+  bun run dev -- codex <check|install> [options]
   bun run dev -- --help
 
 Commands:
   claude              Manage one persistent live-linked Claude Development Installation
-  codex               Build, stage, reinstall, and optionally launch Codex
+  codex               Inspect, preview, and apply one staged Codex Development Installation
 
 Run \`bun run dev -- claude --help\` for the Claude lifecycle and safety contract.
 `
@@ -78,14 +70,24 @@ Safety:
   --apply. Build and watch write repository output but do not change Claude settings.
 `
 
-const codexHelp = `Usage: bun run dev -- codex [options]
+const codexHelp = `Manage one staged Codex Development Installation.
+
+Usage:
+  bun run dev -- codex check [--json] [--no-input]
+  bun run dev -- codex install [--apply --candidate-hash <sha256>] [--no-launch] [--json] [--no-input]
 
 Options:
-  --check             Build and stage only; do not change Codex profile state
-  --no-launch         Prepare Codex but do not launch it
-  --dry-run           Print the plan without writes or harness commands
-  --json              Emit the dry-run plan as JSON
+	--apply              Authorize the exact previewed candidate mutation
+	--candidate-hash     Bind --apply to the candidate hash returned by preview
+	--no-launch          Do not launch Codex after a verified apply
+	--json               Emit one stable machine result on stdout
+	--no-input           Assert the non-interactive path; this command never prompts or launches Codex
   -h, --help          Show this help
+
+Safety:
+  Check and install preview may rebuild repository output and stage the candidate,
+  but never change Codex profile state. Native mutation requires --apply plus the
+  exact candidate hash. Apply re-inspects the resulting native identity.
 `
 
 interface ClaudeInvocation {
@@ -98,10 +100,12 @@ interface ClaudeInvocation {
 
 interface CodexInvocation {
 	harness: "codex"
-	check: boolean
+	operation: "check" | "install"
+	apply: boolean
+	expectedCandidateHash?: string
 	launch: boolean
-	dryRun: boolean
 	json: boolean
+	noInput: boolean
 }
 
 type Invocation = ClaudeInvocation | CodexInvocation
@@ -141,21 +145,64 @@ function parseClaude(arguments_: string[]): ClaudeInvocation {
 }
 
 function parseCodex(arguments_: string[]): CodexInvocation {
-	const flags = new Set(arguments_)
-	for (const flag of flags) {
-		if (!["--check", "--no-launch", "--dry-run", "--json"].includes(flag)) {
-			throw new UsageError(`unknown Codex option: ${flag}`)
+	const operation = arguments_[0] as "check" | "install" | undefined
+	if (!operation || !["check", "install"].includes(operation)) {
+		throw new UsageError("codex requires check or install")
+	}
+	let apply = false
+	let expectedCandidateHash: string | undefined
+	let launch = operation === "install"
+	let noLaunch = false
+	let json = false
+	let noInput = false
+	const seen = new Set<string>()
+	for (let index = 1; index < arguments_.length; index += 1) {
+		const argument = arguments_[index]
+		if (seen.has(argument)) throw new UsageError(`${argument} may be provided once`)
+		seen.add(argument)
+		switch (argument) {
+			case "--apply":
+				apply = true
+				break
+			case "--candidate-hash":
+				expectedCandidateHash = arguments_[index + 1]
+				if (!expectedCandidateHash || expectedCandidateHash.startsWith("--")) {
+					throw new UsageError("--candidate-hash requires one SHA-256 value")
+				}
+				index += 1
+				break
+			case "--no-launch":
+				launch = false
+				noLaunch = true
+				break
+			case "--json":
+				json = true
+				break
+			case "--no-input":
+				noInput = true
+				break
+			default:
+				throw new UsageError(`unknown Codex option: ${argument}`)
 		}
 	}
-	if (flags.has("--json") && !flags.has("--dry-run")) {
-		throw new UsageError("Codex --json requires --dry-run")
+	if (operation === "check" && (apply || expectedCandidateHash || noLaunch)) {
+		throw new UsageError("Codex check supports only --json and --no-input")
 	}
+	if (operation === "install" && apply !== Boolean(expectedCandidateHash)) {
+		throw new UsageError("Codex install --apply requires --candidate-hash, and the hash requires --apply")
+	}
+	if (expectedCandidateHash && !/^[a-f0-9]{64}$/.test(expectedCandidateHash)) {
+		throw new UsageError("Codex --candidate-hash must be one lowercase SHA-256 value")
+	}
+	if (noInput) launch = false
 	return {
 		harness: "codex",
-		check: flags.has("--check"),
-		launch: !flags.has("--no-launch") && !flags.has("--check"),
-		dryRun: flags.has("--dry-run"),
-		json: flags.has("--json"),
+		operation,
+		apply,
+		expectedCandidateHash,
+		launch,
+		json,
+		noInput,
 	}
 }
 
@@ -181,105 +228,23 @@ function run(command: string[], environment = process.env): void {
 	if (result.exitCode !== 0) process.exit(result.exitCode)
 }
 
-function build(): void {
-	run(["bun", "run", "build"])
-}
-
-function cachebuster(): string {
-	return new Date().toISOString().replaceAll(/[-:TZ.]/g, "").slice(0, 14)
-}
-
-function stageCodexPlugin(): string {
-	rmSync(supersededStagedPluginRoot, { recursive: true, force: true })
-	rmSync(stagedPluginRoot, { recursive: true, force: true })
-	mkdirSync(stagedPluginRoot, { recursive: true })
-	copyPluginPayload(root, stagedPluginRoot)
-
-	const manifestPath = join(stagedPluginRoot, ".codex-plugin", "plugin.json")
-	const manifest = JSON.parse(readFileSync(manifestPath, "utf8"))
-	manifest.name = developmentPluginName
-	manifest.version = `${manifest.version}+codex.local-${cachebuster()}`
-	manifest.interface = { ...manifest.interface, displayName: developmentDisplayName }
-	writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
-
-	const marketplace = {
-		name: developmentMarketplaceName,
-		interface: { displayName: developmentDisplayName },
-		plugins: [
-			{
-				name: developmentPluginName,
-				source: { source: "local", path: `./plugins/${developmentPluginName}` },
-				policy: { installation: "AVAILABLE", authentication: "ON_INSTALL" },
-				category: "Developer Tools",
-			},
-		],
-	}
-	const marketplacePath = join(developmentRoot, ".agents", "plugins", "marketplace.json")
-	mkdirSync(join(developmentRoot, ".agents", "plugins"), { recursive: true })
-	writeFileSync(marketplacePath, `${JSON.stringify(marketplace, null, 2)}\n`)
-	return manifest.version
-}
-
-function codexMarketplaceExists(): boolean {
-	const result = Bun.spawnSync({
-		cmd: ["codex", "plugin", "marketplace", "list", "--json"],
-		env: process.env,
-		stdout: "pipe",
-		stderr: "pipe",
-	})
-	if (result.exitCode !== 0) {
-		process.stderr.write(result.stderr)
-		process.exit(result.exitCode)
-	}
-	const output = JSON.parse(result.stdout.toString())
-	const marketplace = output.marketplaces.find(
-		(marketplace: { name?: string }) => marketplace.name === developmentMarketplaceName,
-	)
-	if (!marketplace) return false
-	if (resolve(marketplace.root) !== resolve(developmentRoot)) {
-		throw new Error(
-			`Codex marketplace ${developmentMarketplaceName} already points at ${marketplace.root}. Remove or rename that marketplace before continuing.`,
-		)
-	}
-	return true
-}
-
-function runCodex(options: CodexInvocation): void {
-	build()
-	const version = stageCodexPlugin()
-	console.log(`Staged complete plugin ${version}`)
-	if (options.check) {
-		console.log("Codex development check passed: no Codex profile changed.")
-		return
-	}
-
-	if (!codexMarketplaceExists()) {
-		run(["codex", "plugin", "marketplace", "add", developmentRoot])
-	}
-	run(["codex", "plugin", "add", developmentPluginId, "--json"])
-	run(["codex", "plugin", "remove", supersededDevelopmentPluginId, "--json"])
-	console.error("Codex installed the staged skills, hooks, manifests, and runtime.")
-	console.error("A fresh task is the reload boundary.")
-	if (options.launch) run(["codex"])
-}
-
 function developmentFailure(
 	runId: string,
-	invocation: ClaudeInvocation,
-	error: ClaudeDevelopmentInstallationError,
+	invocation: Invocation,
+	error: ClaudeDevelopmentInstallationError | CodexDevelopmentInstallationError,
 ): Record<string, unknown> {
-	const action: ClaudeDevelopmentErrorAction = error.action
+	const action: ClaudeDevelopmentErrorAction | CodexDevelopmentErrorAction = error.action
 	return {
 		schemaVersion: 1,
 		contractId: "plugin.development-installation",
 		runId,
 		ok: false,
-		harness: "claude",
+		harness: invocation.harness,
 		operation: invocation.operation,
 		mode:
 			invocation.operation === "check"
 				? "inspect"
-				: invocation.operation === "watch"
+				: invocation.harness === "claude" && invocation.operation === "watch"
 					? "watch"
 					: invocation.apply
 						? "apply"
@@ -373,20 +338,41 @@ async function main(arguments_: string[]): Promise<number> {
 		}
 	}
 
-	if (invocation.dryRun) {
-		const plan = {
-			harness: invocation.harness,
-			build: "bun run build",
-			source: stagedPluginRoot,
-			install: `codex plugin add ${developmentPluginId}`,
-			reload: "Start a fresh Codex task after reinstall",
+	try {
+		const output = runCodexDevelopmentInstallation({
+			operation: invocation.operation,
+			apply: invocation.apply,
+			expectedCandidateHash: invocation.expectedCandidateHash,
+			runId,
+			repositoryRoot: root,
+			environment: process.env,
+		})
+		if (invocation.json) process.stdout.write(`${JSON.stringify(output)}\n`)
+		else process.stdout.write(`${output.transactionState}: ${output.nextAction}\n`)
+		if (invocation.apply && output.transactionState === "installed" && invocation.launch) {
+			run(["codex"])
 		}
-		if (invocation.json) console.log(JSON.stringify(plan))
-		else console.log(Object.values(plan).join("\n"))
 		return 0
+	} catch (error) {
+		const failure =
+			error instanceof CodexDevelopmentInstallationError
+				? error
+				: new CodexDevelopmentInstallationError(
+						"INTERNAL_FAILURE",
+						"Unexpected Codex development lifecycle failure; native state was not proven",
+						{
+							action: "ESCALATE",
+							errorFamily: "internal",
+							retrySafety: "inspect_required",
+							nextAction:
+								"Report this run id with the command that produced it; the lifecycle proved no native state.",
+						},
+					)
+		if (invocation.json)
+			process.stdout.write(`${JSON.stringify(developmentFailure(runId, invocation, failure))}\n`)
+		process.stderr.write(`dev: ${failure.code}: ${failure.message} [run ${runId}]\n`)
+		return 1
 	}
-	runCodex(invocation)
-	return 0
 }
 
 if (import.meta.main) process.exit(await main(process.argv.slice(2)))

@@ -246,7 +246,11 @@ const PORTABLE_SKILLS_WITHOUT_HOOKS = [
 	"frontier-runner",
 	"handoff-to-opus",
 	"new-note",
+	"new-plugin",
 	"new-project",
+	"new-skill",
+	"orchestrate-spec",
+	"orchestration-design",
 	"ultragoal",
 ] as const
 

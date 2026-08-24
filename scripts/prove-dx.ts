@@ -17,15 +17,31 @@ const codexManifest = JSON.parse(
 	readFileSync(join(root, "plugin", ".codex-plugin", "plugin.json"), "utf8"),
 )
 
-function codexDryRun(): Record<string, string> {
-	const result = Bun.spawnSync({
-		cmd: ["bun", "run", "scripts/dev.ts", "codex", "--dry-run", "--json"],
-		cwd: root,
-		stdout: "pipe",
-		stderr: "inherit",
-	})
-	if (result.exitCode !== 0) process.exit(result.exitCode)
-	return JSON.parse(result.stdout.toString())
+function codexCheck(): Record<string, any> {
+	const temporaryRoot = mkdtempSync(join(tmpdir(), "codex-development-check-"))
+	const codeHome = join(temporaryRoot, "codex-home")
+	mkdirSync(codeHome, { recursive: true })
+	try {
+		const result = Bun.spawnSync({
+			cmd: [
+				"bun",
+				"run",
+				"scripts/dev.ts",
+				"codex",
+				"check",
+				"--json",
+				"--no-input",
+			],
+			cwd: root,
+			env: { ...process.env, CODEX_HOME: codeHome },
+			stdout: "pipe",
+			stderr: "inherit",
+		})
+		if (result.exitCode !== 0) process.exit(result.exitCode)
+		return JSON.parse(result.stdout.toString())
+	} finally {
+		rmSync(temporaryRoot, { recursive: true, force: true })
+	}
 }
 
 function run(
@@ -197,10 +213,15 @@ function proveClaudeDevelopmentInstallation(): void {
 }
 
 proveClaudeDevelopmentInstallation()
-const codex = codexDryRun()
+const codex = codexCheck()
 
-if (!codex.install.includes("plugin add") || !codex.reload.includes("fresh Codex task")) {
-	throw new Error("Codex plan does not use the native cached-install and fresh-task boundary")
+if (
+	codex.contractId !== "plugin.development-installation" ||
+	codex.current.development !== "absent" ||
+	!codex.plan.some((command: string) => command.includes("plugin add")) ||
+	!codex.nextAction.includes("install")
+) {
+	throw new Error("Codex check did not inspect and plan the native staged Development Installation")
 }
 
 if (claudeManifest.version !== codexManifest.version) {
@@ -259,7 +280,7 @@ console.log(
 		development: {
 			claude:
 				"isolated production replacement + persistent user link + ordinary-directory discovery + exact restore",
-			codex: "full staged copy + cachebuster + reinstall + fresh task",
+			codex: "full staged copy + candidate-hash plan + native inspection + fresh-task boundary",
 		},
 		production: "release PR + proof + tag + GitHub Release + harness update",
 		boundaries: [

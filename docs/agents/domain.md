@@ -6,34 +6,45 @@ This repo is **multi-context**: `CONTEXT-MAP.md` at the root points at each cont
 
 ## Before exploring, read these
 
-- **`CONTEXT-MAP.md`** at the repo root — it points at one `CONTEXT.md` per context. Read each one relevant to the topic.
-- **`CONTEXT.md`** at the repo root — the system-wide glossary (Harness, Plugin Payload, Harness Adapter, Portable Runtime, Capability Tour, and the capability boundaries).
-- **`docs/adr/`** — read ADRs that touch the area you're about to work in. Also check `packages/<context>/docs/adr/` for context-scoped decisions.
+- **`AGENTS.md`** at the repo root: read it first for a direct package-file entry.
+- **`CONTEXT-MAP.md`** at the repo root: read it next to find the governing canonical glossary and its governed path scopes.
+- **The mapped `CONTEXT.md`**: read it after the map. A direct package-file entry therefore reads root `AGENTS.md`, then `CONTEXT-MAP.md`, then the mapped skill-local glossary when that glossary governs the package.
+- **`docs/adr/`**: read ADRs that touch the area. Read a mapped context ADR directory only when the map says one exists.
 
 If any of these files don't exist, **proceed silently**. Don't flag their absence; don't suggest creating them upfront. The `/domain-modeling` skill (reached via `/grill-with-docs` and `/improve-codebase-architecture`) creates them lazily when terms or decisions actually get resolved.
 
 ## File structure
 
-This repo has no `src/` — workspace contexts live under `packages/`:
+Context scope follows vocabulary ownership and consumers, not adjacency or
+execution architecture. One skill-local glossary may govern both skill and
+package paths. The map records the canonical glossary and every governed scope:
 
 ```text
 /
 ├── CONTEXT-MAP.md
 ├── CONTEXT.md                         ← system-wide glossary
-├── docs/adr/                          ← system-wide decisions (0001–0008)
-├── plugin/                            ← generated payload; not a context
+├── docs/adr/                          ← system-wide decisions
+├── plugin/                            ← Plugin Payload root; not one context
+│   └── skills/
+│       ├── new-skill/
+│           └── CONTEXT.md             ← mapped skill-local vocabulary context
+│       └── frontier-runner/
+│           └── CONTEXT.md             ← also governs packages/frontier-runner/**
 ├── runtime/                           ← portable runtime + skill catalog
 ├── scripts/                           ← authoring, release, and proof tooling
 └── packages/
-    ├── skill-a/
-    │   ├── CONTEXT.md                 ← created lazily by /domain-modeling
-    │   └── docs/adr/                  ← context-specific decisions
-    └── skill-b/
-        ├── CONTEXT.md
-        └── docs/adr/
+    └── frontier-runner/               ← uses the mapped skill-local glossary
 ```
 
-Per-context `CONTEXT.md` and `docs/adr/` directories are **created lazily**. At the time of writing, `packages/skill-a` and `packages/skill-b` are dependency-boundary fixtures proving ESM/CJS interop, and every accepted decision is system-wide. Don't create empty per-context files ahead of real vocabulary.
+Create context files lazily. One canonical glossary governs shared vocabulary
+by default. A skill-local glossary may govern both `plugin/skills/<id>/**` and
+`packages/<id>/**` when their vocabulary is shared and installed agents need it.
+A second glossary is allowed only for distinct resolved package-scoped project
+vocabulary with a distinct consumer. Do not duplicate definitions or add a
+pointer-only payload glossary to a non-shipping package path.
+
+`CONTEXT.md` never owns implementation details or workflow steps. `SKILL.md`
+owns workflow. Code and package docs own implementation truth.
 
 ## Use the glossary's vocabulary
 
