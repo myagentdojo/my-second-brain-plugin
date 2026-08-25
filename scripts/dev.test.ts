@@ -272,101 +272,535 @@ test("dev:claude is the build-only watch shortcut", () => {
 	expect(packageJson.scripts["dev:claude"]).toBe("bun run scripts/dev.ts claude watch")
 })
 
-test("Codex development dry-run remains the native staged reinstall plan", () => {
-	const result = run(["codex", "--dry-run", "--json"])
+test("dev:codex is the preview-only shortcut", () => {
+	const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8"))
 
-	expect(result.exitCode).toBe(0)
-	const output = JSON.parse(result.stdout.toString())
-	expect(output.harness).toBe("codex")
-	expect(output.install).toContain("codex plugin add")
-	expect(output.reload).toBe("Start a fresh Codex task after reinstall")
+	expect(packageJson.scripts["dev:codex"]).toBe("bun run scripts/dev.ts codex install")
 })
 
-test("Codex check stages a distinct development identity", () => {
-	const repositoryRoot = isolatedRepository("codex-development-identity-")
-	try {
-		const result = run(["codex", "--check"], process.env, repositoryRoot)
+interface FakeCodexPlugin {
+	pluginId: string
+	name: string
+	marketplaceName: string
+	version: string
+	installed: boolean
+	enabled: boolean
+	source: { source: string; path: string }
+	marketplaceSource: { sourceType: string; source: string }
+}
 
-		expect(result.exitCode).toBe(0)
-		const marketplaceRoot = join(repositoryRoot, ".dev", "codex-marketplace")
-		const marketplace = JSON.parse(
-			readFileSync(join(marketplaceRoot, ".agents", "plugins", "marketplace.json"), "utf8"),
-		)
-		expect(marketplace).toMatchObject({
-			name: "my-second-brain-dev",
-			interface: { displayName: "My Second Brain Dev" },
-			plugins: [
-				{
-					name: "my-second-brain-dev",
-					source: { source: "local" },
-				},
-			],
-		})
-		const developmentRoot = resolve(marketplaceRoot, marketplace.plugins[0].source.path)
-		const developmentManifest = JSON.parse(
-			readFileSync(join(developmentRoot, ".codex-plugin", "plugin.json"), "utf8"),
-		)
-		expect(developmentManifest).toMatchObject({
-			name: "my-second-brain-dev",
-			interface: { displayName: "My Second Brain Dev" },
-		})
-		const productionManifest = JSON.parse(
-			readFileSync(join(repositoryRoot, "plugin", ".codex-plugin", "plugin.json"), "utf8"),
-		)
-		expect(productionManifest).toMatchObject({
-			name: "my-second-brain",
-			interface: { displayName: "My Second Brain" },
-		})
-		expect(existsSync(join(marketplaceRoot, "plugins", "my-second-brain"))).toBe(false)
-	} finally {
-		rmSync(repositoryRoot, { recursive: true, force: true })
-	}
-})
+interface FakeCodexState {
+	marketplaces: Array<{ name: string; root: string }>
+	plugins: FakeCodexPlugin[]
+	commands: string[]
+	skipInstall?: boolean
+	failCommands?: string[]
+	invalidJsonCommands?: string[]
+}
 
-test("Codex development migrates only the superseded identity", () => {
-	const temporaryRoot = mkdtempSync(join(tmpdir(), "codex-development-test-"))
-	const repositoryRoot = isolatedRepository("codex-development-migration-")
+function fakeCodexProfile(
+	repositoryRoot: string,
+	options: {
+		marketplaceRoot?: string | null
+		plugins?: FakeCodexPlugin[]
+		skipInstall?: boolean
+		failCommands?: string[]
+		invalidJsonCommands?: string[]
+	} = {},
+) {
+	const temporaryRoot = mkdtempSync(join(tmpdir(), "codex-development-profile-"))
 	const binaryRoot = join(temporaryRoot, "bin")
-	const commandLog = join(temporaryRoot, "commands.log")
+	const statePath = join(temporaryRoot, "state.json")
+	const marketplaceRoot = join(repositoryRoot, ".dev", "codex-marketplace")
 	mkdirSync(binaryRoot, { recursive: true })
+	writeExecutable(
+		join(binaryRoot, "bun"),
+		`#!/bin/sh
+if [ "$1" = "run" ] && [ "$2" = "build" ]; then exit 0; fi
+exec '${process.execPath}' "$@"
+`,
+	)
 	writeExecutable(
 		join(binaryRoot, "codex"),
 		`#!/usr/bin/env bun
-import { appendFileSync } from "node:fs"
-const command = process.argv.slice(2).join(" ")
-appendFileSync(process.env.CODEX_TEST_COMMAND_LOG, command + "\\n")
-if (command === "plugin marketplace list --json") {
-  console.log(JSON.stringify({ marketplaces: [{ name: "my-second-brain-dev", root: process.env.CODEX_TEST_DEVELOPMENT_ROOT }] }))
-} else if (command.startsWith("plugin add ") || command.startsWith("plugin remove ")) {
+import { readFileSync, writeFileSync } from "node:fs"
+import { join } from "node:path"
+const statePath = process.env.CODEX_TEST_STATE
+const state = JSON.parse(readFileSync(statePath, "utf8"))
+const args = process.argv.slice(2)
+const command = args.join(" ")
+state.commands.push(command)
+const save = () => writeFileSync(statePath, JSON.stringify(state, null, 2) + "\\n")
+if (state.failCommands?.includes(command)) {
+  save()
+  console.error("injected Codex failure")
+  process.exit(70)
+} else if (state.invalidJsonCommands?.includes(command)) {
+  save()
+  console.log("not JSON")
+} else if (command === "plugin marketplace list --json") {
+  save()
+  console.log(JSON.stringify({ marketplaces: state.marketplaces }))
+} else if (command === "plugin list --json") {
+  save()
+  console.log(JSON.stringify({ installed: state.plugins, available: [] }))
+} else if (args.slice(0, 3).join(" ") === "plugin marketplace add") {
+  const root = args[3]
+  state.marketplaces = state.marketplaces.filter((entry) => entry.name !== "my-second-brain-dev")
+  state.marketplaces.push({ name: "my-second-brain-dev", root })
+  save()
+  console.log(JSON.stringify({ marketplaceName: "my-second-brain-dev", installedRoot: root }))
+} else if (args[0] === "plugin" && args[1] === "add") {
+  if (!state.skipInstall) {
+    const sourcePath = join(process.env.CODEX_TEST_MARKETPLACE_ROOT, "plugins", "my-second-brain-dev")
+    const manifest = JSON.parse(readFileSync(join(sourcePath, ".codex-plugin", "plugin.json"), "utf8"))
+    state.plugins = state.plugins.filter((entry) => entry.pluginId !== args[2])
+    state.plugins.push({
+      pluginId: args[2],
+      name: "my-second-brain-dev",
+      marketplaceName: "my-second-brain-dev",
+      version: manifest.version,
+      installed: true,
+      enabled: true,
+      source: { source: "local", path: sourcePath },
+      marketplaceSource: { sourceType: "local", source: process.env.CODEX_TEST_MARKETPLACE_ROOT },
+    })
+  }
+  save()
+  console.log(JSON.stringify({ ok: true }))
+} else if (args[0] === "plugin" && args[1] === "remove") {
+  state.plugins = state.plugins.filter((entry) => entry.pluginId !== args[2])
+  save()
   console.log(JSON.stringify({ ok: true }))
 } else {
+  save()
   console.error("unexpected Codex command: " + command)
   process.exit(99)
 }
 `,
 	)
+	const state: FakeCodexState = {
+		marketplaces:
+			options.marketplaceRoot === null
+				? []
+				: [
+						{
+							name: "my-second-brain-dev",
+							root: options.marketplaceRoot ?? marketplaceRoot,
+						},
+					],
+		plugins: options.plugins ?? [],
+		commands: [],
+		skipInstall: options.skipInstall,
+		failCommands: options.failCommands,
+		invalidJsonCommands: options.invalidJsonCommands,
+	}
+	writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`)
+	return {
+		environment: {
+			...process.env,
+			PATH: `${binaryRoot}:${process.env.PATH ?? ""}`,
+			CODEX_TEST_STATE: statePath,
+			CODEX_TEST_MARKETPLACE_ROOT: marketplaceRoot,
+		},
+		marketplaceRoot,
+		readState: () => JSON.parse(readFileSync(statePath, "utf8")) as FakeCodexState,
+		cleanup: () => rmSync(temporaryRoot, { recursive: true, force: true }),
+	}
+}
+
+function staleCodexPlugin(repositoryRoot: string, pluginId = "my-second-brain-dev@my-second-brain-dev") {
+	const marketplaceRoot = join(repositoryRoot, ".dev", "codex-marketplace")
+	return {
+		pluginId,
+		name: pluginId.startsWith("my-second-brain-dev@")
+			? "my-second-brain-dev"
+			: "my-second-brain",
+		marketplaceName: "my-second-brain-dev",
+		version: "0.2.0+codex.local-stale",
+		installed: true,
+		enabled: true,
+		source: {
+			source: "local",
+			path: join(marketplaceRoot, "plugins", "my-second-brain-dev"),
+		},
+		marketplaceSource: { sourceType: "local", source: marketplaceRoot },
+	} satisfies FakeCodexPlugin
+}
+
+test("Codex check stages and inspects without changing profile state", () => {
+	const repositoryRoot = isolatedRepository("codex-development-check-")
+	const profile = fakeCodexProfile(repositoryRoot, { marketplaceRoot: null })
 	try {
 		const result = run(
-			["codex", "--no-launch"],
-			{
-				...process.env,
-				PATH: `${binaryRoot}:${process.env.PATH ?? ""}`,
-				CODEX_TEST_COMMAND_LOG: commandLog,
-				CODEX_TEST_DEVELOPMENT_ROOT: join(repositoryRoot, ".dev", "codex-marketplace"),
-			},
+			["codex", "check", "--json", "--no-input"],
+			profile.environment,
 			repositoryRoot,
 		)
 
 		expect(result.exitCode, result.stderr.toString()).toBe(0)
-		const commands = readFileSync(commandLog, "utf8").trim().split("\n")
-		expect(commands).toEqual([
-			"plugin marketplace list --json",
-			"plugin add my-second-brain-dev@my-second-brain-dev --json",
-			"plugin remove my-second-brain@my-second-brain-dev --json",
+		const output = jsonOutput(result)
+		expect(output).toMatchObject({
+			contractId: "plugin.development-installation",
+			harness: "codex",
+			operation: "check",
+			mode: "inspect",
+			changed: false,
+			current: { development: "absent", candidateCurrent: false },
+		})
+		expect(output.candidate.payloadHash).toMatch(/^[a-f0-9]{64}$/)
+		expect(output.plan).toEqual([
+			`codex plugin marketplace add ${profile.marketplaceRoot}`,
+			"codex plugin add my-second-brain-dev@my-second-brain-dev --json",
 		])
-		expect(commands).not.toContain("plugin remove my-second-brain@my-second-brain --json")
+		expect(profile.readState().commands).toEqual([
+			"plugin marketplace list --json",
+			"plugin list --json",
+		])
+		const developmentManifest = JSON.parse(
+			readFileSync(
+				join(
+					profile.marketplaceRoot,
+					"plugins",
+					"my-second-brain-dev",
+					".codex-plugin",
+					"plugin.json",
+				),
+				"utf8",
+			),
+		)
+		expect(developmentManifest).toMatchObject({
+			name: "my-second-brain-dev",
+			version: output.candidate.version,
+			interface: { displayName: "My Second Brain Dev" },
+		})
 	} finally {
-		rmSync(temporaryRoot, { recursive: true, force: true })
+		profile.cleanup()
+		rmSync(repositoryRoot, { recursive: true, force: true })
+	}
+})
+
+test("Codex install preview binds the exact candidate and performs no mutation", () => {
+	const repositoryRoot = isolatedRepository("codex-development-preview-")
+	const profile = fakeCodexProfile(repositoryRoot, {
+		plugins: [staleCodexPlugin(repositoryRoot)],
+	})
+	try {
+		const result = run(
+			["codex", "install", "--json", "--no-input", "--no-launch"],
+			profile.environment,
+			repositoryRoot,
+		)
+
+		expect(result.exitCode, result.stderr.toString()).toBe(0)
+		const output = jsonOutput(result)
+		expect(output).toMatchObject({
+			mode: "preview",
+			changed: false,
+			transactionState: "previewed",
+			current: { development: "installed", candidateCurrent: false },
+			plan: ["codex plugin add my-second-brain-dev@my-second-brain-dev --json"],
+		})
+		expect(output.nextAction).toContain(output.candidate.payloadHash)
+		expect(profile.readState().commands).toEqual([
+			"plugin marketplace list --json",
+			"plugin list --json",
+		])
+	} finally {
+		profile.cleanup()
+		rmSync(repositoryRoot, { recursive: true, force: true })
+	}
+})
+
+test("Codex apply installs and verifies the exact previewed candidate", () => {
+	const repositoryRoot = isolatedRepository("codex-development-apply-")
+	const profile = fakeCodexProfile(repositoryRoot, { marketplaceRoot: null })
+	try {
+		const preview = run(
+			["codex", "install", "--json", "--no-input", "--no-launch"],
+			profile.environment,
+			repositoryRoot,
+		)
+		const candidateHash = jsonOutput(preview).candidate.payloadHash
+		const applied = run(
+			[
+				"codex",
+				"install",
+				"--apply",
+				"--candidate-hash",
+				candidateHash,
+				"--json",
+				"--no-input",
+				"--no-launch",
+			],
+			profile.environment,
+			repositoryRoot,
+		)
+
+		expect(applied.exitCode, applied.stderr.toString()).toBe(0)
+		expect(jsonOutput(applied)).toMatchObject({
+			mode: "apply",
+			changed: true,
+			transactionState: "installed",
+			current: { development: "installed", enabled: true, candidateCurrent: true },
+			sideEffects: ["development_marketplace_added", "development_plugin_installed"],
+		})
+		const commands = profile.readState().commands
+		expect(commands).toContain(`plugin marketplace add ${profile.marketplaceRoot}`)
+		expect(commands).toContain("plugin add my-second-brain-dev@my-second-brain-dev --json")
+		expect(commands.slice(-2)).toEqual([
+			"plugin marketplace list --json",
+			"plugin list --json",
+		])
+	} finally {
+		profile.cleanup()
+		rmSync(repositoryRoot, { recursive: true, force: true })
+	}
+})
+
+test("Codex no-input apply never launches an interactive Codex process", () => {
+	const repositoryRoot = isolatedRepository("codex-development-no-input-launch-")
+	const profile = fakeCodexProfile(repositoryRoot, { marketplaceRoot: null })
+	try {
+		const preview = run(
+			["codex", "install", "--json", "--no-input"],
+			profile.environment,
+			repositoryRoot,
+		)
+		const candidateHash = jsonOutput(preview).candidate.payloadHash
+		const applied = run(
+			[
+				"codex",
+				"install",
+				"--apply",
+				"--candidate-hash",
+				candidateHash,
+				"--json",
+				"--no-input",
+			],
+			profile.environment,
+			repositoryRoot,
+		)
+
+		expect(applied.exitCode, applied.stderr.toString()).toBe(0)
+		expect(jsonOutput(applied)).toMatchObject({ mode: "apply", transactionState: "installed" })
+		expect(profile.readState().commands).not.toContain("")
+	} finally {
+		profile.cleanup()
+		rmSync(repositoryRoot, { recursive: true, force: true })
+	}
+})
+
+test("Codex apply refuses a candidate that differs from the preview", () => {
+	const repositoryRoot = isolatedRepository("codex-development-binding-")
+	const profile = fakeCodexProfile(repositoryRoot, { marketplaceRoot: null })
+	try {
+		const result = run(
+			[
+				"codex",
+				"install",
+				"--apply",
+				"--candidate-hash",
+				"0".repeat(64),
+				"--json",
+				"--no-input",
+				"--no-launch",
+			],
+			profile.environment,
+			repositoryRoot,
+		)
+
+		expect(result.exitCode).toBe(1)
+		expect(jsonOutput(result)).toMatchObject({
+			changed: false,
+			transactionState: "blocked",
+			error: {
+				code: "CODEX_DEVELOPMENT_CANDIDATE_CHANGED",
+				action: "FIX_INPUT",
+				errorFamily: "conflict",
+			},
+		})
+		expect(profile.readState().commands).toEqual([
+			"plugin marketplace list --json",
+			"plugin list --json",
+		])
+	} finally {
+		profile.cleanup()
+		rmSync(repositoryRoot, { recursive: true, force: true })
+	}
+})
+
+test("Codex check rejects a development Marketplace owned by another checkout", () => {
+	const repositoryRoot = isolatedRepository("codex-development-owner-")
+	const profile = fakeCodexProfile(repositoryRoot, { marketplaceRoot: "/other/checkout" })
+	try {
+		const result = run(
+			["codex", "check", "--json", "--no-input"],
+			profile.environment,
+			repositoryRoot,
+		)
+
+		expect(result.exitCode).toBe(1)
+		expect(jsonOutput(result)).toMatchObject({
+			changed: false,
+			error: {
+				code: "CODEX_DEVELOPMENT_MARKETPLACE_MISMATCH",
+				action: "INSPECT_STATE",
+				errorFamily: "conflict",
+			},
+		})
+		expect(profile.readState().commands).toEqual([
+			"plugin marketplace list --json",
+			"plugin list --json",
+		])
+	} finally {
+		profile.cleanup()
+		rmSync(repositoryRoot, { recursive: true, force: true })
+	}
+})
+
+test("Codex check classifies invalid native JSON as a protocol inspection", () => {
+	const repositoryRoot = isolatedRepository("codex-development-invalid-json-")
+	const profile = fakeCodexProfile(repositoryRoot, {
+		marketplaceRoot: null,
+		invalidJsonCommands: ["plugin list --json"],
+	})
+	try {
+		const result = run(
+			["codex", "check", "--json", "--no-input"],
+			profile.environment,
+			repositoryRoot,
+		)
+
+		expect(result.exitCode).toBe(1)
+		expect(jsonOutput(result)).toMatchObject({
+			error: {
+				code: "CODEX_OUTPUT_INVALID",
+				action: "INSPECT_STATE",
+				errorFamily: "protocol",
+			},
+		})
+	} finally {
+		profile.cleanup()
+		rmSync(repositoryRoot, { recursive: true, force: true })
+	}
+})
+
+test("Codex check classifies native command failure as a runtime repair", () => {
+	const repositoryRoot = isolatedRepository("codex-development-command-failure-")
+	const profile = fakeCodexProfile(repositoryRoot, {
+		marketplaceRoot: null,
+		failCommands: ["plugin marketplace list --json"],
+	})
+	try {
+		const result = run(
+			["codex", "check", "--json", "--no-input"],
+			profile.environment,
+			repositoryRoot,
+		)
+
+		expect(result.exitCode).toBe(1)
+		expect(jsonOutput(result)).toMatchObject({
+			error: {
+				code: "CODEX_COMMAND_FAILED",
+				action: "FIX_INPUT",
+				errorFamily: "runtime",
+			},
+		})
+	} finally {
+		profile.cleanup()
+		rmSync(repositoryRoot, { recursive: true, force: true })
+	}
+})
+
+test("Codex apply reports unknown state when resulting identity is not verified", () => {
+	const repositoryRoot = isolatedRepository("codex-development-verification-")
+	const profile = fakeCodexProfile(repositoryRoot, { marketplaceRoot: null, skipInstall: true })
+	try {
+		const preview = run(
+			["codex", "install", "--json", "--no-input", "--no-launch"],
+			profile.environment,
+			repositoryRoot,
+		)
+		const candidateHash = jsonOutput(preview).candidate.payloadHash
+		const applied = run(
+			[
+				"codex",
+				"install",
+				"--apply",
+				"--candidate-hash",
+				candidateHash,
+				"--json",
+				"--no-input",
+				"--no-launch",
+			],
+			profile.environment,
+			repositoryRoot,
+		)
+
+		expect(applied.exitCode).toBe(1)
+		expect(jsonOutput(applied)).toMatchObject({
+			changed: true,
+			transactionState: "unknown",
+			retrySafety: "inspect_required",
+			error: {
+				code: "CODEX_DEVELOPMENT_VERIFICATION_FAILED",
+				action: "INSPECT_STATE",
+				errorFamily: "verification",
+			},
+			sideEffects: ["development_marketplace_added", "development_plugin_installed"],
+		})
+	} finally {
+		profile.cleanup()
+		rmSync(repositoryRoot, { recursive: true, force: true })
+	}
+})
+
+test("Codex apply removes only the superseded development identity", () => {
+	const repositoryRoot = isolatedRepository("codex-development-migration-")
+	const production = staleCodexPlugin(
+		repositoryRoot,
+		"my-second-brain@my-second-brain",
+	)
+	production.marketplaceName = "my-second-brain"
+	production.name = "my-second-brain"
+	const superseded = staleCodexPlugin(
+		repositoryRoot,
+		"my-second-brain@my-second-brain-dev",
+	)
+	const profile = fakeCodexProfile(repositoryRoot, { plugins: [production, superseded] })
+	try {
+		const preview = run(
+			["codex", "install", "--json", "--no-input", "--no-launch"],
+			profile.environment,
+			repositoryRoot,
+		)
+		const candidateHash = jsonOutput(preview).candidate.payloadHash
+		const applied = run(
+			[
+				"codex",
+				"install",
+				"--apply",
+				"--candidate-hash",
+				candidateHash,
+				"--json",
+				"--no-input",
+				"--no-launch",
+			],
+			profile.environment,
+			repositoryRoot,
+		)
+
+		expect(applied.exitCode, applied.stderr.toString()).toBe(0)
+		const state = profile.readState()
+		expect(state.plugins.some((entry) => entry.pluginId === production.pluginId)).toBe(true)
+		expect(state.plugins.some((entry) => entry.pluginId === superseded.pluginId)).toBe(false)
+		expect(state.commands).toContain(
+			"plugin remove my-second-brain@my-second-brain-dev --json",
+		)
+		expect(state.commands).not.toContain("plugin remove my-second-brain@my-second-brain --json")
+	} finally {
+		profile.cleanup()
 		rmSync(repositoryRoot, { recursive: true, force: true })
 	}
 })

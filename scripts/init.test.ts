@@ -1,4 +1,13 @@
-import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import {
+	chmodSync,
+	cpSync,
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { basename, join, resolve } from "node:path"
 
@@ -639,14 +648,31 @@ test("initialized repository development plan uses configured plugin identity", 
 	const temporaryRoot = copyTemplate("agent-plugin-template-dev-")
 	const init = initializeTemplate(temporaryRoot)
 	expect(init.exitCode, init.stderr.toString()).toBe(0)
+	const binaryRoot = join(temporaryRoot, ".test-bin")
+	mkdirSync(binaryRoot, { recursive: true })
+	const codexPath = join(binaryRoot, "codex")
+	writeFileSync(
+		codexPath,
+		`#!/bin/sh
+if [ "$*" = "plugin marketplace list --json" ]; then
+  printf '%s\n' '{"marketplaces":[]}'
+elif [ "$*" = "plugin list --json" ]; then
+  printf '%s\n' '{"installed":[],"available":[]}'
+else
+  exit 99
+fi
+`,
+	)
+	chmodSync(codexPath, 0o755)
 
-	const dryRun = Bun.spawnSync({
-		cmd: ["bun", "run", "dev", "--", "codex", "--dry-run", "--json"],
+	const check = Bun.spawnSync({
+		cmd: ["bun", "run", "dev", "--", "codex", "check", "--json", "--no-input"],
 		cwd: temporaryRoot,
+		env: { ...process.env, PATH: `${binaryRoot}:${process.env.PATH ?? ""}` },
 		stdout: "pipe",
 		stderr: "pipe",
 	})
-	expect(dryRun.exitCode, dryRun.stderr.toString()).toBe(0)
-	const plan = JSON.parse(dryRun.stdout.toString().trim().split("\n").at(-1) ?? "")
-	expect(plan.install).toContain("codex plugin add dojo-hello-dev@dojo-hello-dev")
+	expect(check.exitCode, check.stderr.toString()).toBe(0)
+	const result = JSON.parse(check.stdout.toString().trim().split("\n").at(-1) ?? "")
+	expect(result.plan).toContain("codex plugin add dojo-hello-dev@dojo-hello-dev --json")
 })

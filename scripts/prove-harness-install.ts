@@ -242,11 +242,16 @@ const PORTABLE_SKILLS_WITHOUT_HOOKS = [
 	"skill-b",
 	"runtime-custody",
 	"capability-tour",
+	"decision-view",
 	"dev-mode",
 	"frontier-runner",
 	"handoff-to-opus",
 	"new-note",
+	"new-plugin",
 	"new-project",
+	"new-skill",
+	"orchestrate-spec",
+	"orchestration-design",
 	"ultragoal",
 ] as const
 

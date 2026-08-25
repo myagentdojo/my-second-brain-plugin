@@ -206,10 +206,7 @@ test("capability tour is one model-only skill with one cross-client reviewer pro
 	expect(existsSync(join(root, "plugin", "bin", "capability-tour"))).toBe(false)
 })
 
-// The skill enumerates the portable skills in prose. Nothing generates that line,
-// so a new skill silently falsifies it — the same drift that left capability-tour
-// out of README's architecture tree until 24102bc.
-test("capability tour skill inventory names every shipped skill and its runtime tier", () => {
+test("capability tour derives its skill inventory and runtime tiers from installed evidence", () => {
 	const skill = readFileSync(join(root, "plugin", "skills", "capability-tour", "SKILL.md"), "utf8")
 	const catalog = JSON.parse(readFileSync(join(root, "runtime", "skill-catalog.json"), "utf8"))
 	const shipped = readdirSync(join(root, "plugin", "skills"), { withFileTypes: true })
@@ -220,27 +217,16 @@ test("capability tour skill inventory names every shipped skill and its runtime 
 	const bunBacked = shipped.filter((id) => catalogSkills.includes(id))
 	// A catalog entry with no shipped directory is drift in the other direction.
 	expect(catalogSkills).toEqual(bunBacked)
-	const modelOnly = shipped.filter((id) => !catalogSkills.includes(id))
-
 	const inventory = skill
 		.split("\n")
 		.find((line) => line.includes("Available portable skills"))
 	expect(inventory).toBeDefined()
-
-	// Parse the identifiers rather than probing for each one: a containment loop
-	// passes when the prose ALSO names a skill that does not ship, and passes when
-	// a model-only skill sits inside the Bun-backed prefix. Both were reproduced.
-	const listed = [...(inventory ?? "").matchAll(/`([^`]+)`/g)]
-		.map((match) => match[1])
-		.filter((id) => id !== "Available portable skills")
-	expect([...listed].sort()).toEqual(shipped)
-	expect([...listed.slice(0, bunBacked.length)].sort()).toEqual(bunBacked)
-	expect([...listed.slice(bunBacked.length)].sort()).toEqual(modelOnly)
-
-	// The prose spells the split in words, so compare against the spelled form.
-	const spelled = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight"]
-	expect(inventory).toContain(`first ${spelled[bunBacked.length]}`)
-	expect(inventory).toContain(`last ${spelled[modelOnly.length]}`)
+	expect(inventory).toContain("every discovered installed skill")
+	expect(inventory).toContain("deterministic order")
+	expect(inventory).toContain("runtime skill catalog")
+	expect(inventory).toContain("Bun-backed")
+	expect(inventory).toContain("model-only")
+	for (const id of shipped) expect(inventory).not.toContain(`\`${id}\``)
 })
 
 test("payload contains only the named capability sidecars and no standalone agent surface", () => {

@@ -90,7 +90,7 @@ Run profile-safe preparation checks first. These commands build local output and
 
 ```sh
 bun run dev -- claude check --json --no-input
-bun run dev -- codex --check
+bun run dev -- codex check --json --no-input
 ```
 
 #### Claude Code
@@ -120,14 +120,16 @@ Claude development completes when an ordinary reloaded session discovers and run
 bun run dev:codex
 ```
 
-Codex plugins are cached rather than loaded directly from the checkout. The command builds `plugin/`, copies it into ignored `.dev` staging, adds build metadata only to the staged Codex version, creates or validates the local development marketplace, reinstalls the plugin, and launches Codex. After an edit, rerun the command and start a fresh task.
+Codex plugins use a staged development source rather than the canonical payload directly. `bun run dev:codex` builds `plugin/`, copies it into ignored `.dev` staging, derives deterministic build metadata from the staged payload, inspects the native Marketplace and Plugin Installation, and previews the exact reinstall without changing the Codex profile. The preview returns its candidate hash and the bound `--apply --candidate-hash <sha256>` command.
+
+Review that preview before running its exact apply command. Apply creates or validates the local development Marketplace, reinstalls the plugin, removes only the superseded same-name development selector when present, then re-inspects the enabled identity, version, source path, and Marketplace owner. `--no-input` implies `--no-launch`; `--no-launch` is the equivalent explicit human-facing choice. A fresh task is the reload boundary.
 
 Production and development remain enabled together under distinct Codex identities:
 
 - Production displays as `<Display Name>` and exposes `$<plugin-name>:<skill>`.
 - Development displays as `<Display Name> Dev` and exposes `$<plugin-name>-dev:<skill>`.
 
-The development reinstall adds the distinct development identity before removing only the superseded same-name development selector. It preserves the production installation. Use `bun run dev -- codex --no-launch` when a new Codex window is unnecessary.
+The Development Installation stays distinct from the production identity and preserves the production installation. A changed candidate hash invalidates the earlier approval and requires a new preview.
 
 Codex development completes when a fresh task discovers both identities without collisions and runs the changed development skill from the staged cache. Production-skill proof must resolve to the production cache separately.
 
@@ -152,7 +154,7 @@ Local proof completes when the current worktree contains only the intended diff 
 plugin/
 ├── .claude-plugin/plugin.json
 ├── .codex-plugin/plugin.json
-├── skills/{capability-tour,dev-mode,frontier-runner,handoff-to-opus,hello-world,new-note,new-project,runtime-custody,skill-a,skill-b,ultragoal}/SKILL.md
+├── skills/{capability-tour,decision-view,dev-mode,frontier-runner,handoff-to-opus,hello-world,new-note,new-plugin,new-project,new-skill,orchestrate-spec,orchestration-design,runtime-custody,skill-a,skill-b,ultragoal}/SKILL.md
 ├── bin/{frontier-runner,hello-world,skill-a,skill-b}
 ├── THIRD-PARTY-NOTICES.md
 └── runtime/

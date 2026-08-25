@@ -9,17 +9,22 @@ Consumer rules for these files: `docs/agents/domain.md`.
 | Context | Glossary | Context ADRs | Scope |
 | --- | --- | --- | --- |
 | **System-wide** | [`CONTEXT.md`](./CONTEXT.md) | [`docs/adr/`](./docs/adr/) | Plugin distribution across Harnesses: Plugin Payload, Harness Adapter, Portable Runtime, Marketplace, Release, Capability Tour, and the capability boundaries. |
-| **skill-a** | `packages/skill-a/CONTEXT.md` _(not yet created)_ | `packages/skill-a/docs/adr/` _(not yet created)_ | Dependency-bearing workspace skill. Currently an ESM/CJS interop boundary fixture. |
-| **skill-b** | `packages/skill-b/CONTEXT.md` _(not yet created)_ | `packages/skill-b/docs/adr/` _(not yet created)_ | Dependency-bearing workspace skill. Currently an ESM/CJS interop boundary fixture. |
-
-Entries marked _not yet created_ are intentional. Per-context files are created lazily by `/domain-modeling` when a context develops vocabulary or decisions of its own. Until then, the system-wide glossary governs.
+| **New Skill Formation** | [`plugin/skills/new-skill/CONTEXT.md`](./plugin/skills/new-skill/CONTEXT.md) | None. | `plugin/skills/new-skill/**`: Formation Run, Formation Packet, Mandatory Skill Scaffold, Complexity Gate, Architecture Shell, approval checkpoints, maturity, and the implementation frontier. |
+| **Decision View** | [`plugin/skills/decision-view/CONTEXT.md`](./plugin/skills/decision-view/CONTEXT.md) | None. | `plugin/skills/decision-view/**`: Decision View, Decision Input, Decision Result, Response Map, and Wait What Disclosure. |
+| **Frontier Runner** | [`plugin/skills/frontier-runner/CONTEXT.md`](./plugin/skills/frontier-runner/CONTEXT.md) | None. | `plugin/skills/frontier-runner/**` and `packages/frontier-runner/**`: Frontier Runner V0, Bounded run, and their shared vocabulary. |
 
 ## Which glossary governs
 
-- A term describing distribution, packaging, harness behavior, runtime custody, or release → **system-wide** `CONTEXT.md`.
-- A term meaningful only inside one workspace package → that package's `CONTEXT.md`; create it when the term first needs pinning.
-- A decision affecting more than one context → `docs/adr/` at the root, not a context ADR.
+- A term describing distribution, packaging, harness behavior, runtime custody, or release uses the **system-wide** `CONTEXT.md`.
+- One canonical glossary governs shared vocabulary by default. Choose it by vocabulary owner and consumer, not adjacency, execution architecture, or portability.
+- A skill-local glossary may govern both `plugin/skills/<id>/**` and `packages/<id>/**` when their vocabulary is shared and installed agents need it.
+- A second package glossary is valid only for distinct resolved package-scoped project vocabulary with a distinct consumer. Create it and its map row lazily.
+- A direct package-file entry reads root `AGENTS.md`, then this map, then the mapped canonical glossary.
+- A decision affecting more than one context belongs in root `docs/adr/`.
 
 ## Non-contexts
 
-`plugin/`, `runtime/`, and `scripts/` are not contexts. `plugin/` is generated output, and `runtime/` and `scripts/` are owned by the system-wide glossary. Ownership for editing these lives in [`AGENTS.md`](./AGENTS.md).
+The `plugin/` root is not one context. `runtime/` and `scripts/` remain under
+the system-wide glossary. Glossaries contain vocabulary only; workflow belongs
+in `SKILL.md`, and implementation truth belongs in code and package docs.
+Editing ownership lives in [`AGENTS.md`](./AGENTS.md).
