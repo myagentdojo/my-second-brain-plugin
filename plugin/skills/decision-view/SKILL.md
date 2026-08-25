@@ -1,72 +1,99 @@
 ---
 name: decision-view
-description: "Present an already-owned human decision as a compact plain-language question and numbered router for another skill, agent, or user."
+description: "Validate supplied caller-owned Decision Input; return focused questions when incomplete or render a compact plain-language question and numbered choice router."
 ---
 
 # Decision View
 
 Read [`CONTEXT.md`](CONTEXT.md) before presenting a decision.
 
-Use only the supplied Decision Input. The caller owns the decision, options,
-recommendation, effects, and authority. A human may supply the same Decision
-Input directly.
+## Boundary
+
+- Use only supplied Decision Input.
+- Preserve caller ownership of decision, options, recommendation, effects, and
+  authority.
+- Accept the same Decision Input directly from a human.
 
 ## Decision Input
 
 Require:
 
-- `state`: where the decision has got to;
+- `state`: current position;
 - `question`: one concrete human question;
-- `options`: one to four actionable choices, each with a label and effect;
-- `recommendation`: one supplied option and the reason it is recommended;
-- `consequence`: what deciding changes;
-- `authority`: where the caller's existing authority stops; and
-- `mode`: `choose` by default and `explain` after `Wait what?` is selected.
+- `options`: one to four actionable choices; one label and effect each;
+- `recommendation`: one supplied option plus reason;
+- `consequence`: change caused by deciding;
+- `authority`: caller authority boundary;
+- `mode`: `choose` by default; `explain` after `Wait what?`.
 
-Accept `blocker` with its reason and bypass risk when one exists. Accept
-`approval_proposal` only when the human is reviewing a visible proposal.
+Accept when supplied:
 
-Return `status: incomplete`, `missing_inputs`, and at most three currently
-answerable `focused_questions` when required meaning is absent, contradictory,
-or not caller-owned. Use the same result when asked to investigate, choose, or
-invent. Ask fewer questions when one can unblock the Decision Input. Do not
-render a router from incomplete meaning.
+- `blocker`: reason plus bypass risk;
+- `approval_proposal`: visible proposal plus caller-owned revision effect under
+  human review.
 
-## Complete result
+## Incomplete Result
+
+- Return `status: incomplete`, `missing_inputs`, and at most three currently
+  answerable `focused_questions` for absent, contradictory, or non-caller-owned
+  meaning.
+- Return the same result when requested meaning exceeds supplied Decision Input
+  or caller ownership.
+- Ask one focused question when one unblocks the Decision Input.
+- Render no router.
+
+## Complete Result
 
 Return only `status: complete`, `decision_view`, and `response_map`.
 
-Render `decision_view` in this order: current state, why the decision matters,
-the bold concrete question, then the router. Keep the first two parts short;
-include the consequence and authority when they affect the choice. A supplied
-blocker includes both its reason and bypass risk.
+Render `decision_view` in order:
 
-Put the bold question on its own line and the router in the next paragraph. Use
-one word-wrapping line separated by ` · ` only when every option is a very short
-action such as `Approve`, `Review`, or `Wait`. For longer options, use Markdown
-hard line breaks to put one numbered option on each line without separators.
-Use at most five numbered options, exactly one complete recommended option in
-bold, and ordinary Markdown for the rest. Keep `Wait what?` last. Use `Revise`
-only when `approval_proposal` is supplied. Use no bullets, code styling, or
-fenced block for the router.
+1. State. Short, complete human sentence.
+2. Why the decision matters. Restate `consequence` as a short, complete human
+   sentence.
+3. Concrete question. Bold, complete, own line.
+4. Router. Next paragraph; Markdown numbered list.
 
-Map each number to its supplied caller-owned effect in `response_map`. Map
-`Wait what?` to the same Decision Input with `mode: explain`. Show a human only
-`decision_view`; return the complete Decision Result to its caller.
+Render the router:
+
+- Put one option in each numbered item.
+- Keep the numeric marker outside bold.
+- Bold the complete recommended option text.
+- Use at most six numbered items: up to four supplied choices, optional
+  `Revise`, then `Wait what?`.
+- Keep `Wait what?` last.
+- Use `Revise` only when `approval_proposal` supplies its effect.
+- Use ordinary Markdown. Omit unordered bullets, code styling, and fences.
+
+Include authority boundary when choice-relevant.
+Always include supplied blocker reason plus bypass risk.
+
+Map each supplied choice to its supplied caller-owned effect in `response_map`.
+Map `Revise` only when it is rendered to the supplied revision effect. Map
+`Wait what?` to the same Decision Input with `mode: explain`.
+
+Complete only when every numbered item has exactly one `response_map` entry and
+the map has no other entries.
+
+Show a human only `decision_view`. Return the complete Decision Result to the
+caller.
 
 ## Wait What Disclosure
 
-When `mode` is `explain`, add a little context and re-pitch the same decision in
-short, plain human language. Use the canonical vocabulary. Explain the supplied
-option effects, recommendation reason, and consequence, then show the unchanged
-question and router again. Add no facts, choices, or authority.
+When `mode` is `explain`:
 
-If the human still does not understand, ask which term, option, or consequence
-is unclear and return that focused question to the caller. Keep no interaction
-state.
+- Add a little context.
+- Re-pitch the same decision in short, plain human language.
+- Use canonical vocabulary.
+- Explain supplied option effects, recommendation reason, and consequence.
+- Show the unchanged question and router again.
+- Add no facts, choices, or authority.
+- Put one focused question inside `decision_view` asking which term, option, or
+  consequence remains unclear.
+- Keep no interaction state.
 
 ## Return control
 
-The caller owns the selection, consequence, and continuation within its
-existing authority. Decision View performs no selected effect and grants no new
-authority.
+- Return selection, consequence, and continuation to the caller.
+- Perform no selected effect.
+- Grant no new authority.

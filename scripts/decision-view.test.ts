@@ -15,9 +15,12 @@ const normalized = skill.replaceAll(/\s+/g, " ")
 test("decision-view is a lean model-invoked presentation skill", () => {
 	expect(skill).toMatch(/^---\nname: decision-view\n/)
 	expect(skill).not.toContain("disable-model-invocation")
+	expect(normalized).toContain(
+		"Validate supplied caller-owned Decision Input; return focused questions when incomplete or render a compact plain-language question and numbered choice router",
+	)
 	expect(skill).toContain("Read [`CONTEXT.md`](CONTEXT.md)")
-	expect(normalized).toContain("A human may supply the same Decision Input directly")
-	expect(skill.split(/\s+/).length).toBeLessThan(700)
+	expect(normalized).toContain("Accept the same Decision Input directly from a human")
+	expect(skill.split(/\s+/).length).toBeLessThan(500)
 })
 
 test("decision-view defines one minimal input contract", () => {
@@ -35,9 +38,10 @@ test("decision-view defines one minimal input contract", () => {
 	]) {
 		expect(skill).toContain(field)
 	}
-	expect(normalized).toContain("one to four actionable choices")
-	expect(normalized).toContain("`choose` by default and `explain`")
-	expect(normalized).toContain("Use only the supplied Decision Input")
+	expect(normalized).toContain("one to four actionable choices; one label and effect each")
+	expect(normalized).toContain("`choose` by default; `explain`")
+	expect(normalized).toContain("Use only supplied Decision Input")
+	expect(normalized).toContain("visible proposal plus caller-owned revision effect")
 })
 
 test("decision-view returns only complete or incomplete results", () => {
@@ -47,34 +51,60 @@ test("decision-view returns only complete or incomplete results", () => {
 	expect(skill).toContain("`status: incomplete`")
 	expect(skill).toContain("`missing_inputs`")
 	expect(skill).toContain("`focused_questions`")
-	expect(normalized).toContain("at most three currently answerable")
-	expect(normalized).toContain("investigate, choose, or invent")
+	expect(normalized).toContain("at most three currently answerable `focused_questions`")
+	expect(normalized).toContain("requested meaning exceeds supplied Decision Input or caller ownership")
+	expect(normalized).toContain("Render no router")
+	expect(normalized).toContain("Always include supplied blocker reason plus bypass risk")
+	expect(normalized).toContain("Include authority boundary when choice-relevant")
 })
 
 test("decision-view renders one compact human choice", () => {
-	expect(normalized).toContain("current state, why the decision matters, the bold concrete question, then the router")
-	expect(normalized).toContain("at most five numbered options")
-	expect(normalized).toContain("exactly one complete recommended option in bold")
+	expect(normalized).toContain("State. Short, complete human sentence")
+	expect(normalized).toContain(
+		"Why the decision matters. Restate `consequence` as a short, complete human sentence",
+	)
+	expect(normalized).toContain("Concrete question. Bold, complete, own line")
+	expect(normalized).toContain("at most six numbered items")
+	expect(normalized).toContain(
+		"up to four supplied choices, optional `Revise`, then `Wait what?`",
+	)
+	expect(normalized).toContain("Bold the complete recommended option text")
 	expect(normalized).toContain("Keep `Wait what?` last")
-	expect(normalized).toContain("Use `Revise` only when `approval_proposal` is supplied")
-	expect(normalized).toContain("one word-wrapping line separated by ` · ` only when every option is a very short action")
-	expect(normalized).toContain("For longer options, use Markdown hard line breaks to put one numbered option on each line without separators")
+	expect(normalized).toContain(
+		"Use `Revise` only when `approval_proposal` supplies its effect",
+	)
+	expect(normalized).toContain("Router. Next paragraph; Markdown numbered list")
+	expect(normalized).toContain("Put one option in each numbered item")
+	expect(normalized).toContain("Keep the numeric marker outside bold")
+	expect(skill).not.toContain("separated by ` · `")
+	expect(normalized).not.toContain("Markdown hard line breaks")
 })
 
 test("decision-view owns one inline Wait What re-pitch", () => {
-	expect(normalized).toContain("When `mode` is `explain`")
-	expect(normalized).toContain("add a little context")
+	expect(normalized).toContain("When `mode` is `explain`:")
+	expect(normalized).toContain("Add a little context")
 	expect(normalized).toContain("short, plain human language")
 	expect(normalized).toContain("canonical vocabulary")
-	expect(normalized).toContain("show the unchanged question and router again")
+	expect(normalized).toContain("Show the unchanged question and router again")
 	expect(normalized).toContain("Add no facts, choices, or authority")
+	expect(normalized).toContain(
+		"Put one focused question inside `decision_view` asking which term, option, or consequence remains unclear",
+	)
+	expect(normalized).not.toContain("Return that focused question to the caller")
 	expect(existsSync(join(skillRoot, "references"))).toBe(false)
 })
 
 test("decision-view returns ownership to its caller", () => {
-	expect(normalized).toContain("Map each number to its supplied caller-owned effect")
-	expect(normalized).toContain("The caller owns the selection, consequence, and continuation")
-	expect(normalized).toContain("Decision View performs no selected effect")
+	expect(normalized).toContain("Map each supplied choice to its supplied caller-owned effect")
+	expect(normalized).toContain(
+		"Map `Revise` only when it is rendered to the supplied revision effect",
+	)
+	expect(normalized).toContain(
+		"every numbered item has exactly one `response_map` entry and the map has no other entries",
+	)
+	expect(normalized).toContain("Return selection, consequence, and continuation to the caller")
+	expect(normalized).toContain("Perform no selected effect")
+	expect(normalized).toContain("Grant no new authority")
 })
 
 test("decision-view owns one mapped glossary and no runtime surface", () => {
