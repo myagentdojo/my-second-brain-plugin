@@ -14,6 +14,7 @@ import { afterEach, expect, test } from "bun:test"
 
 const root = resolve(import.meta.dir, "..")
 const launcher = join(root, "plugin", "skills", "frontier-runner", "scripts", "frontier-runner.sh")
+const skill = join(root, "plugin", "skills", "frontier-runner", "SKILL.md")
 const temporaryRoots: string[] = []
 
 afterEach(() => {
@@ -40,6 +41,8 @@ function fixture(): {
 	writeFileSync(commandLog, "")
 	for (const command of ["herdr", "open", "tode"]) {
 		const path = join(bin, command)
+		const environmentObservation =
+			command === "open" ? `printf ' no_color=<%s>' "\${NO_COLOR-unset}" >> "$FRONTIER_RUNNER_TEST_COMMAND_LOG"\n` : ""
 		const response =
 			command === "herdr"
 				? `if [ "$*" = "pane current --current" ]; then
@@ -51,7 +54,7 @@ fi
 				: ""
 		writeFileSync(
 			path,
-			`#!/usr/bin/env bash\nprintf '%s' '${command}' >> "$FRONTIER_RUNNER_TEST_COMMAND_LOG"\nprintf ' <%s>' "$@" >> "$FRONTIER_RUNNER_TEST_COMMAND_LOG"\nprintf '\\n' >> "$FRONTIER_RUNNER_TEST_COMMAND_LOG"\n${response}`,
+			`#!/usr/bin/env bash\nprintf '%s' '${command}' >> "$FRONTIER_RUNNER_TEST_COMMAND_LOG"\n${environmentObservation}printf ' <%s>' "$@" >> "$FRONTIER_RUNNER_TEST_COMMAND_LOG"\nprintf '\\n' >> "$FRONTIER_RUNNER_TEST_COMMAND_LOG"\n${response}`,
 		)
 		chmodSync(path, 0o755)
 	}
@@ -84,16 +87,29 @@ function run(
 	})
 }
 
+test("skill installs a missing Herdr before launching", () => {
+	const document = readFileSync(skill, "utf8")
+	const installStep = document.indexOf("curl -fsSL https://herdr.dev/install.sh | sh")
+	const launchStep = document.indexOf('bash <skill-directory>/scripts/frontier-runner.sh "$PWD"')
+
+	expect(installStep).toBeGreaterThan(-1)
+	expect(launchStep).toBeGreaterThan(installStep)
+	expect(document).toContain("herdr --version")
+})
+
 test("outside Herdr opens the named session for the requested workspace", () => {
 	const testFixture = fixture()
-	const result = run(testFixture.requestedWorkspace, testFixture)
+	const result = run(testFixture.requestedWorkspace, {
+		...testFixture,
+		environment: { NO_COLOR: "1" },
+	})
 
 	expect(result.exitCode, result.stderr.toString()).toBe(0)
 	expect(result.stdout.toString()).toBe(
 		`session=frontier-runner-v0\nworkspace=${testFixture.requestedWorkspace}\nnext=run frontier-runner again inside the managed pane to open Terminal Code\n`,
 	)
 	expect(readFileSync(testFixture.commandLog, "utf8")).toBe(
-		`open <-Ra> <Ghostty.app>\nopen <-na> <Ghostty.app> <--args> <--working-directory=${testFixture.requestedWorkspace}> <-e> <herdr> <--session> <frontier-runner-v0>\n`,
+		`open no_color=<1> <-Ra> <Ghostty.app>\nopen no_color=<unset> <-na> <Ghostty.app> <--args> <--working-directory=${testFixture.requestedWorkspace}> <-e> <herdr> <--session> <frontier-runner-v0>\n`,
 	)
 })
 

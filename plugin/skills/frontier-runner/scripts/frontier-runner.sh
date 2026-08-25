@@ -117,7 +117,10 @@ if ! open -Ra Ghostty.app >/dev/null 2>&1; then
 fi
 
 session='frontier-runner-v0'
-open -na Ghostty.app --args "--working-directory=$workspace" -e herdr --session "$session"
+(
+	unset NO_COLOR
+	open -na Ghostty.app --args "--working-directory=$workspace" -e herdr --session "$session"
+)
 
 printf 'session=%s\n' "$session"
 printf 'workspace=%s\n' "$workspace"

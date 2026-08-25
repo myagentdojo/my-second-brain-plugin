@@ -9,6 +9,18 @@ disable-model-invocation: true
 Read [CONTEXT.md](CONTEXT.md), then resolve this skill directory from the
 installed `SKILL.md` path.
 
+Install Herdr when it is missing, using the official installer:
+
+```sh
+if ! command -v herdr >/dev/null 2>&1; then
+  curl -fsSL https://herdr.dev/install.sh | sh
+fi
+herdr --version
+```
+
+If verification still cannot find `herdr`, stop and ask the user to restart
+their terminal before retrying.
+
 ## V0 launcher
 
 Use V0 when the user asks only to open the named Herdr session or Terminal
