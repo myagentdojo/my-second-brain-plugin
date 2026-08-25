@@ -1120,6 +1120,17 @@ function checkMergeHistoryPolicy(repository: string, squashMergeEnabled: unknown
 }
 
 function checkHostedCanaryConfiguration(repository: string): ReadinessCheck {
+	let actor: string
+	try {
+		actor = loadPluginConfig(root).canary.actor
+	} catch (error) {
+		return {
+			name: "hosted-canary-configuration",
+			status: "unavailable",
+			detail: `plugin.config.json could not be loaded or validated; the hosted canary actor is unproven: ${error instanceof Error ? error.message : String(error)}`,
+			repair: hostedCanaryPluginConfigRepair,
+		}
+	}
 	const environment = readApi(`repos/${repository}/environments/${HOSTED_CANARY_ENVIRONMENT}`)
 	if (!environment.ok) {
 		return apiFailure("hosted-canary-configuration", environment, hostedCanaryRepair)
@@ -1133,17 +1144,6 @@ function checkHostedCanaryConfiguration(repository: string): ReadinessCheck {
 	// A secret name proves a value exists, not that its public half survives.
 	// The credential belongs to the canary actor, not to this repository, so read
 	// that user's keys; repository deploy keys never carry it.
-	let actor: string
-	try {
-		actor = loadPluginConfig(root).canary.actor
-	} catch (error) {
-		return {
-			name: "hosted-canary-configuration",
-			status: "unavailable",
-			detail: `plugin.config.json could not be loaded or validated; the hosted canary actor is unproven: ${error instanceof Error ? error.message : String(error)}`,
-			repair: hostedCanaryPluginConfigRepair,
-		}
-	}
 	const actorKeys = readApi(`users/${actor}/keys?per_page=100`, true)
 	if (!actorKeys.ok) {
 		return apiFailure("hosted-canary-configuration", actorKeys, hostedCanaryKeyRotationRepair)

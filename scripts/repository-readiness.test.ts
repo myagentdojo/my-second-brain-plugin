@@ -130,6 +130,10 @@ if (process.env.GH_TOKEN !== undefined || process.env.GITHUB_TOKEN !== undefined
   console.error("unexpected GitHub authentication token")
   process.exit(1)
 }
+if (process.env.REPOSITORY_READINESS_FIXTURE_REJECT_ALL === "1") {
+  console.error("fixture rejected GitHub API request")
+  process.exit(1)
+}
 const endpoint = process.argv.at(-1)
 if (typeof endpoint !== "string" || !Object.hasOwn(responses, endpoint)) {
   console.error(\`unexpected gh endpoint: \${String(endpoint)}\`)
@@ -168,7 +172,7 @@ console.log(JSON.stringify(responses[endpoint]))
 			pluginConfig,
 			pluginConfigPath,
 			repository,
-			run: () =>
+			run: (options: { rejectAllGitHubApiRequests?: boolean } = {}) =>
 				Bun.spawnSync({
 					cmd: [
 						process.execPath,
@@ -179,7 +183,11 @@ console.log(JSON.stringify(responses[endpoint]))
 						"--json",
 					],
 					cwd: fixtureRoot,
-					env: environment,
+					env: {
+						...environment,
+						REPOSITORY_READINESS_FIXTURE_REJECT_ALL:
+							options.rejectAllGitHubApiRequests ? "1" : undefined,
+					},
 					stdout: "pipe",
 					stderr: "pipe",
 				}),
@@ -224,7 +232,7 @@ test("public readiness process retains repository identity when plugin configura
 				2,
 			)}\n`,
 		)
-		const result = fixture.run()
+		const result = fixture.run({ rejectAllGitHubApiRequests: true })
 
 		expect(result.exitCode).toBe(1)
 		expect(result.stderr.toString()).toBe("")
