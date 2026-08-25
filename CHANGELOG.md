@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.3.0](https://github.com/myagentdojo/my-second-brain-plugin/compare/v0.2.0...v0.3.0) (2026-08-24)
+
+
+### Features
+
+* add receipt-backed Frontier Runner workflow ([#22](https://github.com/myagentdojo/my-second-brain-plugin/issues/22)) ([08698a5](https://github.com/myagentdojo/my-second-brain-plugin/commit/08698a5e4219d199118395b0af46e928999ba2a6))
+* **dev:** report whether the payload came from the last successful build ([#14](https://github.com/myagentdojo/my-second-brain-plugin/issues/14)) ([e65c54b](https://github.com/myagentdojo/my-second-brain-plugin/commit/e65c54b1dd27ae372dd1f7f2255a3c60b9e8d1dc))
+
+
+### Bug Fixes
+
+* **dev:** detect a superseded development cache version ([#18](https://github.com/myagentdojo/my-second-brain-plugin/issues/18)) ([1fb8c03](https://github.com/myagentdojo/my-second-brain-plugin/commit/1fb8c03152ddb0b25e50b5bbd54d0a310a0b5b87))
+* **dev:** name the production installation the install preview replaces ([#19](https://github.com/myagentdojo/my-second-brain-plugin/issues/19)) ([a2cbd06](https://github.com/myagentdojo/my-second-brain-plugin/commit/a2cbd06d43ad6e28bc34779bc3e6586ba1eab0eb))
+* **test:** give the dev lifecycle cases an explicit subprocess budget ([#20](https://github.com/myagentdojo/my-second-brain-plugin/issues/20)) ([6dfcdcc](https://github.com/myagentdojo/my-second-brain-plugin/commit/6dfcdccf85f31d7501950f66f0ce6b4277816dd3))
+
 ## [0.2.0](https://github.com/myagentdojo/my-second-brain-plugin/compare/v0.1.2...v0.2.0) (2026-08-20)
 
 
