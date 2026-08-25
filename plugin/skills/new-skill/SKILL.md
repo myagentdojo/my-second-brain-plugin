@@ -8,10 +8,15 @@ disable-model-invocation: true
 
 Read [`CONTEXT.md`](CONTEXT.md) before starting the Formation Run.
 
-Use this skill only when the user explicitly invokes `$new-skill`. It is a
+Use this skill only when the user explicitly invokes `new-skill`. It is a
 cross-harness Formation Run for one skill idea or one existing Formation
 Packet. It ends at the implementation frontier; it does not implement,
 activate, release, or clean up the skill.
+
+## Native owner addresses
+
+Resolve every named skill owner through the active Harness: Claude Code uses
+`/name`; Codex uses `$name`. Use bare owner names at call sites.
 
 ## Ordered human checkpoints
 
@@ -39,11 +44,11 @@ No checkpoint silently authorizes a later one.
    owners remain the durable state.
 3. When no idea or packet is supplied, ask for one sentence describing the
    desired skill outcome. If the outcome remains foggy, offer the user-invoked
-   `$grill-me` route and pause for the user's choice.
+   `grill-me` route and pause for the user's choice.
 4. Inspect the available Plugin Repositories and the packet's existing owner,
    infer the likely target, then show the recommendation and ask the user to
    select the target Plugin Repository. Do not treat an inference as selection.
-5. When the selected Plugin Repository is missing, offer `$new-plugin` as a
+5. When the selected Plugin Repository is missing, offer `new-plugin` as a
    separate branch with a separate approval. Keep plugin creation outside this
    Formation Run.
 6. After every stage boundary, route the stage result or evidence and the next
@@ -127,7 +132,7 @@ stages below.
 
 ## Grill and domain language
 
-Ask the user to invoke the explicit-only `$grill-with-docs` owner for the main
+Ask the user to invoke the explicit-only `grill-with-docs` owner for the main
 interview immediately after the Bare Skill Shell exists. That owner calls
 Grilling and Domain Modeling. When the first distinct skill-local term resolves,
 Domain Modeling creates `plugin/skills/<skill-id>/CONTEXT.md` in the shell and

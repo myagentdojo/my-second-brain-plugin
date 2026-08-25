@@ -4,7 +4,6 @@ import { fileURLToPath } from "node:url"
 import { expect, test } from "bun:test"
 
 const readmeUrl = new URL("../README.md", import.meta.url)
-const pluginSkillsUrl = new URL("../plugin/skills", import.meta.url)
 const pluginBinUrl = new URL("../plugin/bin", import.meta.url)
 const installingUrl = new URL("../docs/installing.md", import.meta.url)
 const maintainerIndexUrl = new URL("../docs/releasing.md", import.meta.url)
@@ -199,21 +198,15 @@ test("Codex support boundary names only the proven client surfaces", async () =>
 	)
 })
 
-// The architecture tree enumerates every skill and launcher by hand. Nothing
-// generates those lines, so a new skill silently falsifies them - that is how
-// capability-tour stayed missing from the tree between #34 and 24102bc.
-test("README architecture tree enumerates every shipped skill and launcher", async () => {
+test("README architecture tree names the generic skill inventory and launchers", async () => {
 	const readme = await Bun.file(readmeUrl).text()
 
-	const skills = readdirSync(fileURLToPath(pluginSkillsUrl), { withFileTypes: true })
-		.filter((entry) => entry.isDirectory())
-		.map((entry) => entry.name)
-		.sort()
 	const launchers = readdirSync(fileURLToPath(pluginBinUrl), { withFileTypes: true })
 		.filter((entry) => entry.isFile())
 		.map((entry) => entry.name)
 		.sort()
 
-	expect(readme).toContain(`├── skills/{${skills.join(",")}}/SKILL.md`)
+	expect(readme).toContain("├── skills/<id>/SKILL.md")
+	expect(readme).toContain("├── skill-inventory.json")
 	expect(readme).toContain(`├── bin/{${launchers.join(",")}}`)
 })

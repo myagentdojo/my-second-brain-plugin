@@ -17,6 +17,9 @@ import { writeBuildReceipt } from "./build-receipt"
 import { HARNESS_IDENTITIES } from "./harness-identity"
 import { loadPluginConfig } from "./plugin-config"
 import { compareCodeUnits, pluginPayloadInventory } from "./plugin-files"
+import {
+	checkPluginPayloadSkillInventory,
+} from "./plugin-payload-skills"
 import { checkRuntimeCustodyFiles, loadSkillCatalog, shellQuote } from "./runtime-custody-config"
 
 const nodeBuiltins = new Set(builtinModules)
@@ -1655,8 +1658,6 @@ const nonBundledSkillPayloadFiles = [
 	"skills/new-skill/CODING_STANDARDS.md",
 	"skills/new-skill/CONTEXT.md",
 	"skills/new-skill/SKILL.md",
-	"skills/orchestrate-spec/SKILL.md",
-	"skills/orchestrate-spec/references/codex-ticket-routing.md",
 	"skills/orchestration-design/SKILL.md",
 	"skills/runtime-custody/SKILL.md",
 	"skills/ultragoal/SKILL.md",
@@ -1670,6 +1671,7 @@ const allowedPayloadSurfaces = new Set([
 	"bin",
 	"hooks",
 	"runtime",
+	"skill-inventory.json",
 	"skills",
 ])
 const requiredCapabilities = [
@@ -1705,6 +1707,7 @@ export function validateBunOnlyPayload(root: string): void {
 		"runtime/runtime-exec",
 		"runtime/runtime-lock.sh",
 		"runtime/skill-catalog.sh",
+		"skill-inventory.json",
 		...capabilityHookFiles,
 		...capabilityAssetFiles,
 		...nonBundledSkillPayloadFiles,
@@ -1742,6 +1745,10 @@ export function validateBunOnlyPayload(root: string): void {
 		throw new Error(
 			"Bun payload closure: skill sidecar inventory does not match the catalog and non-bundled skill payload files",
 		)
+	}
+	const skillInventoryDrift = checkPluginPayloadSkillInventory(root)
+	if (skillInventoryDrift.length > 0) {
+		throw new Error(`Bun payload closure: stale generated file ${skillInventoryDrift[0]}`)
 	}
 
 	const drifted = checkRuntimeCustodyFiles(root)

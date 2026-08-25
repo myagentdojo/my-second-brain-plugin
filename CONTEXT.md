@@ -20,6 +20,10 @@ _Avoid_: Plugin, when referring to the whole repository
 The complete distributable content representing one plugin version across supported harnesses.
 _Avoid_: Bundle, package, plugin folder
 
+**Plugin Payload Skill Inventory**:
+The canonical classification of every skill identity in one Plugin Payload by execution tier and hook dependence.
+_Avoid_: Build file closure, Runtime Skill Catalog, installed launcher inference
+
 **Plugin Installation**:
 A harness-managed copy of a Plugin Payload.
 _Avoid_: Checkout, cache, when the ownership distinction matters

@@ -1,0 +1,75 @@
+{
+	"schemaVersion": 1,
+	"skills": [
+		{
+			"id": "capability-tour",
+			"execution": "model-only",
+			"hookDependence": "hook-independent"
+		},
+		{
+			"id": "dev-mode",
+			"execution": "model-only",
+			"hookDependence": "hook-independent"
+		},
+		{
+			"id": "frontier-runner",
+			"execution": "bun-backed",
+			"hookDependence": "hook-independent"
+		},
+		{
+			"id": "handoff-to-opus",
+			"execution": "model-only",
+			"hookDependence": "hook-independent"
+		},
+		{
+			"id": "hello-world",
+			"execution": "bun-backed",
+			"hookDependence": "hook-independent"
+		},
+		{
+			"id": "new-note",
+			"execution": "model-only",
+			"hookDependence": "hook-independent"
+		},
+		{
+			"id": "new-plugin",
+			"execution": "model-only",
+			"hookDependence": "hook-independent"
+		},
+		{
+			"id": "new-project",
+			"execution": "model-only",
+			"hookDependence": "hook-independent"
+		},
+		{
+			"id": "new-skill",
+			"execution": "model-only",
+			"hookDependence": "hook-independent"
+		},
+		{
+			"id": "orchestration-design",
+			"execution": "model-only",
+			"hookDependence": "hook-independent"
+		},
+		{
+			"id": "runtime-custody",
+			"execution": "model-only",
+			"hookDependence": "hook-independent"
+		},
+		{
+			"id": "skill-a",
+			"execution": "bun-backed",
+			"hookDependence": "hook-independent"
+		},
+		{
+			"id": "skill-b",
+			"execution": "bun-backed",
+			"hookDependence": "hook-independent"
+		},
+		{
+			"id": "ultragoal",
+			"execution": "model-only",
+			"hookDependence": "hook-independent"
+		}
+	]
+}

@@ -9,7 +9,7 @@ Inspect only the installed plugin. Do not inspect the source checkout or unrelat
 
 ## Evidence collection
 
-Read the installed Claude and Codex manifests, declared hook files, lifecycle fixture pair, runtime skill catalog, bundle inventory, launcher names, installed skill names, and `references/capability-reviewer.md`.
+Read the installed Claude and Codex manifests, declared hook files, lifecycle fixture pair, runtime skill catalog, bundle inventory, launcher names, installed `skills/<id>/SKILL.md` identities, `skill-inventory.json`, and `references/capability-reviewer.md`. Require the installed identities to exactly match the projection; use the projection only for execution and hook classification.
 
 Keep these evidence layers separate:
 
@@ -39,5 +39,5 @@ Return these ordered groups. Keep raw paths, hashes, handler JSON, and reviewer 
 
 1. `Overall verdict`: one line with `healthy` or `non-healthy` plus installed name and version. Include the active client only alongside a validated `native-subagent-via-skill` delivery.
 2. `Evidence matrix`: a compact table with rows in this order: declaration, direct handler, `currentSessionHook`, external candidate qualification, delegation delivery. State `observed`, `passed`, `qualified`, `unknown`, or the precise non-healthy result without merging evidence layers.
-3. `Available portable skills`: list `frontier-runner`, `hello-world`, `skill-a`, `skill-b`, `capability-tour`, `dev-mode`, `handoff-to-opus`, `new-note`, `new-plugin`, `new-project`, `new-skill`, `orchestrate-spec`, `orchestration-design`, `runtime-custody`, and `ultragoal`, marking the first four Bun-backed and the last eleven model-only.
+3. `Available portable skills`: dynamically list actual installed identities from `skills/<id>/SKILL.md`. After the exact-match check, use `skill-inventory.json` only to attach execution and hook classification.
 4. `Next action`: include only for an untrusted hook, lifecycle fixture failure, failed delegation, or another non-healthy state. Give one concrete recovery action. Omit this group when healthy.

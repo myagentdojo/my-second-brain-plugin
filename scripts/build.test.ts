@@ -31,6 +31,7 @@ import {
 	validateBundleText,
 } from "./build"
 import { copyPluginPayload } from "./plugin-files"
+import { writePluginPayloadSkillInventory } from "./plugin-payload-skills"
 
 const root = new URL("..", import.meta.url).pathname.replace(/\/$/, "")
 const temporaryRoots: string[] = []
@@ -1566,8 +1567,9 @@ test("Bun-only release admission rejects an arbitrary model-only skill", () => {
 	})
 	writeFileSync(
 		join(fixtureRoot, "plugin", "skills", "unexpected-model-skill", "SKILL.md"),
-		"# Unexpected model skill\n",
+		"---\nname: unexpected-model-skill\n---\n",
 	)
+	writePluginPayloadSkillInventory(fixtureRoot)
 	expect(() => validateBunOnlyPayload(fixtureRoot)).toThrow(/skill sidecar inventory/)
 })
 
