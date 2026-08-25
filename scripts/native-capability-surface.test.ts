@@ -191,6 +191,8 @@ test("capability tour is one model-only skill with one cross-client reviewer pro
 	expect(reviewer).toContain("bounded inputs")
 	expect(reviewer).toContain("structured handback")
 	expect(reviewer).toContain("Do not select or pin a model")
+	expect(reviewer).toContain("installed identities exactly match the projection")
+	expect(reviewer).toContain("projection only for execution and hook classification")
 	expect(reviewer).toContain(
 		"<absolute-installed-plugin-root>/hooks/native-capability-hook Stop <active-client>",
 	)
@@ -206,27 +208,15 @@ test("capability tour is one model-only skill with one cross-client reviewer pro
 	expect(existsSync(join(root, "plugin", "bin", "capability-tour"))).toBe(false)
 })
 
-test("capability tour derives its skill inventory and runtime tiers from installed evidence", () => {
+test("capability tour reads the installed skill inventory instead of a prose copy", () => {
 	const skill = readFileSync(join(root, "plugin", "skills", "capability-tour", "SKILL.md"), "utf8")
-	const catalog = JSON.parse(readFileSync(join(root, "runtime", "skill-catalog.json"), "utf8"))
-	const shipped = readdirSync(join(root, "plugin", "skills"), { withFileTypes: true })
-		.filter((entry) => entry.isDirectory())
-		.map((entry) => entry.name)
-		.sort()
-	const catalogSkills = Object.keys(catalog.skills ?? {}).sort()
-	const bunBacked = shipped.filter((id) => catalogSkills.includes(id))
-	// A catalog entry with no shipped directory is drift in the other direction.
-	expect(catalogSkills).toEqual(bunBacked)
-	const inventory = skill
-		.split("\n")
-		.find((line) => line.includes("Available portable skills"))
-	expect(inventory).toBeDefined()
-	expect(inventory).toContain("every discovered installed skill")
-	expect(inventory).toContain("deterministic order")
-	expect(inventory).toContain("runtime skill catalog")
-	expect(inventory).toContain("Bun-backed")
-	expect(inventory).toContain("model-only")
-	for (const id of shipped) expect(inventory).not.toContain(`\`${id}\``)
+	expect(skill).toContain("`skill-inventory.json`")
+	expect(skill).toContain("installed `skills/<id>/SKILL.md` identities")
+	expect(skill).toContain("installed identities to exactly match the projection")
+	expect(skill).toContain("dynamically list actual installed identities from `skills/<id>/SKILL.md`")
+	expect(skill).toContain("use `skill-inventory.json` only to attach execution and hook classification")
+	expect(skill).toContain("execution and hook classification")
+	expect(skill).not.toContain("orchestrate-spec")
 })
 
 test("payload contains only the named capability sidecars and no standalone agent surface", () => {

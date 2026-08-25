@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto"
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { join, resolve } from "node:path"
 
@@ -34,8 +35,23 @@ interface CodexDevelopmentCandidate {
 	supersededPluginId: string
 	version: string
 	payloadHash: string
+	candidateHash: string
 	marketplaceRoot: string
 	sourcePath: string
+}
+
+type PreparedCodexDevelopmentCandidate = Omit<CodexDevelopmentCandidate, "candidateHash">
+
+type CodexDevelopmentSideEffect =
+	| "development_marketplace_added"
+	| "development_plugin_installed"
+	| "superseded_development_plugin_removed"
+
+interface CodexDevelopmentPlanOperation {
+	kind: "marketplace_add" | "plugin_add" | "plugin_remove"
+	command: readonly string[]
+	label: string
+	sideEffect: CodexDevelopmentSideEffect
 }
 
 interface CodexDevelopmentCurrent {
@@ -185,7 +201,7 @@ function build(repositoryRoot: string, environment: Record<string, string | unde
 	command(["bun", "run", "build"], repositoryRoot, environment, "Plugin Payload build")
 }
 
-function prepareCandidate(repositoryRoot: string): CodexDevelopmentCandidate {
+function prepareCandidate(repositoryRoot: string): PreparedCodexDevelopmentCandidate {
 	const pluginConfig = loadPluginConfig(repositoryRoot)
 	const pluginName = pluginConfig.name
 	const developmentPluginName = `${pluginName}-dev`
@@ -209,6 +225,7 @@ function prepareCandidate(repositoryRoot: string): CodexDevelopmentCandidate {
 		displayName: `${pluginConfig.displayName} Dev`,
 	}
 	writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
+	const payloadHash = payloadInventorySha256(sourcePath, inventory)
 
 	const marketplace = {
 		name: developmentPluginName,
@@ -230,7 +247,7 @@ function prepareCandidate(repositoryRoot: string): CodexDevelopmentCandidate {
 		pluginId: `${developmentPluginName}@${developmentPluginName}`,
 		supersededPluginId: `${pluginName}@${developmentPluginName}`,
 		version,
-		payloadHash: sourcePayloadHash,
+		payloadHash,
 		marketplaceRoot: resolve(marketplaceRoot),
 		sourcePath: resolve(sourcePath),
 	}
@@ -238,7 +255,7 @@ function prepareCandidate(repositoryRoot: string): CodexDevelopmentCandidate {
 
 function inspect(
 	input: CodexDevelopmentInstallationInput,
-	candidate: CodexDevelopmentCandidate,
+	candidate: PreparedCodexDevelopmentCandidate,
 ): CodexDevelopmentCurrent {
 	const pluginName = loadPluginConfig(input.repositoryRoot).name
 	const developmentMarketplaceName = `${pluginName}-dev`
@@ -327,20 +344,78 @@ function inspect(
 	}
 }
 
-function plan(
+function operationPlan(
 	current: CodexDevelopmentCurrent,
-	candidate: CodexDevelopmentCandidate,
-): string[] {
+	candidate: PreparedCodexDevelopmentCandidate,
+): CodexDevelopmentPlanOperation[] {
 	if (current.candidateCurrent && !current.supersededIdentityPresent) return []
-	const commands: string[] = []
+	const operations: CodexDevelopmentPlanOperation[] = []
 	if (current.development === "absent") {
-		commands.push(`codex plugin marketplace add ${candidate.marketplaceRoot}`)
+		operations.push({
+			kind: "marketplace_add",
+			command: ["codex", "plugin", "marketplace", "add", candidate.marketplaceRoot],
+			label: "Codex development Marketplace add",
+			sideEffect: "development_marketplace_added",
+		})
 	}
-	commands.push(`codex plugin add ${candidate.pluginId} --json`)
+	operations.push({
+		kind: "plugin_add",
+		command: ["codex", "plugin", "add", candidate.pluginId, "--json"],
+		label: "Codex development Plugin install",
+		sideEffect: "development_plugin_installed",
+	})
 	if (current.supersededIdentityPresent) {
-		commands.push(`codex plugin remove ${candidate.supersededPluginId} --json`)
+		operations.push({
+			kind: "plugin_remove",
+			command: ["codex", "plugin", "remove", candidate.supersededPluginId, "--json"],
+			label: "Codex superseded development Plugin removal",
+			sideEffect: "superseded_development_plugin_removed",
+		})
 	}
-	return commands
+	return operations
+}
+
+function renderPlan(operations: readonly CodexDevelopmentPlanOperation[]): string[] {
+	return operations.map((operation) => operation.command.join(" "))
+}
+
+function candidateHash(
+	candidate: PreparedCodexDevelopmentCandidate,
+	operations: readonly CodexDevelopmentPlanOperation[],
+): string {
+	const hash = createHash("sha256")
+	hash.update("codex-development-candidate-v1\0")
+	hash.update(candidate.payloadHash)
+	for (const operation of operations) {
+		hash.update("\0")
+		hash.update(JSON.stringify([operation.kind, operation.command]))
+	}
+	return hash.digest("hex")
+}
+
+function executePlan(
+	operations: readonly CodexDevelopmentPlanOperation[],
+	input: CodexDevelopmentInstallationInput,
+): string[] {
+	const sideEffects: string[] = []
+	for (const operation of operations) {
+		try {
+			command([...operation.command], input.repositoryRoot, input.environment, operation.label)
+		} catch (error) {
+			const message = error instanceof Error ? error.message : `${operation.label} failed`
+			throw new CodexDevelopmentInstallationError("CODEX_DEVELOPMENT_APPLY_FAILED", message, {
+				action: "INSPECT_STATE",
+				errorFamily: "runtime",
+				changed: true,
+				transactionState: "unknown",
+				retrySafety: "inspect_required",
+				sideEffects,
+				nextAction: "Inspect the Codex development state before deciding whether to retry.",
+			})
+		}
+		sideEffects.push(operation.sideEffect)
+	}
+	return sideEffects
 }
 
 function baseResult(
@@ -374,9 +449,14 @@ export function runCodexDevelopmentInstallation(
 	input: CodexDevelopmentInstallationInput,
 ): CodexDevelopmentInstallationResult {
 	build(input.repositoryRoot, input.environment)
-	const candidate = prepareCandidate(input.repositoryRoot)
-	const current = inspect(input, candidate)
-	const commands = plan(current, candidate)
+	const preparedCandidate = prepareCandidate(input.repositoryRoot)
+	const current = inspect(input, preparedCandidate)
+	const operations = operationPlan(current, preparedCandidate)
+	const commands = renderPlan(operations)
+	const candidate: CodexDevelopmentCandidate = {
+		...preparedCandidate,
+		candidateHash: candidateHash(preparedCandidate, operations),
+	}
 
 	if (input.operation === "check") {
 		return baseResult(input, candidate, current, "inspect", "ready", {
@@ -395,47 +475,22 @@ export function runCodexDevelopmentInstallation(
 	if (!input.apply) {
 		return baseResult(input, candidate, current, "preview", "previewed", {
 			plan: commands,
-			nextAction: `Review this exact plan, then run \`bun run dev -- codex install --apply --candidate-hash ${candidate.payloadHash} --json --no-input --no-launch\`.`,
+			nextAction: `Review this exact plan, then run \`bun run dev -- codex install --apply --candidate-hash ${candidate.candidateHash} --json --no-input --no-launch\`.`,
 		})
 	}
-	if (input.expectedCandidateHash !== candidate.payloadHash) {
+	if (input.expectedCandidateHash !== candidate.candidateHash) {
 		throw new CodexDevelopmentInstallationError(
 			"CODEX_DEVELOPMENT_CANDIDATE_CHANGED",
-			"The staged Plugin Payload differs from the approved preview",
+			"The staged Plugin Payload or operation plan differs from the approved preview",
 			{
 				nextAction: "Run the Codex install preview again and approve its new candidate hash.",
 			},
 		)
 	}
 
-	const sideEffects: string[] = []
+	let sideEffects: string[] = []
 	try {
-		if (current.development === "absent") {
-			command(
-				["codex", "plugin", "marketplace", "add", candidate.marketplaceRoot],
-				input.repositoryRoot,
-				input.environment,
-				"Codex development Marketplace add",
-			)
-			sideEffects.push("development_marketplace_added")
-		}
-		command(
-			["codex", "plugin", "add", candidate.pluginId, "--json"],
-			input.repositoryRoot,
-			input.environment,
-			"Codex development Plugin install",
-		)
-		sideEffects.push("development_plugin_installed")
-		if (current.supersededIdentityPresent) {
-			const pluginName = loadPluginConfig(input.repositoryRoot).name
-			command(
-				["codex", "plugin", "remove", `${pluginName}@${pluginName}-dev`, "--json"],
-				input.repositoryRoot,
-				input.environment,
-				"Codex superseded development Plugin removal",
-			)
-			sideEffects.push("superseded_development_plugin_removed")
-		}
+		sideEffects = executePlan(operations, input)
 		const resulting = inspect(input, candidate)
 		if (!resulting.candidateCurrent || resulting.supersededIdentityPresent) {
 			throw new CodexDevelopmentInstallationError(

@@ -110,7 +110,6 @@ test("runtime custody sources generate one thin launcher and checked shell proje
 		"new-plugin",
 		"new-project",
 		"new-skill",
-		"orchestrate-spec",
 		"orchestration-design",
 		"runtime-custody",
 		"skill-a",

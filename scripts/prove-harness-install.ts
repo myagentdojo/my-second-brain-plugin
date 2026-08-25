@@ -31,6 +31,10 @@ import {
 } from "./harness-identity"
 import { copyPluginPayload, payloadInventorySha256, pluginPayloadInventory } from "./plugin-files"
 import {
+	loadInstalledPluginPayloadSkillInventory,
+	observeInstalledPluginPayloadSkillIds,
+} from "./plugin-payload-skills"
+import {
 	CLAUDE_DISABLED_BY_DEFAULT_COMPATIBILITY,
 	hookDeclarationBody,
 	loadPluginConfig,
@@ -236,25 +240,6 @@ export interface CodexProof {
 	} | null
 }
 
-const PORTABLE_SKILLS_WITHOUT_HOOKS = [
-	"hello-world",
-	"skill-a",
-	"skill-b",
-	"runtime-custody",
-	"capability-tour",
-	"decision-view",
-	"dev-mode",
-	"frontier-runner",
-	"handoff-to-opus",
-	"new-note",
-	"new-plugin",
-	"new-project",
-	"new-skill",
-	"orchestrate-spec",
-	"orchestration-design",
-	"ultragoal",
-] as const
-
 export interface InstalledCapabilityEvidence {
 	candidateCommit: string
 	candidatePayloadHash: string
@@ -270,7 +255,7 @@ export interface InstalledCapabilityEvidence {
 		| { status: "not-proved"; receipt: null }
 		| { status: "proved"; receipt: NativeQualificationEvidence }
 		| { status: "failed"; receipt: NativeQualificationEvidence }
-	portableSkillsWithoutHooks: typeof PORTABLE_SKILLS_WITHOUT_HOOKS
+	portableSkillsWithoutHooks: readonly string[]
 }
 
 /** Hash-only conclusions that may be promoted from a private fresh-client receipt. */
@@ -1295,14 +1280,15 @@ export function proveInstalledCapabilityEvidence(
 	if (installed.payloadHash !== candidatePayloadHash) {
 		throw new Error(`${client} installed payload hash differs from the candidate payload`)
 	}
-	const installedSkills = installedInventory
-		.filter((path) => /^skills\/[^/]+\/SKILL\.md$/.test(path))
-		.map((path) => path.slice("skills/".length, -"/SKILL.md".length))
-	const portableSkills = [...PORTABLE_SKILLS_WITHOUT_HOOKS].sort()
+	const installedSkills = observeInstalledPluginPayloadSkillIds(pluginRoot, installedInventory)
+	const installedSkillInventory = loadInstalledPluginPayloadSkillInventory(pluginRoot)
+	const portableSkills = installedSkillInventory.map((skill) => skill.id)
 	if (JSON.stringify(installedSkills) !== JSON.stringify(portableSkills)) {
 		throw new Error(`${client} installed portable skill inventory differs`)
 	}
-	const executableSkills = ["frontier-runner", "hello-world", "skill-a", "skill-b"]
+	const executableSkills = installedSkillInventory
+		.filter((skill) => skill.execution === "bun-backed")
+		.map((skill) => skill.id)
 	const launchers = installedInventory
 		.filter((path) => path.startsWith("bin/"))
 		.map((path) => path.slice("bin/".length))
@@ -1403,7 +1389,9 @@ export function proveInstalledCapabilityEvidence(
 		externalCandidateQualification: nativeProved ? "proved" : "unknown",
 		nativeDelegation: nativeProved ? "proved" : "not-proved",
 		nativeQualification,
-		portableSkillsWithoutHooks: PORTABLE_SKILLS_WITHOUT_HOOKS,
+		portableSkillsWithoutHooks: installedSkillInventory
+			.filter((skill) => skill.hookDependence === "hook-independent")
+			.map((skill) => skill.id),
 	}
 }
 

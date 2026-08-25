@@ -9,6 +9,10 @@ import {
 	checkRuntimeCustodyFiles,
 	writeRuntimeCustodyFiles,
 } from "./runtime-custody-config"
+import {
+	checkPluginPayloadSkillInventory,
+	writePluginPayloadSkillInventory,
+} from "./plugin-payload-skills"
 
 const root = resolve(import.meta.dir, "..")
 const arguments_ = process.argv.slice(2)
@@ -42,6 +46,7 @@ if (check) {
 		...checkGeneratedFiles(root, config),
 		...checkNativeCapabilityFixture(root),
 		...checkRuntimeCustodyFiles(root),
+		...checkPluginPayloadSkillInventory(root),
 	]
 	if (drifted.length > 0) {
 		console.error(`Generated files differ from canonical sources:\n${drifted.join("\n")}`)
@@ -55,6 +60,7 @@ const files = check
 			...writeGeneratedFiles(root, config),
 			...writeNativeCapabilityFixture(root),
 			...writeRuntimeCustodyFiles(root),
+			writePluginPayloadSkillInventory(root),
 		]
 const result = {
 	ok: true,

@@ -17,6 +17,10 @@ import {
 } from "./plugin-files"
 import { loadPluginConfig } from "./plugin-config"
 import {
+	loadInstalledPluginPayloadSkillInventory,
+	loadPluginPayloadSkills,
+} from "./plugin-payload-skills"
+import {
 	proveInstalledCapabilityEvidence,
 	resolveCandidatePayloadCommit,
 } from "./prove-harness-install"
@@ -92,6 +96,7 @@ const entries = directoryArchiveEntries(extractedRoot, "")
 for (const required of [
 	`${packageName}/.claude-plugin/plugin.json`,
 	`${packageName}/.codex-plugin/plugin.json`,
+	`${packageName}/skill-inventory.json`,
 	`${packageName}/assets/composer-icon.svg`,
 	`${packageName}/assets/logo.svg`,
 	`${packageName}/hooks/claude/hooks.json`,
@@ -113,8 +118,6 @@ for (const required of [
 	`${packageName}/skills/new-skill/CODING_STANDARDS.md`,
 	`${packageName}/skills/new-skill/CONTEXT.md`,
 	`${packageName}/skills/new-skill/SKILL.md`,
-	`${packageName}/skills/orchestrate-spec/SKILL.md`,
-	`${packageName}/skills/orchestrate-spec/references/codex-ticket-routing.md`,
 	`${packageName}/skills/orchestration-design/SKILL.md`,
 	`${packageName}/skills/runtime-custody/SKILL.md`,
 	`${packageName}/skills/skill-a/SKILL.md`,
@@ -177,27 +180,11 @@ for (const relativePath of inventory) {
 	}
 }
 
+const packagedSkillInventory = loadInstalledPluginPayloadSkillInventory(installedRoot)
 const packagedSkills = entries
 	.filter((entry) => entry.startsWith(`${packageName}/skills/`) && entry.endsWith("/SKILL.md"))
 	.map((entry) => entry.slice(`${packageName}/skills/`.length, -"/SKILL.md".length))
-if (JSON.stringify(packagedSkills) !== JSON.stringify([
-	"capability-tour",
-	"decision-view",
-	"dev-mode",
-	"frontier-runner",
-	"handoff-to-opus",
-	"hello-world",
-	"new-note",
-	"new-plugin",
-	"new-project",
-	"new-skill",
-	"orchestrate-spec",
-	"orchestration-design",
-	"runtime-custody",
-	"skill-a",
-	"skill-b",
-	"ultragoal",
-])) {
+if (JSON.stringify(packagedSkills) !== JSON.stringify(packagedSkillInventory.map((skill) => skill.id))) {
 	throw new Error("package skill inventory does not preserve the exact portable and model-only closure")
 }
 const packagedLaunchers = entries
@@ -213,7 +200,9 @@ const catalog = JSON.parse(readFileSync(join(root, "runtime", "skill-catalog.jso
 const bundles = JSON.parse(
 	readFileSync(join(installedRoot, "runtime", "bundle-inventory.json"), "utf8"),
 )
-const expectedExecutableKeys = ["frontier-runner", "hello-world", "skill-a", "skill-b"]
+const expectedExecutableKeys = loadPluginPayloadSkills(root)
+	.skills.filter((skill) => skill.execution === "bun-backed")
+	.map((skill) => skill.id)
 for (const [surfaceName, surface] of [
 	["runtime catalog", catalog.skills],
 	["bundle inventory", bundles.bundles],
@@ -302,7 +291,9 @@ console.log(
 		nativeActivation: "not-proved",
 		nativeDelegation: "not-proved",
 		qualificationReceiptsIngested: false,
-		hookIndependentSkills: capabilityEvidence.claude.portableSkillsWithoutHooks,
+		hookIndependentSkills: packagedSkillInventory
+			.filter((skill) => skill.hookDependence === "hook-independent")
+			.map((skill) => skill.id),
 		entries: entries.length,
 		offlinePackageExecution: true,
 		bunRequiredAtRuntime: true,

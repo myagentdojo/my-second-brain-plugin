@@ -47,7 +47,12 @@ function linkedCheckout(): { checkout: string; profile: string; runner: CommandR
 	for (const entry of ["skills", "hooks", "assets", "runtime", "bin"]) {
 		symlinkSync(join(checkout, "plugin", entry), join(cache, entry))
 	}
-	for (const entry of [".claude-plugin", ".codex-plugin", "THIRD-PARTY-NOTICES.md"]) {
+	for (const entry of [
+		".claude-plugin",
+		".codex-plugin",
+		"skill-inventory.json",
+		"THIRD-PARTY-NOTICES.md",
+	]) {
 		symlinkSync(join(checkout, "plugin", entry), join(cache, entry))
 	}
 

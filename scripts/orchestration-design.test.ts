@@ -17,8 +17,9 @@ describe("orchestration-design recommendation contract", () => {
 	})
 
 	test("is a tiny Sol Advisor pointer", () => {
-		expect(skill.split("\n").length).toBeLessThan(20)
-		expect(skill.match(/\$sol-advisor:orchestration/g)).toHaveLength(1)
+		expect(skill.split("\n").length).toBeLessThan(24)
+		expect(skill).toContain("/sol-advisor:orchestration")
+		expect(skill).toContain("$sol-advisor:orchestration")
 		expect(skill).not.toContain("references/")
 	})
 
@@ -49,6 +50,7 @@ describe("orchestration-design recommendation contract", () => {
 			expect(normalized).not.toContain(forbidden)
 		}
 		expect(normalized).toContain("Do not inspect or edit files, launch agents, or execute the workflow")
+		expect(normalized).not.toContain("unless the user separately asks")
 	})
 
 	test("has no runtime catalog, bundle, or launcher surface", () => {

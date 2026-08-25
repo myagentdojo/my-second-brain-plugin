@@ -20,7 +20,8 @@ test("new-skill is an explicit cross-harness formation manager", () => {
 	expect(skill).toContain("disable-model-invocation: true")
 	expect(skill).toContain("Read [`CONTEXT.md`](CONTEXT.md) before starting the Formation Run.")
 	expect(skill).toContain("cross-harness Formation Run")
-	expect(skill).toContain("explicitly invokes `$new-skill`")
+	expect(skill).toContain("explicitly invokes `new-skill`")
+	expect(skill).toContain("Claude Code uses\n`/name`; Codex uses `$name`")
 	expect(skill).toContain("ends at the implementation frontier")
 })
 
@@ -140,9 +141,9 @@ test("new-skill keeps the gate, architecture, and owner routing explicit", () =>
 	]) {
 		expect(skillNormalized).toContain(term)
 	}
-	expect(skill).toContain("explicit-only `$grill-with-docs` owner")
+	expect(skill).toContain("explicit-only `grill-with-docs` owner")
 	expect(skillNormalized).toContain("That owner calls Grilling and Domain Modeling")
-	expect(skillNormalized).toContain("offer the user-invoked `$grill-me` route")
+	expect(skillNormalized).toContain("offer the user-invoked `grill-me` route")
 	expect(skillNormalized).toContain("show the recommendation and ask the user to select")
 	expect(skillNormalized).toContain("Do not treat an inference as selection")
 	expect(skill).toContain("Payload-only is the default")
