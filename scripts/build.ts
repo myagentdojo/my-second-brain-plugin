@@ -1642,6 +1642,9 @@ const capabilityAssetFiles = [
 const nonBundledSkillPayloadFiles = [
 	"skills/capability-tour/SKILL.md",
 	"skills/capability-tour/references/capability-reviewer.md",
+	"skills/decision-view/AGENTS.md",
+	"skills/decision-view/CONTEXT.md",
+	"skills/decision-view/SKILL.md",
 	"skills/dev-mode/SKILL.md",
 	"skills/frontier-runner/CONTEXT.md",
 	"skills/frontier-runner/scripts/frontier-runner.sh",

@@ -101,6 +101,7 @@ test("runtime custody sources generate one thin launcher and checked shell proje
 	// Independent oracle: do not import the build allowlist that this inventory checks.
 	expect(installedSkills).toEqual([
 		"capability-tour",
+		"decision-view",
 		"dev-mode",
 		"frontier-runner",
 		"handoff-to-opus",

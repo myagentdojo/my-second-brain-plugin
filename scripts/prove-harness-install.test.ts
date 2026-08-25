@@ -365,12 +365,14 @@ test("automated install evidence binds bytes without claiming native activation"
 			externalCandidateQualification: "unknown",
 			nativeDelegation: "not-proved",
 			nativeQualification: { status: "not-proved", receipt: null },
+			// Independent oracle: keep this literal separate from the production inventory.
 			portableSkillsWithoutHooks: [
 				"hello-world",
 				"skill-a",
 				"skill-b",
 				"runtime-custody",
 				"capability-tour",
+				"decision-view",
 				"dev-mode",
 				"frontier-runner",
 				"handoff-to-opus",
