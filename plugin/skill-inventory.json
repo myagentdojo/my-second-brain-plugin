@@ -7,6 +7,11 @@
 			"hookDependence": "hook-independent"
 		},
 		{
+			"id": "decision-view",
+			"execution": "model-only",
+			"hookDependence": "hook-independent"
+		},
+		{
 			"id": "dev-mode",
 			"execution": "model-only",
 			"hookDependence": "hook-independent"

@@ -10,6 +10,7 @@ Consumer rules for these files: `docs/agents/domain.md`.
 | --- | --- | --- | --- |
 | **System-wide** | [`CONTEXT.md`](./CONTEXT.md) | [`docs/adr/`](./docs/adr/) | Plugin distribution across Harnesses: Plugin Payload, Harness Adapter, Portable Runtime, Marketplace, Release, Capability Tour, and the capability boundaries. |
 | **New Skill Formation** | [`plugin/skills/new-skill/CONTEXT.md`](./plugin/skills/new-skill/CONTEXT.md) | None. | `plugin/skills/new-skill/**`: Formation Run, Formation Packet, Mandatory Skill Scaffold, Complexity Gate, Architecture Shell, approval checkpoints, maturity, and the implementation frontier. |
+| **Decision View** | [`plugin/skills/decision-view/CONTEXT.md`](./plugin/skills/decision-view/CONTEXT.md) | None. | `plugin/skills/decision-view/**`: Decision View, Decision Input, Decision Result, Response Map, and Wait What Disclosure. |
 | **Frontier Runner** | [`plugin/skills/frontier-runner/CONTEXT.md`](./plugin/skills/frontier-runner/CONTEXT.md) | None. | `plugin/skills/frontier-runner/**` and `packages/frontier-runner/**`: Frontier Runner V0, Bounded run, and their shared vocabulary. |
 
 ## Which glossary governs

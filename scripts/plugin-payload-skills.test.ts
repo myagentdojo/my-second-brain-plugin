@@ -16,6 +16,7 @@ const temporaryRoots: string[] = []
 
 const expectedSkills = [
 	["capability-tour", "model-only", "hook-independent"],
+	["decision-view", "model-only", "hook-independent"],
 	["dev-mode", "model-only", "hook-independent"],
 	["frontier-runner", "bun-backed", "hook-independent"],
 	["handoff-to-opus", "model-only", "hook-independent"],
