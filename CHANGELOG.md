@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.4.0](https://github.com/myagentdojo/my-second-brain-plugin/compare/v0.3.0...v0.4.0) (2026-08-26)
+
+
+### Features
+
+* **plugin:** add NotebookLM and harness-aware development mode ([#34](https://github.com/myagentdojo/my-second-brain-plugin/issues/34)) ([76a06cc](https://github.com/myagentdojo/my-second-brain-plugin/commit/76a06cc3f6ae17bac320eaf0704e7e0f4442abbb))
+* **plugin:** validate skill inventory and Codex install plans ([#30](https://github.com/myagentdojo/my-second-brain-plugin/issues/30)) ([28b7bcb](https://github.com/myagentdojo/my-second-brain-plugin/commit/28b7bcb7a057dfb5bd318213d60df33388e0d9a4))
+* **skills:** make capability formation approval-safe ([#31](https://github.com/myagentdojo/my-second-brain-plugin/issues/31)) ([6da9692](https://github.com/myagentdojo/my-second-brain-plugin/commit/6da96924405114490d5672d0c39332857ba4420f))
+
+
+### Bug Fixes
+
+* **frontier-runner:** harden local launch setup ([#32](https://github.com/myagentdojo/my-second-brain-plugin/issues/32)) ([800432b](https://github.com/myagentdojo/my-second-brain-plugin/commit/800432b267b4f943b5efbe28808c0ab2ec5968de))
+* **release:** preserve readiness identity on invalid config ([#33](https://github.com/myagentdojo/my-second-brain-plugin/issues/33)) ([e065f5f](https://github.com/myagentdojo/my-second-brain-plugin/commit/e065f5f732b322e1ec0bacc06e534c0b3a53f4d1))
+
 ## [0.3.0](https://github.com/myagentdojo/my-second-brain-plugin/compare/v0.2.0...v0.3.0) (2026-08-24)
 
 
