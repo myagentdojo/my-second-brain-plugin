@@ -25,6 +25,7 @@ const expectedSkills = [
 	["new-plugin", "model-only", "hook-independent"],
 	["new-project", "model-only", "hook-independent"],
 	["new-skill", "model-only", "hook-independent"],
+	["notebooklm", "model-only", "hook-independent"],
 	["orchestration-design", "model-only", "hook-independent"],
 	["runtime-custody", "model-only", "hook-independent"],
 	["skill-a", "bun-backed", "hook-independent"],

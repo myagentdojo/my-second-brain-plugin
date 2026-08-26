@@ -376,6 +376,7 @@ test("automated install evidence binds bytes without claiming native activation"
 				"new-plugin",
 				"new-project",
 				"new-skill",
+				"notebooklm",
 				"orchestration-design",
 				"runtime-custody",
 				"skill-a",
