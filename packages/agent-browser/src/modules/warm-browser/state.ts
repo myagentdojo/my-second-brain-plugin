@@ -140,52 +140,102 @@ export function lockAgeMs(paths: StatePaths, nowEpochMs: number): number {
 	return Math.max(0, nowEpochMs - statSync(paths.lock).mtimeMs)
 }
 
+/**
+ * The shared domain predicates every phase validator is built from. A durable
+ * receipt is read back into decisions that signal processes and remove state,
+ * so a value outside its domain is unsafe state, not a value to coerce.
+ */
+const identifier = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
+
+function isIdentifier(value: unknown): value is string {
+	return typeof value === "string" && identifier.test(value)
+}
+
+/** A wall-clock reading, never before the epoch. */
+function isEpochMs(value: unknown): value is number {
+	return Number.isSafeInteger(value) && (value as number) >= 0
+}
+
+/** A process or process-group identity, which is always positive. */
+function isProcessIdentifier(value: unknown): value is number {
+	return Number.isSafeInteger(value) && (value as number) >= 1
+}
+
+/** A TCP port, which is 1 through 65535. */
+function isPort(value: unknown): value is number {
+	return Number.isSafeInteger(value) && (value as number) >= 1 && (value as number) <= 65_535
+}
+
+function isNonEmptyString(value: unknown): value is string {
+	return typeof value === "string" && value !== ""
+}
+
 function processShape(value: unknown): value is BrowserProcessIdentity {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) return false
 	const processIdentity = value as Partial<BrowserProcessIdentity>
 	return (
-		Number.isSafeInteger(processIdentity.pid) &&
-		Number.isSafeInteger(processIdentity.processGroupId) &&
-		typeof processIdentity.startedAtToken === "string" &&
-		typeof processIdentity.executable === "string" &&
-		typeof processIdentity.commandLine === "string"
+		isProcessIdentifier(processIdentity.pid) &&
+		isProcessIdentifier(processIdentity.processGroupId) &&
+		isNonEmptyString(processIdentity.startedAtToken) &&
+		isNonEmptyString(processIdentity.executable) &&
+		isNonEmptyString(processIdentity.commandLine)
 	)
 }
 
 function launchShape(value: unknown): value is LaunchOwnership {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) return false
 	const launch = value as Partial<LaunchOwnership>
-	return typeof launch.executable === "string" && typeof launch.commandLine === "string"
+	return isNonEmptyString(launch.executable) && isNonEmptyString(launch.commandLine)
+}
+
+/**
+ * The endpoint a phase may carry. Verification fields belong to a verified
+ * endpoint and to nothing else, so a launching or starting receipt claiming a
+ * browser version is a receipt that did not come from this code.
+ */
+function endpointShape(value: unknown, verified: boolean): boolean {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return false
+	const endpoint = value as Partial<BrowserSessionBase["endpoint"]>
+	if (endpoint.host !== "127.0.0.1" || !isPort(endpoint.port)) return false
+	return verified
+		? isNonEmptyString(endpoint.browserVersion) &&
+			isNonEmptyString(endpoint.controlledPageTargetId)
+		: endpoint.browserVersion === undefined && endpoint.controlledPageTargetId === undefined
+}
+
+/** Everything every phase shares, before the phase decides the rest. */
+function commonShape(state: Partial<BrowserSessionState>): boolean {
+	return (
+		state.schemaVersion === 1 &&
+		isIdentifier(state.sessionId) &&
+		isIdentifier(state.startRunId) &&
+		isIdentifier(state.launchMarker) &&
+		isEpochMs(state.createdAtEpochMs) &&
+		isNonEmptyString(state.profileRoot) &&
+		launchShape(state.launch)
+	)
 }
 
 function stateShape(value: unknown): value is BrowserSessionState {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) return false
 	const state = value as Partial<BrowserSessionState>
-	const endpoint = state.endpoint as BrowserSessionBase["endpoint"] | undefined
-	const common = state.schemaVersion === 1 &&
-		(state.phase === "launching" || state.phase === "starting" || state.phase === "running") &&
-		typeof state.sessionId === "string" &&
-		/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(state.sessionId) &&
-		typeof state.startRunId === "string" &&
-		typeof state.launchMarker === "string" &&
-		/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(state.launchMarker) &&
-		Number.isSafeInteger(state.createdAtEpochMs) &&
-		typeof state.profileRoot === "string" &&
-		launchShape(state.launch) &&
-		endpoint !== undefined &&
-		endpoint.host === "127.0.0.1" &&
-		Number.isSafeInteger(endpoint.port) &&
-		(endpoint.browserVersion === undefined || typeof endpoint.browserVersion === "string") &&
-		(endpoint.controlledPageTargetId === undefined ||
-			typeof endpoint.controlledPageTargetId === "string")
-	if (!common) return false
-	if (state.phase === "launching") return !("process" in state)
-	if (!processShape((state as Partial<StartingBrowserSessionState>).process)) return false
-	return (
-		state.phase !== "running" ||
-		(typeof endpoint.browserVersion === "string" &&
-			typeof endpoint.controlledPageTargetId === "string")
-	)
+	if (!commonShape(state)) return false
+	if (state.phase === "launching") {
+		return !("process" in state) && endpointShape(state.endpoint, false)
+	}
+	if (state.phase === "starting") {
+		return (
+			processShape((state as Partial<StartingBrowserSessionState>).process) &&
+			endpointShape(state.endpoint, false)
+		)
+	}
+	if (state.phase === "running") {
+		return (
+			processShape((state as Partial<RunningBrowserSessionState>).process) &&
+			endpointShape(state.endpoint, true)
+		)
+	}
+	return false
 }
 
 export function readSessionState(paths: StatePaths): BrowserSessionState | undefined {
@@ -245,11 +295,12 @@ export function removeNewEmptyLock(paths: StatePaths): void {
 	rmdirSync(paths.lock)
 }
 
-export function removeOwnedState(
-	paths: StatePaths,
-	sessionId: string,
-	onDetached?: () => void,
-): void {
+/**
+ * Removes one owned session's durable state. The lock is detached by a single
+ * atomic rename before anything inside it is touched, so a concurrent owner
+ * never observes a half-removed lock: it sees the lock gone and is refused.
+ */
+export function removeOwnedState(paths: StatePaths, sessionId: string): void {
 	if (!validateSessionLock(paths)) throw new UnsafeStateError()
 	const state = readSessionState(paths)
 	if (state === undefined || state.sessionId !== sessionId) throw new UnsafeStateError()
@@ -258,7 +309,6 @@ export function removeOwnedState(
 	renameSync(paths.lock, detached)
 	const detachedSession = join(detached, "session.json")
 	try {
-		onDetached?.()
 		unlinkSync(detachedSession)
 		rmdirSync(detached)
 	} catch (error) {

@@ -491,31 +491,61 @@ function validateSessionLock(paths) {
 function lockAgeMs(paths, nowEpochMs) {
   return Math.max(0, nowEpochMs - statSync(paths.lock).mtimeMs);
 }
+var identifier = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+function isIdentifier(value) {
+  return typeof value === "string" && identifier.test(value);
+}
+function isEpochMs(value) {
+  return Number.isSafeInteger(value) && value >= 0;
+}
+function isProcessIdentifier(value) {
+  return Number.isSafeInteger(value) && value >= 1;
+}
+function isPort(value) {
+  return Number.isSafeInteger(value) && value >= 1 && value <= 65535;
+}
+function isNonEmptyString(value) {
+  return typeof value === "string" && value !== "";
+}
 function processShape(value) {
   if (typeof value !== "object" || value === null || Array.isArray(value))
     return false;
   const processIdentity = value;
-  return Number.isSafeInteger(processIdentity.pid) && Number.isSafeInteger(processIdentity.processGroupId) && typeof processIdentity.startedAtToken === "string" && typeof processIdentity.executable === "string" && typeof processIdentity.commandLine === "string";
+  return isProcessIdentifier(processIdentity.pid) && isProcessIdentifier(processIdentity.processGroupId) && isNonEmptyString(processIdentity.startedAtToken) && isNonEmptyString(processIdentity.executable) && isNonEmptyString(processIdentity.commandLine);
 }
 function launchShape(value) {
   if (typeof value !== "object" || value === null || Array.isArray(value))
     return false;
   const launch = value;
-  return typeof launch.executable === "string" && typeof launch.commandLine === "string";
+  return isNonEmptyString(launch.executable) && isNonEmptyString(launch.commandLine);
+}
+function endpointShape(value, verified) {
+  if (typeof value !== "object" || value === null || Array.isArray(value))
+    return false;
+  const endpoint = value;
+  if (endpoint.host !== "127.0.0.1" || !isPort(endpoint.port))
+    return false;
+  return verified ? isNonEmptyString(endpoint.browserVersion) && isNonEmptyString(endpoint.controlledPageTargetId) : endpoint.browserVersion === undefined && endpoint.controlledPageTargetId === undefined;
+}
+function commonShape(state) {
+  return state.schemaVersion === 1 && isIdentifier(state.sessionId) && isIdentifier(state.startRunId) && isIdentifier(state.launchMarker) && isEpochMs(state.createdAtEpochMs) && isNonEmptyString(state.profileRoot) && launchShape(state.launch);
 }
 function stateShape(value) {
   if (typeof value !== "object" || value === null || Array.isArray(value))
     return false;
   const state = value;
-  const endpoint = state.endpoint;
-  const common = state.schemaVersion === 1 && (state.phase === "launching" || state.phase === "starting" || state.phase === "running") && typeof state.sessionId === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(state.sessionId) && typeof state.startRunId === "string" && typeof state.launchMarker === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(state.launchMarker) && Number.isSafeInteger(state.createdAtEpochMs) && typeof state.profileRoot === "string" && launchShape(state.launch) && endpoint !== undefined && endpoint.host === "127.0.0.1" && Number.isSafeInteger(endpoint.port) && (endpoint.browserVersion === undefined || typeof endpoint.browserVersion === "string") && (endpoint.controlledPageTargetId === undefined || typeof endpoint.controlledPageTargetId === "string");
-  if (!common)
+  if (!commonShape(state))
     return false;
-  if (state.phase === "launching")
-    return !("process" in state);
-  if (!processShape(state.process))
-    return false;
-  return state.phase !== "running" || typeof endpoint.browserVersion === "string" && typeof endpoint.controlledPageTargetId === "string";
+  if (state.phase === "launching") {
+    return !("process" in state) && endpointShape(state.endpoint, false);
+  }
+  if (state.phase === "starting") {
+    return processShape(state.process) && endpointShape(state.endpoint, false);
+  }
+  if (state.phase === "running") {
+    return processShape(state.process) && endpointShape(state.endpoint, true);
+  }
+  return false;
 }
 function readSessionState(paths) {
   let metadata;
@@ -566,7 +596,7 @@ function removeNewEmptyLock(paths) {
   }
   rmdirSync(paths.lock);
 }
-function removeOwnedState(paths, sessionId, onDetached) {
+function removeOwnedState(paths, sessionId) {
   if (!validateSessionLock(paths))
     throw new UnsafeStateError;
   const state = readSessionState(paths);
@@ -578,7 +608,6 @@ function removeOwnedState(paths, sessionId, onDetached) {
   renameSync(paths.lock, detached);
   const detachedSession = join2(detached, "session.json");
   try {
-    onDetached?.();
     unlinkSync(detachedSession);
     rmdirSync(detached);
   } catch (error) {
@@ -1000,7 +1029,7 @@ async function status(parsed, paths, adapter) {
       transactionState: "recovered",
       retrySafe: true,
       nextAction: "Run warm-browser start --run-id ID to create a new Browser Session.",
-      data: recoveredData("status", inspection.stoppedOwnedProcess ?? false)
+      data: recoveredData("status", inspection.stoppedOwnedProcess)
     });
   }
   return success({
@@ -1018,7 +1047,7 @@ async function status(parsed, paths, adapter) {
 async function stop(parsed, paths, adapter) {
   const inspection = await inspectSession("stop", parsed.runId, paths, adapter);
   if (inspection.kind === "recovered") {
-    return recoveredStop(parsed, inspection.stoppedOwnedProcess ?? false);
+    return recoveredStop(parsed, inspection.stoppedOwnedProcess);
   }
   if (inspection.kind === "absent") {
     return success({

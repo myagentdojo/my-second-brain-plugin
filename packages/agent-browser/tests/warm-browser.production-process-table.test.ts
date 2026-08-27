@@ -536,6 +536,86 @@ test("an unchanged exact owner is escalated once and then proved absent", () => 
 	expect(signalEffects(probe).filter(({ signal }) => signal === "SIGKILL")).toHaveLength(1)
 })
 
+/**
+ * Independent oracle: durable receipts carrying a value outside its domain.
+ * Each is one representative of a rule the phase validators own, and every one
+ * of them is read back into decisions that signal processes or remove state.
+ */
+const invalidReceipts: ReadonlyArray<
+	readonly [string, (probe: ProductionCliProbe) => Record<string, unknown>]
+> = [
+	["a timestamp before the epoch", (probe) => ({ ...runningState(probe), createdAtEpochMs: -1 })],
+	[
+		"a non-positive process identity",
+		(probe) => ({
+			...runningState(probe),
+			process: { ...(runningState(probe).process as object), pid: 0 },
+		}),
+	],
+	[
+		"a negative process group",
+		(probe) => ({
+			...runningState(probe),
+			process: { ...(runningState(probe).process as object), processGroupId: -1 },
+		}),
+	],
+	[
+		"a port below the valid range",
+		(probe) => ({
+			...runningState(probe),
+			endpoint: { ...(runningState(probe).endpoint as object), port: 0 },
+		}),
+	],
+	[
+		"a port above the valid range",
+		(probe) => ({
+			...runningState(probe),
+			endpoint: { ...(runningState(probe).endpoint as object), port: 70_000 },
+		}),
+	],
+	["a run id outside the vocabulary", (probe) => ({ ...runningState(probe), startRunId: "bad id" })],
+	[
+		"a launching receipt claiming a verified endpoint",
+		(probe) => ({
+			...launchingState(probe),
+			endpoint: { host: "127.0.0.1", port: 9242, browserVersion: "Chrome/151.0.7922.174" },
+		}),
+	],
+	[
+		"a running receipt with no controlled page",
+		(probe) => ({
+			...runningState(probe),
+			endpoint: { host: "127.0.0.1", port: 9242, browserVersion: "Chrome/151.0.7922.174" },
+		}),
+	],
+]
+
+test.each(invalidReceipts)("a durable receipt carrying %s is unsafe state", (_name, build) => {
+	const probe = productionCliProbe()
+	seedSessionState(probe, build(probe))
+	writeHostEffectsPlan(probe, { processTable: ownedRowReading(probe) })
+
+	const result = runProductionCli(probe, ["status", "--run-id", "invalid-receipt"])
+
+	expect(result.exitCode).toBe(20)
+	expect(result.stdout.toString()).toBe("")
+	expect(result.stderr.toString()).toBe(
+		output({
+			schemaVersion: 1,
+			status: "error",
+			command: "status",
+			resultCode: "STATE_UNSAFE",
+			runId: "invalid-receipt",
+			transactionState: "unchanged",
+			retrySafe: false,
+			nextAction: "Repair the private XDG state ownership and permissions before retrying.",
+			message: "Warm Browser private state is unsafe or unreadable.",
+		}),
+	)
+	expect(existsSync(probe.sessionPath)).toBe(true)
+	expect(hostEffects(probe)).toEqual([])
+})
+
 // Independent oracle: the raw host commands Warm Browser is allowed to run.
 test.each(["/bin/ps", "/usr/sbin/lsof"] as const)(
 	"the %s host reading has exactly one production reader",

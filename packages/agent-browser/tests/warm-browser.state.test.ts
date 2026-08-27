@@ -51,19 +51,12 @@ function ownedState(sessionId: string) {
 	return { paths, state }
 }
 
-test("detached cleanup blocks a concurrent owner until old state is gone, then preserves the new owner", () => {
+test("a completed cleanup leaves no lock and lets one new owner acquire it", () => {
 	const { paths } = ownedState("old-session")
-	let concurrentBlocked = false
-	removeOwnedState(paths, "old-session", () => {
-		try {
-			ensurePrivateState(paths)
-		} catch (error) {
-			concurrentBlocked = error instanceof UnsafeStateError
-		}
-	})
-	expect(concurrentBlocked).toBe(true)
-	expect(existsSync(paths.lock)).toBe(false)
 
+	removeOwnedState(paths, "old-session")
+
+	expect(existsSync(paths.lock)).toBe(false)
 	ensurePrivateState(paths)
 	expect(acquireSessionLock(paths)).toBe(true)
 	const newState: LaunchingBrowserSessionState = {
@@ -81,13 +74,21 @@ test("detached cleanup blocks a concurrent owner until old state is gone, then p
 	expect(readSessionState(paths)).toEqual(newState)
 })
 
-test("cleanup failure preserves the exact receipt inside a fail-closed tombstone", () => {
+test("a blocked cleanup detaches the lock, refuses a concurrent owner, and retains the receipt", () => {
 	const { paths } = ownedState("failed-cleanup")
 	const receipt = readFileSync(paths.session, "utf8")
+	// A real filesystem obstruction stops the removal after the atomic detach,
+	// which is exactly the window a concurrent owner could observe. No
+	// production callback is involved: the boundary is the filesystem itself.
 	writeFileSync(join(paths.lock, "unexpected-entry"), "block rmdir\n", { mode: 0o600 })
+
 	expect(() => removeOwnedState(paths, "failed-cleanup")).toThrow()
+
+	// The lock is gone rather than half-removed, so a concurrent owner is
+	// refused instead of acquiring ownership of a session being cleaned up.
+	expect(existsSync(paths.lock)).toBe(false)
+	expect(() => ensurePrivateState(paths)).toThrow(UnsafeStateError)
 	const tombstoneReceipt = join(paths.root, ".cleanup-failed-cleanup", "session.json")
 	expect(readFileSync(tombstoneReceipt, "utf8")).toBe(receipt)
 	expect(statSync(tombstoneReceipt).mode & 0o7777).toBe(0o600)
-	expect(() => ensurePrivateState(paths)).toThrow(UnsafeStateError)
 })

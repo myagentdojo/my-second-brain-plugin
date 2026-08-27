@@ -150,6 +150,19 @@ function makeStateStale(testFixture: Fixture, patch: Record<string, unknown> = {
 	chmodSync(testFixture.sessionPath, 0o600)
 }
 
+/**
+ * Ages the receipt into a stale starting phase. A starting receipt carries no
+ * verified endpoint, so the verification fields are dropped with the phase
+ * rather than left behind on a state production would never write.
+ */
+function makeStartingStale(testFixture: Fixture): void {
+	const endpoint = readJson(testFixture.sessionPath).endpoint as Record<string, unknown>
+	makeStateStale(testFixture, {
+		phase: "starting",
+		endpoint: { host: endpoint.host, port: endpoint.port },
+	})
+}
+
 /** The one spawned process and whether the driver fixture still reports it alive. */
 function expectSoleProcessAlive(testFixture: Fixture, alive: boolean): void {
 	expect(readJson(ledgerPath(testFixture))).toMatchObject({ processes: [{ alive }] })
@@ -947,7 +960,7 @@ test("an unstoppable owned group after an unexpected failure never claims a roll
 test("status terminates only an exact stale starting owner before cleanup", () => {
 	const testFixture = fixture()
 	expect(run(testFixture, ["start", "--run-id", "stale-start"]).exitCode).toBe(0)
-	makeStateStale(testFixture, { phase: "starting" })
+	makeStartingStale(testFixture)
 
 	const status = run(testFixture, ["status", "--run-id", "stale-status"])
 	expect(status.exitCode).toBe(0)
@@ -1452,7 +1465,7 @@ test("a stop whose cleanup fails reports the stop it performed and keeps repaira
 test("a stale starting cleanup whose state removal fails reports the stop it performed", () => {
 	const testFixture = fixture()
 	expect(run(testFixture, ["start", "--run-id", "stale-cleanup-start"]).exitCode).toBe(0)
-	makeStateStale(testFixture, { phase: "starting" })
+	makeStartingStale(testFixture)
 	writeFileSync(join(testFixture.lockPath, "unexpected-entry"), "preserve receipt\n", {
 		mode: 0o600,
 	})
@@ -1523,7 +1536,7 @@ test.each(
 test("stale cleanup never signals a stale owner whose live argument list gained an argument", () => {
 	const testFixture = fixture()
 	expect(run(testFixture, ["start", "--run-id", "argv-stale-prime"]).exitCode).toBe(0)
-	makeStateStale(testFixture, { phase: "starting" })
+	makeStartingStale(testFixture)
 	perturbLedger(testFixture, (ledger) => {
 		ledger.processes[0]!.commandLine += " --load-extension=/tmp/unowned"
 	})

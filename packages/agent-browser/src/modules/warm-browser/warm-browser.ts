@@ -261,11 +261,17 @@ function canonicalProcess(value: BrowserProcessIdentity): BrowserProcessIdentity
 	}
 }
 
-interface SessionInspection {
-	readonly kind: "absent" | "running" | "recovered"
-	readonly state?: RunningBrowserSessionState
-	readonly stoppedOwnedProcess?: boolean
-}
+/**
+ * What one lifecycle inspection concluded, and only what that conclusion
+ * carries. An absent session has no state and stopped nothing, a running one
+ * always has its verified state, and a recovered one always says whether it
+ * stopped an owned process. None of those payloads is optional, so "running
+ * without a state" and "recovered without an outcome" cannot be written.
+ */
+type SessionInspection =
+	| { readonly kind: "absent" }
+	| { readonly kind: "running"; readonly state: RunningBrowserSessionState }
+	| { readonly kind: "recovered"; readonly stoppedOwnedProcess: boolean }
 
 async function recoverLaunching(
 	command: SliceCommand,
@@ -727,7 +733,7 @@ async function status(
 			retrySafe: true,
 			nextAction:
 				"Continue with an implemented Agent Browser command or run warm-browser stop --run-id ID.",
-			data: sessionData(inspection.state!, "running"),
+			data: sessionData(inspection.state, "running"),
 		})
 	}
 	if (inspection.kind === "recovered") {
@@ -740,7 +746,7 @@ async function status(
 			transactionState: "recovered",
 			retrySafe: true,
 			nextAction: "Run warm-browser start --run-id ID to create a new Browser Session.",
-			data: recoveredData("status", inspection.stoppedOwnedProcess ?? false),
+			data: recoveredData("status", inspection.stoppedOwnedProcess),
 		})
 	}
 	return success({
@@ -763,7 +769,7 @@ async function stop(
 ): Promise<CliOutcome> {
 	const inspection = await inspectSession("stop", parsed.runId, paths, adapter)
 	if (inspection.kind === "recovered") {
-		return recoveredStop(parsed, inspection.stoppedOwnedProcess ?? false)
+		return recoveredStop(parsed, inspection.stoppedOwnedProcess)
 	}
 	if (inspection.kind === "absent") {
 		return success({
@@ -778,7 +784,7 @@ async function stop(
 			data: { postcondition: "absent" },
 		})
 	}
-	const state = inspection.state!
+	const state = inspection.state
 	const observed = adapter.inspectProcess(state.process.pid)
 	if (observed.kind === "unverifiable") inspectionFailure("stop", parsed.runId)
 	if (observed.kind === "absent") {
