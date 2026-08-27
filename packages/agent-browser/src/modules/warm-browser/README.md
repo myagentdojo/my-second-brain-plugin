@@ -1,6 +1,6 @@
 # Warm Browser
 
-Warm Browser is one of exactly two Agent Browser Modules.
+Warm Browser is one of the two Agent Browser Modules, and the implemented one.
 
 It owns the Command Vocabulary and Result Vocabulary. The first vertical slice
 implements the `help` meta-surface and the `start`, `status`, and `stop` product

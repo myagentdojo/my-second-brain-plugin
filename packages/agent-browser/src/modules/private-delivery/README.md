@@ -1,6 +1,7 @@
 # Private Delivery
 
-Private Delivery is one of exactly two future Agent Browser Modules.
+Private Delivery is the one Agent Browser Module still ahead. Warm Browser,
+the other, is implemented.
 
 It owns approval, exact-origin unique-match and revalidation, one selected-field
 fill, disposable-child confinement, redacted non-secret results, and exit.

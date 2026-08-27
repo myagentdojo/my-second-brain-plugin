@@ -23,12 +23,16 @@ test("Agent Browser lifecycle source follows the repository discovery contract",
 		"packages/agent-browser/src/main.ts",
 		"packages/agent-browser/src/modules/private-delivery/README.md",
 		"packages/agent-browser/src/modules/warm-browser/README.md",
+		"packages/agent-browser/src/modules/warm-browser/adapter.ts",
 		"packages/agent-browser/src/modules/warm-browser/contract.ts",
 		"packages/agent-browser/src/modules/warm-browser/host-effects.ts",
+		"packages/agent-browser/src/modules/warm-browser/listener-table.ts",
+		"packages/agent-browser/src/modules/warm-browser/ownership.ts",
 		"packages/agent-browser/src/modules/warm-browser/process-table.ts",
 		"packages/agent-browser/src/modules/warm-browser/production-adapter.ts",
 		"packages/agent-browser/src/modules/warm-browser/state.ts",
 		"packages/agent-browser/src/modules/warm-browser/warm-browser.ts",
+		"packages/agent-browser/tests/fixtures/cli-refusals.ts",
 		"packages/agent-browser/tests/fixtures/host-effects-preload.ts",
 		"packages/agent-browser/tests/fixtures/production-cli-harness.ts",
 		"packages/agent-browser/tests/fixtures/warm-browser-driver.ts",
@@ -92,7 +96,7 @@ test("Agent Browser has the approved lifecycle workspace and generated activatio
 	const moduleRoot = join(packageRoot, "src", "modules")
 	expect(readdirSync(moduleRoot).sort()).toEqual(["private-delivery", "warm-browser"])
 	const warmBrowser = readFileSync(join(moduleRoot, "warm-browser", "README.md"), "utf8")
-	expect(warmBrowser).toContain("exactly two Agent Browser Modules")
+	expect(warmBrowser).toContain("one of the two Agent Browser Modules, and the implemented one")
 	expect(warmBrowser).toContain("owns the Command Vocabulary and Result Vocabulary")
 	expect(warmBrowser).toContain("`start`, `status`, and `stop`")
 	expect(warmBrowser).toContain("Snapshot Generation")
@@ -103,7 +107,7 @@ test("Agent Browser has the approved lifecycle workspace and generated activatio
 	expect(warmBrowser).toContain("production Adapter is fixed")
 	expect(warmBrowser).toContain("no factory, no injected dependency")
 	const privateDelivery = readFileSync(join(moduleRoot, "private-delivery", "README.md"), "utf8")
-	expect(privateDelivery).toContain("exactly two future Agent Browser Modules")
+	expect(privateDelivery).toContain("the one Agent Browser Module still ahead")
 	expect(privateDelivery).toContain("exact-origin unique-match and revalidation")
 	expect(privateDelivery).toContain("one selected-field")
 	expect(privateDelivery).toContain("disposable-child confinement")
