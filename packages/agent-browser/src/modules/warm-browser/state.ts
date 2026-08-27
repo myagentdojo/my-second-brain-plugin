@@ -289,14 +289,8 @@ function commonShape(state: Partial<BrowserSessionState>): boolean {
 	)
 }
 
-function stateShape(value: unknown): value is BrowserSessionState {
-	if (typeof value !== "object" || value === null || Array.isArray(value)) return false
-	const state = value as Partial<BrowserSessionState>
-	if (!commonShape(state)) return false
-	// A Snapshot Generation belongs to a verified Controlled Page and to nothing
-	// else, so a receipt that carries one before the page exists did not come
-	// from this code.
-	if (state.phase !== "running" && "snapshot" in state) return false
+/** What each phase adds to the fields every phase shares. */
+function phaseShape(state: Partial<BrowserSessionState>): boolean {
 	if (state.phase === "launching") {
 		return !("process" in state) && endpointShape(state.endpoint, false)
 	}
@@ -315,6 +309,17 @@ function stateShape(value: unknown): value is BrowserSessionState {
 		)
 	}
 	return false
+}
+
+function stateShape(value: unknown): value is BrowserSessionState {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return false
+	const state = value as Partial<BrowserSessionState>
+	if (!commonShape(state)) return false
+	// A Snapshot Generation belongs to a verified Controlled Page and to nothing
+	// else, so a receipt that carries one before the page exists did not come
+	// from this code.
+	if (state.phase !== "running" && "snapshot" in state) return false
+	return phaseShape(state)
 }
 
 export function readSessionState(paths: StatePaths): BrowserSessionState | undefined {

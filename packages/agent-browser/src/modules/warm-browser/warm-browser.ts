@@ -1460,6 +1460,26 @@ async function actOnPage(
 	})
 }
 
+type SliceHandler = (
+	parsed: ParsedCommand,
+	paths: StatePaths,
+	adapter: WarmBrowserAdapter,
+) => Promise<CliOutcome>
+
+/**
+ * One handler per product command, so adding a command is declaring it rather
+ * than editing a chain that another command could fall through.
+ */
+const sliceCommands: Readonly<Record<SliceCommand, SliceHandler>> = {
+	start,
+	status,
+	open,
+	snapshot,
+	click: (parsed, paths, adapter) => actOnPage(parsed, "click", paths, adapter),
+	fill: (parsed, paths, adapter) => actOnPage(parsed, "fill", paths, adapter),
+	stop,
+}
+
 async function execute(parsed: ParsedCommand, adapter: WarmBrowserAdapter): Promise<CliOutcome> {
 	if (parsed.command === "help") {
 		return success({
@@ -1515,14 +1535,7 @@ async function execute(parsed: ParsedCommand, adapter: WarmBrowserAdapter): Prom
 		}
 		throw error
 	}
-	if (parsed.command === "start") return start(parsed, paths, adapter)
-	if (parsed.command === "status") return status(parsed, paths, adapter)
-	if (parsed.command === "open") return open(parsed, paths, adapter)
-	if (parsed.command === "snapshot") return snapshot(parsed, paths, adapter)
-	if (parsed.command === "click" || parsed.command === "fill") {
-		return actOnPage(parsed, parsed.command, paths, adapter)
-	}
-	return stop(parsed, paths, adapter)
+	return sliceCommands[parsed.command](parsed, paths, adapter)
 }
 
 /**

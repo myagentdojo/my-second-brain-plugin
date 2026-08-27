@@ -1029,14 +1029,7 @@ function endpointShape(value, verified) {
 function commonShape(state) {
   return state.schemaVersion === 1 && isIdentifier(state.sessionId) && isIdentifier(state.startRunId) && isIdentifier(state.launchMarker) && isEpochMs(state.createdAtEpochMs) && isNonEmptyString(state.profileRoot) && launchShape(state.launch);
 }
-function stateShape(value) {
-  if (typeof value !== "object" || value === null || Array.isArray(value))
-    return false;
-  const state = value;
-  if (!commonShape(state))
-    return false;
-  if (state.phase !== "running" && "snapshot" in state)
-    return false;
+function phaseShape(state) {
   if (state.phase === "launching") {
     return !("process" in state) && endpointShape(state.endpoint, false);
   }
@@ -1048,6 +1041,16 @@ function stateShape(value) {
     return processShape(running.process) && endpointShape(state.endpoint, true) && (running.snapshot === undefined || snapshotShape(running.snapshot));
   }
   return false;
+}
+function stateShape(value) {
+  if (typeof value !== "object" || value === null || Array.isArray(value))
+    return false;
+  const state = value;
+  if (!commonShape(state))
+    return false;
+  if (state.phase !== "running" && "snapshot" in state)
+    return false;
+  return phaseShape(state);
 }
 function readSessionState(paths) {
   let metadata;
@@ -1911,6 +1914,15 @@ async function actOnPage(parsed, command, paths, adapter) {
     }
   });
 }
+var sliceCommands = {
+  start,
+  status,
+  open,
+  snapshot,
+  click: (parsed, paths, adapter) => actOnPage(parsed, "click", paths, adapter),
+  fill: (parsed, paths, adapter) => actOnPage(parsed, "fill", paths, adapter),
+  stop
+};
 async function execute(parsed, adapter) {
   if (parsed.command === "help") {
     return success({
@@ -1957,18 +1969,7 @@ async function execute(parsed, adapter) {
     }
     throw error;
   }
-  if (parsed.command === "start")
-    return start(parsed, paths, adapter);
-  if (parsed.command === "status")
-    return status(parsed, paths, adapter);
-  if (parsed.command === "open")
-    return open(parsed, paths, adapter);
-  if (parsed.command === "snapshot")
-    return snapshot(parsed, paths, adapter);
-  if (parsed.command === "click" || parsed.command === "fill") {
-    return actOnPage(parsed, parsed.command, paths, adapter);
-  }
-  return stop(parsed, paths, adapter);
+  return sliceCommands[parsed.command](parsed, paths, adapter);
 }
 async function runWarmBrowserCli(arguments_) {
   const adapter = productionAdapter;
