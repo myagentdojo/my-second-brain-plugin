@@ -315,6 +315,14 @@ async function readEndpoint(port, expected) {
       }
       if (pages.length !== 1)
         return { kind: "controlled_page_ambiguous" };
+      const settled = processTable();
+      if (settled.kind === "unverifiable")
+        return { kind: "process_unverifiable" };
+      if (!isSameProcess(expected, settled.processes.find((processIdentity) => processIdentity.pid === expected.pid))) {
+        return { kind: "browser_unverified" };
+      }
+      if (loopbackListenerOwner(port) !== expected.pid)
+        return { kind: "listener_unverified" };
       return {
         kind: "verified",
         endpoint: {

@@ -174,6 +174,22 @@ async function readEndpoint(
 				continue
 			}
 			if (pages.length !== 1) return { kind: "controlled_page_ambiguous" }
+			// The two JSON reads describe whoever answered the port a moment ago.
+			// Between them and this answer the process could have exited and the
+			// port been taken over, so the identity and the listener are proved
+			// again here: a verified endpoint is only ever returned about a
+			// process and a listener that are still the owned ones right now.
+			const settled = processTable()
+			if (settled.kind === "unverifiable") return { kind: "process_unverifiable" }
+			if (
+				!isSameProcess(
+					expected,
+					settled.processes.find((processIdentity) => processIdentity.pid === expected.pid),
+				)
+			) {
+				return { kind: "browser_unverified" }
+			}
+			if (loopbackListenerOwner(port) !== expected.pid) return { kind: "listener_unverified" }
 			return {
 				kind: "verified",
 				endpoint: {

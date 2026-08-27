@@ -218,12 +218,15 @@ test("the production CLI starts, verifies, and stops one owned group through rea
 			recoveredFrom: null,
 		},
 	})
+	// The trailing listener read is the settle check: the endpoint is only
+	// answered about a process and a listener still owned at that moment.
 	expect(hostEffects(probe).map(({ action }) => action)).toEqual([
 		"port",
 		"spawn",
 		"listener",
 		"http",
 		"http",
+		"listener",
 	])
 
 	const stopped = runProductionCli(probe, ["stop", "--run-id", "production-stop"])
@@ -440,6 +443,66 @@ test("a launched identity that does not lead its own process group is never sign
 
 	expectLaunchCleanupUnverified(result, "post-spawn-foreign-group")
 	expectLaunchMarkerRetainedUnsignalled(probe, "post-spawn-foreign-group")
+})
+
+test("an endpoint whose process identity changed after the CDP reads is not verified", () => {
+	// The CDP documents describe whoever answered a moment ago. By the time the
+	// answer is given, process identity 4242 names something else entirely.
+	const probe = productionCliProbe({
+		...launchPlan(),
+		processTableAfterJson: verifiedReading(
+			`${systemRows}${processRow("4242", "4242", "/usr/bin/login -pf someone")}`,
+		),
+	})
+
+	const result = runProductionCli(probe, ["start", "--run-id", "endpoint-identity-changed"])
+
+	// The endpoint is refused, and the group it can no longer prove it owns is
+	// preserved rather than signalled. Independent oracle: the existing
+	// rollback-unverified refusal, restated by hand.
+	expect(result.exitCode).toBe(1)
+	expect(result.stdout.toString()).toBe("")
+	expect(result.stderr.toString()).toBe(
+		`${
+			JSON.stringify({
+				schemaVersion: 1,
+				status: "error",
+				command: "start",
+				resultCode: "UNEXPECTED_FAILURE",
+				runId: "endpoint-identity-changed",
+				transactionState: "unchanged",
+				retrySafe: false,
+				nextAction: "Inspect the owned process group and private state before retrying.",
+				message: "Warm Browser could not roll back its unverified browser process group.",
+			})
+		}
+`,
+	)
+	expect(JSON.parse(readFileSync(probe.sessionPath, "utf8"))).toMatchObject({ phase: "starting" })
+	expect(existsSync(probe.lockPath)).toBe(true)
+	expect(hostEffects(probe).filter(({ action }) => action === "signal")).toEqual([])
+})
+
+test("an endpoint whose listener owner changed after the CDP reads is not verified", () => {
+	const probe = productionCliProbe({
+		...launchPlan(),
+		// The owned process is unchanged; another process now holds the port.
+		listenerAfterJson: { status: 0, signal: null, failed: false, stdout: "p4243\n" },
+	})
+
+	const result = runProductionCli(probe, ["start", "--run-id", "endpoint-listener-changed"])
+
+	expect(result.exitCode).toBe(20)
+	expect(JSON.parse(result.stderr.toString())).toMatchObject({
+		resultCode: "CDP_IDENTITY_UNVERIFIED",
+		transactionState: "rolled_back",
+	})
+	// The owned group is still provable here, so the failed start rolls back.
+	expect(existsSync(probe.sessionPath)).toBe(false)
+	expect(existsSync(probe.lockPath)).toBe(false)
+	expect(hostEffects(probe).filter(({ action }) => action === "signal")).toEqual([
+		{ action: "signal", processGroupId: 4242, signal: "SIGTERM" },
+	])
 })
 
 test("an unsafe Agent Chrome Profile refuses the launch before any host effect", () => {

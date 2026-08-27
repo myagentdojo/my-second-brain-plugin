@@ -46,6 +46,13 @@ interface HostEffectsPlan {
 	 * process identity can exit and its number be reused.
 	 */
 	readonly processTableAfterSignal?: ProcessTableReading
+	/**
+	 * Readings served once a loopback JSON document has been read. This is the
+	 * window between believing a CDP endpoint and answering about it, in which
+	 * the process can exit and the port be taken over.
+	 */
+	readonly processTableAfterJson?: ProcessTableReading
+	readonly listenerAfterJson?: ListenerReading
 	readonly executableInstalled?: boolean
 	readonly spawnOutcome?: "leader" | "missing_executable"
 	readonly spawnedPid?: number
@@ -86,6 +93,7 @@ function action(value: Record<string, unknown>): void {
 }
 
 let signalsDelivered = 0
+let loopbackReadsServed = 0
 
 function row(leader: SpawnedLeader): string {
 	const identity = String(leader.pid).padStart(5)
@@ -98,6 +106,9 @@ const fake: typeof import("../../src/modules/warm-browser/host-effects") = {
 	readProcessTable: () => {
 		const current = plan()
 		const leaders = spawnedLeaders()
+		if (loopbackReadsServed > 0 && current.processTableAfterJson !== undefined) {
+			return current.processTableAfterJson
+		}
 		if (signalsDelivered > 0 && current.processTableAfterSignal !== undefined) {
 			return current.processTableAfterSignal
 		}
@@ -142,6 +153,9 @@ const fake: typeof import("../../src/modules/warm-browser/host-effects") = {
 	readLoopbackListener: (port) => {
 		action({ action: "listener", port })
 		const current = plan()
+		if (loopbackReadsServed > 0 && current.listenerAfterJson !== undefined) {
+			return current.listenerAfterJson
+		}
 		if (current.listener !== undefined) return current.listener
 		// The ergonomic plan names an owner; the fake renders the canonical
 		// `lsof -Fp` bytes for it, so the production observer still does the
@@ -154,6 +168,7 @@ const fake: typeof import("../../src/modules/warm-browser/host-effects") = {
 	},
 	readLoopbackJson: async (url) => {
 		action({ action: "http", url })
+		loopbackReadsServed += 1
 		const document = plan().loopbackJson?.[new URL(url).pathname]
 		if (document === undefined) throw new Error("the private host-effects fake serves no document")
 		return document
