@@ -19,15 +19,6 @@ afterEach(removeProductionCliProbes)
  * Independent oracles for the launch contract. Every value is restated here so
  * no production table, catalog, or builder supplies its own expectation.
  */
-const alwaysOnceExactly = [
-	"--profile-directory=Default",
-	"--remote-debugging-address=127.0.0.1",
-	"--password-store=basic",
-	"--use-mock-keychain",
-	"--no-first-run",
-	"--no-default-browser-check",
-] as const
-
 const alwaysOnceByPrefix = [
 	"--user-data-dir=",
 	"--remote-debugging-port=",
@@ -89,9 +80,14 @@ test("the production launch carries each security-sensitive argument exactly onc
 		"--no-first-run",
 		"--no-default-browser-check",
 	])
-	for (const argument of alwaysOnceExactly) {
+	// No argument is repeated, so every argument above occurs exactly once.
+	for (const argument of spawn.argumentList) {
 		expect(spawn.argumentList.filter((value) => value === argument), argument).toHaveLength(1)
 	}
+	// The two arguments that decide credential exposure, named on purpose.
+	expect(spawn.argumentList.filter((value) => value === "--password-store=basic")).toHaveLength(1)
+	expect(spawn.argumentList.filter((value) => value === "--use-mock-keychain")).toHaveLength(1)
+	// No second value may reach one single-valued argument.
 	for (const prefix of alwaysOnceByPrefix) {
 		expect(spawn.argumentList.filter((value) => value.startsWith(prefix)), prefix).toHaveLength(1)
 	}
