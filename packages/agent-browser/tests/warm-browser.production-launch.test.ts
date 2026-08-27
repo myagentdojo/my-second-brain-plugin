@@ -510,6 +510,38 @@ test("an endpoint whose listener owner changed after the CDP reads is not verifi
 	])
 })
 
+test.each([
+	["an empty target id", ""],
+	["a blank target id", "   "],
+] as const)("a Controlled Page with %s never publishes a started session", (_name, targetId) => {
+	const probe = productionCliProbe({
+		...launchPlan(),
+		loopbackJson: {
+			"/json/version": {
+				ok: true,
+				body: {
+					Browser: "Chrome/151.0.7922.174",
+					webSocketDebuggerUrl: "ws://127.0.0.1:9242/devtools/browser/probe",
+				},
+			},
+			"/json/list": { ok: true, body: [{ id: targetId, type: "page" }] },
+		},
+	})
+
+	const result = runProductionCli(probe, ["start", "--run-id", "blank-page"])
+
+	// No identity means no Controlled Page, which is the existing refusal.
+	expect(result.exitCode).toBe(20)
+	expect(result.stdout.toString()).toBe("")
+	expect(JSON.parse(result.stderr.toString())).toMatchObject({
+		resultCode: "CONTROLLED_PAGE_UNAVAILABLE",
+		transactionState: "rolled_back",
+	})
+	// No receipt survives, so no invalid durable state is left behind.
+	expect(existsSync(probe.sessionPath)).toBe(false)
+	expect(existsSync(probe.lockPath)).toBe(false)
+})
+
 test("an unsafe Agent Chrome Profile refuses the launch before any host effect", () => {
 	const probe = productionCliProbe(launchPlan())
 	// The real production profile check runs against this harness-owned HOME.

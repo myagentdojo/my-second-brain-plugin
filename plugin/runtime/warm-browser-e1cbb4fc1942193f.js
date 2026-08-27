@@ -3,8 +3,14 @@
 var schemaVersion = 1;
 var commandVocabulary = [
   { name: "help", sideEffects: "none" },
-  { name: "start", sideEffects: "starts one owned browser process group" },
-  { name: "status", sideEffects: "may remove proved stale private state" },
+  {
+    name: "start",
+    sideEffects: "may stop a proved stale owned browser process group, then starts one owned browser process group"
+  },
+  {
+    name: "status",
+    sideEffects: "may stop a proved stale owned browser process group and remove its private state"
+  },
   { name: "stop", sideEffects: "stops one verified owned browser process group" }
 ];
 
@@ -307,7 +313,7 @@ async function readEndpoint(port, expected) {
       const targets = targetsReading.body;
       if (!targetsReading.ok || !Array.isArray(targets))
         return { kind: "browser_unverified" };
-      const pages = targets.filter((target) => target.type === "page" && typeof target.id === "string");
+      const pages = targets.filter((target) => target.type === "page" && typeof target.id === "string" && target.id.trim() !== "");
       if (pages.length === 0) {
         if (attempt === 39)
           return { kind: "controlled_page_unavailable" };
@@ -578,6 +584,8 @@ function readSessionState(paths) {
 }
 function writeSessionState(paths, state) {
   if (!validateSessionLock(paths))
+    throw new UnsafeStateError;
+  if (!stateShape(state))
     throw new UnsafeStateError;
   const temporary = `${paths.session}.tmp-${process.pid}`;
   try {

@@ -283,8 +283,15 @@ export function readSessionState(paths: StatePaths): BrowserSessionState | undef
 	return parsed
 }
 
+/**
+ * Writes one durable receipt, having proved it is a receipt this code could
+ * read back. State is validated on the way out as well as on the way in: a
+ * receipt that would be rejected on read must never be published as a success,
+ * and must never reach the disk to be repaired later.
+ */
 export function writeSessionState(paths: StatePaths, state: BrowserSessionState): void {
 	if (!validateSessionLock(paths)) throw new UnsafeStateError()
+	if (!stateShape(state)) throw new UnsafeStateError()
 	const temporary = `${paths.session}.tmp-${process.pid}`
 	try {
 		writeFileSync(temporary, `${JSON.stringify(state, null, 2)}\n`, { flag: "wx", mode: 0o600 })
