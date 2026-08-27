@@ -164,7 +164,7 @@ test("production fixes the Agent Chrome Profile to HOME without predecessor over
 		"utf8",
 	)
 	expect(source).not.toContain("WARM_CHROME_PROFILE_DIR")
-	expect(source).toContain('if (result.status !== 0) return { kind: "unverifiable" }')
+	expect(source).toContain("createProductionAdapter(readHostProcessTable)")
 	expect(source).toContain("commandHasArgument(processIdentity.commandLine, marker)")
 	expect(source).toContain('"--password-store=basic"')
 	expect(source).toContain('"--use-mock-keychain"')

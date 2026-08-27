@@ -1,6 +1,6 @@
 // @bun
 // packages/agent-browser/src/modules/warm-browser/production-adapter.ts
-import { spawn, spawnSync } from "child_process";
+import { spawn, spawnSync as spawnSync2 } from "child_process";
 import { randomUUID } from "crypto";
 import { accessSync, constants, existsSync, lstatSync } from "fs";
 import { createConnection } from "net";
@@ -23,6 +23,66 @@ class SpawnCleanupUnverifiedError extends Error {
   }
 }
 
+// packages/agent-browser/src/modules/warm-browser/process-table.ts
+import { spawnSync } from "child_process";
+var rowPattern = /^\s*(\d+)\s+(\d+)\s+(\S+\s+\S+\s+\d+\s+\S+\s+\d{4})\s+(\S.*)$/;
+var canonicalIdentifier = /^(?:0|[1-9][0-9]*)$/;
+var unframedCharacter = /\p{Cc}/u;
+var unverifiable = { kind: "unverifiable" };
+function safeIdentifier(digits) {
+  if (!canonicalIdentifier.test(digits))
+    return;
+  const value = Number(digits);
+  return Number.isSafeInteger(value) ? value : undefined;
+}
+function executableOf(commandLine, knownExecutable) {
+  return commandLine === knownExecutable || commandLine.startsWith(`${knownExecutable} `) ? knownExecutable : commandLine.split(" ")[0];
+}
+function readHostProcessTable() {
+  const result = spawnSync("/bin/ps", ["-axo", "pid=,pgid=,lstart=,command="], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"]
+  });
+  return {
+    status: result.status,
+    signal: result.signal,
+    failed: result.error !== undefined,
+    stdout: typeof result.stdout === "string" ? result.stdout : null
+  };
+}
+function observeProcessTable(reading, knownExecutable) {
+  if (reading.failed || reading.signal !== null || reading.status !== 0)
+    return unverifiable;
+  const stdout = reading.stdout;
+  if (typeof stdout !== "string" || stdout === "" || !stdout.endsWith(`
+`))
+    return unverifiable;
+  const processes = [];
+  const claimed = new Set;
+  for (const line of stdout.slice(0, -1).split(`
+`)) {
+    if (unframedCharacter.test(line))
+      return unverifiable;
+    const match = rowPattern.exec(line);
+    if (!match)
+      return unverifiable;
+    const pid = safeIdentifier(match[1]);
+    const processGroupId = safeIdentifier(match[2]);
+    if (pid === undefined || processGroupId === undefined || claimed.has(pid))
+      return unverifiable;
+    claimed.add(pid);
+    const commandLine = match[4];
+    processes.push({
+      pid,
+      processGroupId,
+      startedAtToken: match[3],
+      executable: executableOf(commandLine, knownExecutable),
+      commandLine
+    });
+  }
+  return { kind: "verified", processes };
+}
+
 // packages/agent-browser/src/modules/warm-browser/production-adapter.ts
 var installedChrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 function commandHasArgument(commandLine, argument) {
@@ -33,27 +93,6 @@ function privateOwnedDirectory(path) {
     return false;
   const metadata = lstatSync(path);
   return metadata.isDirectory() && !metadata.isSymbolicLink() && (typeof process.getuid !== "function" || metadata.uid === process.getuid()) && (metadata.mode & 63) === 0;
-}
-function processTable() {
-  const result = spawnSync("/bin/ps", ["-axo", "pid=,pgid=,lstart=,command="], {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "ignore"]
-  });
-  if (result.status !== 0)
-    return { kind: "unverifiable" };
-  const rows = [];
-  for (const line of result.stdout.split(`
-`)) {
-    const match = /^\s*(\d+)\s+(\d+)\s+(\S+\s+\S+\s+\d+\s+\S+\s+\d{4})\s+(.+)$/.exec(line);
-    if (!match)
-      continue;
-    const pid = Number(match[1]);
-    const processGroupId = Number(match[2]);
-    const commandLine = match[4];
-    const executable = commandLine.startsWith(installedChrome) ? installedChrome : commandLine.split(" ")[0];
-    rows.push({ pid, processGroupId, startedAtToken: match[3], executable, commandLine });
-  }
-  return { kind: "verified", processes: rows };
 }
 function sameProcess(expected, observed) {
   return observed !== undefined && observed.pid === expected.pid && observed.processGroupId === expected.processGroupId && observed.startedAtToken === expected.startedAtToken && observed.executable === expected.executable && observed.commandLine === expected.commandLine;
@@ -70,6 +109,8 @@ async function pause(milliseconds) {
   await new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 async function terminateProcessGroupWithEscalation(processGroupId) {
+  if (!Number.isSafeInteger(processGroupId) || processGroupId < 1)
+    return false;
   try {
     process.kill(-processGroupId, "SIGTERM");
   } catch (error) {
@@ -97,7 +138,7 @@ async function terminateProcessGroupWithEscalation(processGroupId) {
   return false;
 }
 function listenerOwner(port) {
-  const result = spawnSync("/usr/sbin/lsof", ["-nP", "-a", `-iTCP@127.0.0.1:${port}`, "-sTCP:LISTEN", "-Fp"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  const result = spawnSync2("/usr/sbin/lsof", ["-nP", "-a", `-iTCP@127.0.0.1:${port}`, "-sTCP:LISTEN", "-Fp"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
   if (result.status === 1 && result.stdout.trim() === "")
     return "absent";
   if (result.status !== 0)
@@ -124,7 +165,7 @@ async function inspectLoopbackPort(port) {
     socket.setTimeout(300, () => finish("unverifiable"));
   });
 }
-async function readEndpoint(port, expected) {
+async function readEndpoint(processTable, port, expected) {
   for (let attempt = 0;attempt < 40; attempt += 1) {
     const table = processTable();
     if (table.kind === "unverifiable")
@@ -184,106 +225,110 @@ async function readEndpoint(port, expected) {
   }
   return { kind: "browser_unverified" };
 }
-var productionAdapter = {
-  createRunId: () => `wb-${randomUUID()}`,
-  createSessionId: () => `session-${randomUUID()}`,
-  nowEpochMs: () => Date.now(),
-  platform: () => process.platform,
-  chromeExecutable: () => installedChrome,
-  inspectChrome: (executable) => {
-    try {
-      const metadata = lstatSync(executable);
-      if (!metadata.isFile() || metadata.isSymbolicLink())
+function createProductionAdapter(readProcessTable) {
+  const processTable = () => observeProcessTable(readProcessTable(), installedChrome);
+  return {
+    createRunId: () => `wb-${randomUUID()}`,
+    createSessionId: () => `session-${randomUUID()}`,
+    nowEpochMs: () => Date.now(),
+    platform: () => process.platform,
+    chromeExecutable: () => installedChrome,
+    inspectChrome: (executable) => {
+      try {
+        const metadata = lstatSync(executable);
+        if (!metadata.isFile() || metadata.isSymbolicLink())
+          return "unavailable";
+        accessSync(executable, constants.X_OK);
+        return "installed";
+      } catch {
         return "unavailable";
-      accessSync(executable, constants.X_OK);
-      return "installed";
-    } catch {
-      return "unavailable";
-    }
-  },
-  profileRoot: () => join(homedir(), ".agent-warm-profile"),
-  inspectProfile: (profileRoot) => privateOwnedDirectory(profileRoot) && privateOwnedDirectory(join(profileRoot, "Default")) ? "safe" : "unsafe",
-  findProfileProcesses: (profileRoot) => {
-    const plain = `--user-data-dir=${profileRoot}`;
-    const quoted = `--user-data-dir="${profileRoot}"`;
-    const table = processTable();
-    if (table.kind === "unverifiable")
-      return table;
-    return {
-      kind: "verified",
-      processes: table.processes.filter((processIdentity) => processIdentity.executable === installedChrome && (commandHasArgument(processIdentity.commandLine, plain) || commandHasArgument(processIdentity.commandLine, quoted)))
-    };
-  },
-  findLaunchProcesses: (launchMarker) => {
-    const table = processTable();
-    if (table.kind === "unverifiable")
-      return table;
-    const marker = `--agent-browser-launch-marker=${launchMarker}`;
-    return {
-      kind: "verified",
-      processes: table.processes.filter((processIdentity) => commandHasArgument(processIdentity.commandLine, marker))
-    };
-  },
-  inspectPort: inspectLoopbackPort,
-  spawnChrome: async ({ executable, profileRoot, port, launchMarker }) => {
-    const child = spawn(executable, [
-      `--user-data-dir=${profileRoot}`,
-      "--profile-directory=Default",
-      "--remote-debugging-address=127.0.0.1",
-      `--remote-debugging-port=${port}`,
-      `--agent-browser-launch-marker=${launchMarker}`,
-      "--password-store=basic",
-      "--use-mock-keychain",
-      "--no-first-run",
-      "--no-default-browser-check"
-    ], { detached: true, stdio: "ignore" });
-    await new Promise((resolve, reject) => {
-      child.once("error", reject);
-      child.once("spawn", resolve);
-    });
-    if (child.pid === undefined)
-      throw new Error("Chrome returned no process identity");
-    child.unref();
-    for (let attempt = 0;attempt < 20; attempt += 1) {
+      }
+    },
+    profileRoot: () => join(homedir(), ".agent-warm-profile"),
+    inspectProfile: (profileRoot) => privateOwnedDirectory(profileRoot) && privateOwnedDirectory(join(profileRoot, "Default")) ? "safe" : "unsafe",
+    findProfileProcesses: (profileRoot) => {
+      const plain = `--user-data-dir=${profileRoot}`;
+      const quoted = `--user-data-dir="${profileRoot}"`;
       const table = processTable();
       if (table.kind === "unverifiable")
-        break;
-      const observed = table.processes.find((processIdentity) => processIdentity.pid === child.pid);
-      if (observed !== undefined && observed.processGroupId === child.pid)
-        return observed;
-      await pause(25);
+        return table;
+      return {
+        kind: "verified",
+        processes: table.processes.filter((processIdentity) => processIdentity.executable === installedChrome && (commandHasArgument(processIdentity.commandLine, plain) || commandHasArgument(processIdentity.commandLine, quoted)))
+      };
+    },
+    findLaunchProcesses: (launchMarker) => {
+      const table = processTable();
+      if (table.kind === "unverifiable")
+        return table;
+      const marker = `--agent-browser-launch-marker=${launchMarker}`;
+      return {
+        kind: "verified",
+        processes: table.processes.filter((processIdentity) => commandHasArgument(processIdentity.commandLine, marker))
+      };
+    },
+    inspectPort: inspectLoopbackPort,
+    spawnChrome: async ({ executable, profileRoot, port, launchMarker }) => {
+      const child = spawn(executable, [
+        `--user-data-dir=${profileRoot}`,
+        "--profile-directory=Default",
+        "--remote-debugging-address=127.0.0.1",
+        `--remote-debugging-port=${port}`,
+        `--agent-browser-launch-marker=${launchMarker}`,
+        "--password-store=basic",
+        "--use-mock-keychain",
+        "--no-first-run",
+        "--no-default-browser-check"
+      ], { detached: true, stdio: "ignore" });
+      await new Promise((resolve, reject) => {
+        child.once("error", reject);
+        child.once("spawn", resolve);
+      });
+      if (child.pid === undefined)
+        throw new Error("Chrome returned no process identity");
+      child.unref();
+      for (let attempt = 0;attempt < 20; attempt += 1) {
+        const table = processTable();
+        if (table.kind === "unverifiable")
+          break;
+        const observed = table.processes.find((processIdentity) => processIdentity.pid === child.pid);
+        if (observed !== undefined && observed.processGroupId === child.pid)
+          return observed;
+        await pause(25);
+      }
+      if (!await terminateProcessGroupWithEscalation(child.pid)) {
+        throw new SpawnCleanupUnverifiedError;
+      }
+      throw new Error("Chrome process identity could not be read");
+    },
+    inspectProcess: (pid) => {
+      const table = processTable();
+      if (table.kind === "unverifiable")
+        return { kind: "unverifiable" };
+      const processIdentity = table.processes.find((candidate) => candidate.pid === pid);
+      return processIdentity === undefined ? { kind: "absent" } : { kind: "found", process: processIdentity };
+    },
+    verifyEndpoint: async ({ port, process: expected }) => {
+      const table = processTable();
+      if (table.kind === "unverifiable")
+        return { kind: "process_unverifiable" };
+      const observed = table.processes.find((processIdentity) => processIdentity.pid === expected.pid);
+      if (!sameProcess(expected, observed))
+        return { kind: "browser_unverified" };
+      return readEndpoint(processTable, port, expected);
+    },
+    terminateProcessGroup: async (expected) => {
+      const table = processTable();
+      if (table.kind === "unverifiable")
+        return false;
+      const observed = table.processes.find((processIdentity) => processIdentity.pid === expected.pid);
+      if (!sameProcess(expected, observed) || expected.processGroupId !== expected.pid)
+        return false;
+      return terminateProcessGroupWithEscalation(expected.processGroupId);
     }
-    if (!await terminateProcessGroupWithEscalation(child.pid)) {
-      throw new SpawnCleanupUnverifiedError;
-    }
-    throw new Error("Chrome process identity could not be read");
-  },
-  inspectProcess: (pid) => {
-    const table = processTable();
-    if (table.kind === "unverifiable")
-      return { kind: "unverifiable" };
-    const processIdentity = table.processes.find((candidate) => candidate.pid === pid);
-    return processIdentity === undefined ? { kind: "absent" } : { kind: "found", process: processIdentity };
-  },
-  verifyEndpoint: async ({ port, process: expected }) => {
-    const table = processTable();
-    if (table.kind === "unverifiable")
-      return { kind: "process_unverifiable" };
-    const observed = table.processes.find((processIdentity) => processIdentity.pid === expected.pid);
-    if (!sameProcess(expected, observed))
-      return { kind: "browser_unverified" };
-    return readEndpoint(port, expected);
-  },
-  terminateProcessGroup: async (expected) => {
-    const table = processTable();
-    if (table.kind === "unverifiable")
-      return false;
-    const observed = table.processes.find((processIdentity) => processIdentity.pid === expected.pid);
-    if (!sameProcess(expected, observed) || expected.processGroupId !== expected.pid)
-      return false;
-    return terminateProcessGroupWithEscalation(expected.processGroupId);
-  }
-};
+  };
+}
+var productionAdapter = createProductionAdapter(readHostProcessTable);
 
 // packages/agent-browser/src/modules/warm-browser/state.ts
 import {

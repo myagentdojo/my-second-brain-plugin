@@ -12,6 +12,7 @@ import type {
 	ProcessListInspection,
 	WarmBrowserAdapter,
 } from "./contract"
+import { observeProcessTable, type ProcessTableReading, readHostProcessTable } from "./process-table"
 
 const installedChrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 
@@ -28,27 +29,6 @@ function privateOwnedDirectory(path: string): boolean {
 		(typeof process.getuid !== "function" || metadata.uid === process.getuid()) &&
 		(metadata.mode & 0o077) === 0
 	)
-}
-
-function processTable(): ProcessListInspection {
-	const result = spawnSync("/bin/ps", ["-axo", "pid=,pgid=,lstart=,command="], {
-		encoding: "utf8",
-		stdio: ["ignore", "pipe", "ignore"],
-	})
-	if (result.status !== 0) return { kind: "unverifiable" }
-	const rows: BrowserProcessIdentity[] = []
-	for (const line of result.stdout.split("\n")) {
-		const match = /^\s*(\d+)\s+(\d+)\s+(\S+\s+\S+\s+\d+\s+\S+\s+\d{4})\s+(.+)$/.exec(line)
-		if (!match) continue
-		const pid = Number(match[1])
-		const processGroupId = Number(match[2])
-		const commandLine = match[4]!
-		const executable = commandLine.startsWith(installedChrome)
-			? installedChrome
-			: commandLine.split(" ")[0]!
-		rows.push({ pid, processGroupId, startedAtToken: match[3]!, executable, commandLine })
-	}
-	return { kind: "verified", processes: rows }
 }
 
 function sameProcess(
@@ -79,6 +59,7 @@ async function pause(milliseconds: number): Promise<void> {
 }
 
 async function terminateProcessGroupWithEscalation(processGroupId: number): Promise<boolean> {
+	if (!Number.isSafeInteger(processGroupId) || processGroupId < 1) return false
 	try {
 		process.kill(-processGroupId, "SIGTERM")
 	} catch (error) {
@@ -142,6 +123,7 @@ async function inspectLoopbackPort(port: number): Promise<"free" | "occupied" | 
 }
 
 async function readEndpoint(
+	processTable: () => ProcessListInspection,
 	port: number,
 	expected: BrowserProcessIdentity,
 ): Promise<EndpointVerification> {
@@ -212,108 +194,126 @@ async function readEndpoint(
 	return { kind: "browser_unverified" }
 }
 
-export const productionAdapter: WarmBrowserAdapter = {
-	createRunId: () => `wb-${randomUUID()}`,
-	createSessionId: () => `session-${randomUUID()}`,
-	nowEpochMs: () => Date.now(),
-	platform: () => process.platform,
-	chromeExecutable: () => installedChrome,
-	inspectChrome: (executable) => {
-		try {
-			const metadata = lstatSync(executable)
-			if (!metadata.isFile() || metadata.isSymbolicLink()) return "unavailable"
-			accessSync(executable, constants.X_OK)
-			return "installed"
-		} catch {
-			return "unavailable"
-		}
-	},
-	profileRoot: () => join(homedir(), ".agent-warm-profile"),
-	inspectProfile: (profileRoot) =>
-		privateOwnedDirectory(profileRoot) && privateOwnedDirectory(join(profileRoot, "Default"))
-			? "safe"
-			: "unsafe",
-	findProfileProcesses: (profileRoot) => {
-		const plain = `--user-data-dir=${profileRoot}`
-		const quoted = `--user-data-dir="${profileRoot}"`
-		const table = processTable()
-		if (table.kind === "unverifiable") return table
-		return {
-			kind: "verified",
-			processes: table.processes.filter(
-				(processIdentity) =>
-					processIdentity.executable === installedChrome &&
-					(commandHasArgument(processIdentity.commandLine, plain) ||
-						commandHasArgument(processIdentity.commandLine, quoted)),
-			),
-		}
-	},
-	findLaunchProcesses: (launchMarker) => {
-		const table = processTable()
-		if (table.kind === "unverifiable") return table
-		const marker = `--agent-browser-launch-marker=${launchMarker}`
-		return {
-			kind: "verified",
-			processes: table.processes.filter((processIdentity) =>
-				commandHasArgument(processIdentity.commandLine, marker)
-			),
-		}
-	},
-	inspectPort: inspectLoopbackPort,
-	spawnChrome: async ({ executable, profileRoot, port, launchMarker }) => {
-		const child = spawn(
-			executable,
-			[
-				`--user-data-dir=${profileRoot}`,
-				"--profile-directory=Default",
-				"--remote-debugging-address=127.0.0.1",
-				`--remote-debugging-port=${port}`,
-				`--agent-browser-launch-marker=${launchMarker}`,
-				"--password-store=basic",
-				"--use-mock-keychain",
-				"--no-first-run",
-				"--no-default-browser-check",
-			],
-			{ detached: true, stdio: "ignore" },
-		)
-		await new Promise<void>((resolve, reject) => {
-			child.once("error", reject)
-			child.once("spawn", resolve)
-		})
-		if (child.pid === undefined) throw new Error("Chrome returned no process identity")
-		child.unref()
-		for (let attempt = 0; attempt < 20; attempt += 1) {
+/**
+ * Builds the fixed production Adapter over one process-table reading source.
+ * Only the reading is replaceable, so every consumer shares one observation.
+ */
+export function createProductionAdapter(
+	readProcessTable: () => ProcessTableReading,
+): WarmBrowserAdapter {
+	const processTable = (): ProcessListInspection =>
+		observeProcessTable(readProcessTable(), installedChrome)
+	return {
+		createRunId: () => `wb-${randomUUID()}`,
+		createSessionId: () => `session-${randomUUID()}`,
+		nowEpochMs: () => Date.now(),
+		platform: () => process.platform,
+		chromeExecutable: () => installedChrome,
+		inspectChrome: (executable) => {
+			try {
+				const metadata = lstatSync(executable)
+				if (!metadata.isFile() || metadata.isSymbolicLink()) return "unavailable"
+				accessSync(executable, constants.X_OK)
+				return "installed"
+			} catch {
+				return "unavailable"
+			}
+		},
+		profileRoot: () => join(homedir(), ".agent-warm-profile"),
+		inspectProfile: (profileRoot) =>
+			privateOwnedDirectory(profileRoot) && privateOwnedDirectory(join(profileRoot, "Default"))
+				? "safe"
+				: "unsafe",
+		findProfileProcesses: (profileRoot) => {
+			const plain = `--user-data-dir=${profileRoot}`
+			const quoted = `--user-data-dir="${profileRoot}"`
 			const table = processTable()
-			if (table.kind === "unverifiable") break
-			const observed = table.processes.find((processIdentity) => processIdentity.pid === child.pid)
-			if (observed !== undefined && observed.processGroupId === child.pid) return observed
-			await pause(25)
-		}
-		if (!(await terminateProcessGroupWithEscalation(child.pid))) {
-			throw new SpawnCleanupUnverifiedError()
-		}
-		throw new Error("Chrome process identity could not be read")
-	},
-	inspectProcess: (pid) => {
-		const table = processTable()
-		if (table.kind === "unverifiable") return { kind: "unverifiable" }
-		const processIdentity = table.processes.find((candidate) => candidate.pid === pid)
-		return processIdentity === undefined
-			? { kind: "absent" }
-			: { kind: "found", process: processIdentity }
-	},
-	verifyEndpoint: async ({ port, process: expected }) => {
-		const table = processTable()
-		if (table.kind === "unverifiable") return { kind: "process_unverifiable" }
-		const observed = table.processes.find((processIdentity) => processIdentity.pid === expected.pid)
-		if (!sameProcess(expected, observed)) return { kind: "browser_unverified" }
-		return readEndpoint(port, expected)
-	},
-	terminateProcessGroup: async (expected) => {
-		const table = processTable()
-		if (table.kind === "unverifiable") return false
-		const observed = table.processes.find((processIdentity) => processIdentity.pid === expected.pid)
-		if (!sameProcess(expected, observed) || expected.processGroupId !== expected.pid) return false
-		return terminateProcessGroupWithEscalation(expected.processGroupId)
-	},
+			if (table.kind === "unverifiable") return table
+			return {
+				kind: "verified",
+				processes: table.processes.filter(
+					(processIdentity) =>
+						processIdentity.executable === installedChrome &&
+						(commandHasArgument(processIdentity.commandLine, plain) ||
+							commandHasArgument(processIdentity.commandLine, quoted)),
+				),
+			}
+		},
+		findLaunchProcesses: (launchMarker) => {
+			const table = processTable()
+			if (table.kind === "unverifiable") return table
+			const marker = `--agent-browser-launch-marker=${launchMarker}`
+			return {
+				kind: "verified",
+				processes: table.processes.filter((processIdentity) =>
+					commandHasArgument(processIdentity.commandLine, marker)
+				),
+			}
+		},
+		inspectPort: inspectLoopbackPort,
+		spawnChrome: async ({ executable, profileRoot, port, launchMarker }) => {
+			const child = spawn(
+				executable,
+				[
+					`--user-data-dir=${profileRoot}`,
+					"--profile-directory=Default",
+					"--remote-debugging-address=127.0.0.1",
+					`--remote-debugging-port=${port}`,
+					`--agent-browser-launch-marker=${launchMarker}`,
+					"--password-store=basic",
+					"--use-mock-keychain",
+					"--no-first-run",
+					"--no-default-browser-check",
+				],
+				{ detached: true, stdio: "ignore" },
+			)
+			await new Promise<void>((resolve, reject) => {
+				child.once("error", reject)
+				child.once("spawn", resolve)
+			})
+			if (child.pid === undefined) throw new Error("Chrome returned no process identity")
+			child.unref()
+			for (let attempt = 0; attempt < 20; attempt += 1) {
+				const table = processTable()
+				if (table.kind === "unverifiable") break
+				const observed = table.processes.find(
+					(processIdentity) => processIdentity.pid === child.pid,
+				)
+				if (observed !== undefined && observed.processGroupId === child.pid) return observed
+				await pause(25)
+			}
+			if (!(await terminateProcessGroupWithEscalation(child.pid))) {
+				throw new SpawnCleanupUnverifiedError()
+			}
+			throw new Error("Chrome process identity could not be read")
+		},
+		inspectProcess: (pid) => {
+			const table = processTable()
+			if (table.kind === "unverifiable") return { kind: "unverifiable" }
+			const processIdentity = table.processes.find((candidate) => candidate.pid === pid)
+			return processIdentity === undefined
+				? { kind: "absent" }
+				: { kind: "found", process: processIdentity }
+		},
+		verifyEndpoint: async ({ port, process: expected }) => {
+			const table = processTable()
+			if (table.kind === "unverifiable") return { kind: "process_unverifiable" }
+			const observed = table.processes.find(
+				(processIdentity) => processIdentity.pid === expected.pid,
+			)
+			if (!sameProcess(expected, observed)) return { kind: "browser_unverified" }
+			return readEndpoint(processTable, port, expected)
+		},
+		terminateProcessGroup: async (expected) => {
+			const table = processTable()
+			if (table.kind === "unverifiable") return false
+			const observed = table.processes.find(
+				(processIdentity) => processIdentity.pid === expected.pid,
+			)
+			if (!sameProcess(expected, observed) || expected.processGroupId !== expected.pid) return false
+			return terminateProcessGroupWithEscalation(expected.processGroupId)
+		},
+	}
 }
+
+export const productionAdapter: WarmBrowserAdapter = createProductionAdapter(readHostProcessTable)

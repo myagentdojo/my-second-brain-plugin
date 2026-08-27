@@ -29,6 +29,16 @@ that ownership algorithm. Whether installed Google Chrome retains this unknown
 marker flag in its process-table command line still requires the separately
 acknowledged real-Chrome qualification; this ticket does not claim that proof.
 
+Every process decision reads one local process table through a single owner,
+`src/modules/warm-browser/process-table.ts`. That observation is all or nothing.
+A failed or signalled read, empty or truncated output, any nonempty row that does
+not parse, any row carrying a control character, any process identity outside the
+canonical safe-integer range, and any repeated process identity make the whole
+observation unverifiable. No row is skipped, because a skipped row would let a
+live process read as proved absence. An unverifiable observation returns
+`PROCESS_INSPECTION_UNVERIFIED` and performs no cleanup, no signal, and no
+launch.
+
 A launched process group that Warm Browser cannot prove it stopped is never
 reported as a rollback. That failure keeps the durable intent, keeps the live
 process, and returns the unverified-cleanup result so recovery can inspect the

@@ -12,7 +12,10 @@ The production Adapter is fixed. Tests inject the internal Adapter through a
 private test-only driver; no environment variable selects a fake in production.
 The lifecycle contract fails closed on unsupported platforms, unsafe profile or
 state, ambiguous ownership, occupied or unverifiable ports, process mismatch,
-and CDP or Controlled Page identity failure.
+and CDP or Controlled Page identity failure. One Module file owns the local
+process-table observation, and any unparsed, forged, repeated, or otherwise
+ambiguous row makes that whole observation unverifiable instead of proved
+absence.
 
 A Screenshot is a private session-owned PNG of the Controlled Page, distinct
 from the structured interaction snapshot. Warm Browser returns only its owned
