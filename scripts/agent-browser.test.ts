@@ -17,6 +17,7 @@ test("Agent Browser source scaffold follows the repository discovery contract", 
 		"plugin/skills/agent-browser/AGENTS.md",
 		"plugin/skills/agent-browser/CONTEXT.md",
 		"plugin/skills/agent-browser/CODING_STANDARDS.md",
+		"packages/agent-browser/README.md",
 		"packages/agent-browser/scripts/prove-cdp-compatibility.ts",
 		"packages/agent-browser/scripts/prove-cdp-compatibility.test.ts",
 		"scripts/agent-browser.test.ts",
@@ -49,6 +50,9 @@ test("Agent Browser has the approved dependency-proof workspace shell", () => {
 	expect(repositoryPackageJson.packageManager).toBe("bun@1.4.0")
 	expect(repositoryPackageJson.scripts["prove:agent-browser-cdp"]).toBe(
 		"bun packages/agent-browser/scripts/prove-cdp-compatibility.ts",
+	)
+	expect(repositoryPackageJson.scripts["prove:agent-browser-cdp"]).not.toContain(
+		"AGENT_BROWSER_CDP_FIXTURE_ACKNOWLEDGED",
 	)
 
 	const packageRoot = join(root, "packages", "agent-browser")
@@ -94,4 +98,8 @@ test("Agent Browser has the approved dependency-proof workspace shell", () => {
 	const packageText = readFileSync(join(packageRoot, "package.json"), "utf8")
 	expect(packageText).not.toContain("bin")
 	expect(packageText).not.toContain('"playwright"')
+	const packageReadme = readFileSync(join(packageRoot, "README.md"), "utf8")
+	expect(packageReadme).toContain(
+		"AGENT_BROWSER_CDP_FIXTURE_ACKNOWLEDGED=1 bun run prove:agent-browser-cdp -- --run-id <ID>",
+	)
 })

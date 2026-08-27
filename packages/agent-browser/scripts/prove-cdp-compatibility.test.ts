@@ -4,7 +4,12 @@ import { resolve } from "node:path"
 
 import { expect, test } from "bun:test"
 
-import { chromeLaunchArguments, parseProofOptions } from "./prove-cdp-compatibility"
+import {
+	chromeLaunchArguments,
+	fixtureAcknowledgementVariable,
+	parseProofOptions,
+	realChromeFixtureAcknowledged,
+} from "./prove-cdp-compatibility"
 
 const packageRoot = resolve(import.meta.dir, "..")
 const repositoryRoot = resolve(packageRoot, "../..")
@@ -51,13 +56,30 @@ test("Chrome launch contract isolates password storage from the macOS login keyc
 	expect(arguments_).toContain("--user-data-dir=/private/agent-browser-fixture/profile")
 })
 
+test.each([
+	[undefined, false],
+	["", false],
+	["0", false],
+	["true", false],
+	["01", false],
+	[" 1", false],
+	["1 ", false],
+	["1", true],
+] as const)("real Chrome fixture acknowledgment %p admits=%p", (value, expected) => {
+	const environment = value === undefined ? {} : { [fixtureAcknowledgementVariable]: value }
+	expect(realChromeFixtureAcknowledged(environment)).toBe(expected)
+})
+
 const realChromeTest =
-	process.platform === "darwin" && process.arch === "arm64" && existsSync(chromeExecutable)
+	realChromeFixtureAcknowledged() &&
+	process.platform === "darwin" &&
+	process.arch === "arm64" &&
+	existsSync(chromeExecutable)
 		? test
 		: test.skip
 
 realChromeTest(
-	"close-before-connect returns one redacted typed failure and removes the real Chrome process [requires installed stable Chrome on macOS arm64]",
+	"close-before-connect returns one redacted typed failure and removes the real Chrome process [requires AGENT_BROWSER_CDP_FIXTURE_ACKNOWLEDGED=1 and installed stable Chrome on macOS arm64]",
 	() => {
 		const processesBefore = new Set(fixtureChromeProcesses())
 		const proof = spawnSync(

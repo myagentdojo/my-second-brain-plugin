@@ -21,6 +21,7 @@ const proofCategory = "agent-browser-cdp-compatibility" as const
 const expectedBunVersion = "1.4.0" as const
 const expectedPlaywrightVersion = "1.62.1" as const
 const chromeExecutable = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" as const
+export const fixtureAcknowledgementVariable = "AGENT_BROWSER_CDP_FIXTURE_ACKNOWLEDGED" as const
 
 interface ProofOptions {
 	readonly runId: string
@@ -44,6 +45,7 @@ interface ProofFailureEnvelope {
 
 type ProofFailureCode =
 	| "USAGE_ERROR"
+	| "FIXTURE_ACKNOWLEDGEMENT_REQUIRED"
 	| "BUN_VERSION_MISMATCH"
 	| "PLAYWRIGHT_VERSION_MISMATCH"
 	| "PLATFORM_UNSUPPORTED"
@@ -105,6 +107,12 @@ export function parseProofOptions(arguments_: readonly string[]): ProofOptions {
 		runId: optionValue(arguments_, "--run-id"),
 		fixtureCloseBeforeConnect,
 	}
+}
+
+export function realChromeFixtureAcknowledged(
+	environment: Readonly<Record<string, string | undefined>> = process.env,
+): boolean {
+	return environment[fixtureAcknowledgementVariable] === "1"
 }
 
 function commandOutput(command: readonly string[]): string | undefined {
@@ -256,6 +264,14 @@ export async function proveCdpCompatibility(options: ProofOptions): Promise<Reco
 	let fixtureRemoved = true
 
 	try {
+		if (!realChromeFixtureAcknowledged()) {
+			throw new ProofFailure(
+				"FIXTURE_ACKNOWLEDGEMENT_REQUIRED",
+				`Real Chrome proof requires ${fixtureAcknowledgementVariable}=1`,
+				false,
+				`Set ${fixtureAcknowledgementVariable}=1 only for one reviewed, bounded Chrome proof.`,
+			)
+		}
 		if (Bun.version !== expectedBunVersion) {
 			throw new ProofFailure(
 				"BUN_VERSION_MISMATCH",
