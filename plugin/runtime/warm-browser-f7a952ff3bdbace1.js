@@ -275,19 +275,11 @@ function documentDescriptions(reply) {
     if (typeof backendNodeId === "number" && description !== undefined) {
       descriptions.set(backendNodeId, description);
     }
-    for (const key of ["children", "shadowRoots", "pseudoElements"]) {
-      const children = node[key];
-      if (!Array.isArray(children))
-        continue;
-      for (const child of children) {
-        const childRecord = record(child);
-        if (childRecord !== undefined)
-          queue.push(childRecord);
-      }
+    for (const child of Array.isArray(node.children) ? node.children : []) {
+      const childRecord = record(child);
+      if (childRecord !== undefined)
+        queue.push(childRecord);
     }
-    const contentDocument = record(node.contentDocument);
-    if (contentDocument !== undefined)
-      queue.push(contentDocument);
   }
   return descriptions;
 }
@@ -400,6 +392,38 @@ async function readControlledPageSnapshot(input) {
     return { kind: "observed", basis: after, elements, truncated };
   });
 }
+async function clickNode(channel, backendNodeId) {
+  const box = await channel.call("DOM.getBoxModel", { backendNodeId });
+  if (!box.ok)
+    return "element_absent";
+  const content = record(record(box.result)?.model)?.content;
+  if (!Array.isArray(content) || content.length < 8)
+    return "element_absent";
+  const points = content.slice(0, 8);
+  if (!points.every((value) => typeof value === "number" && Number.isFinite(value))) {
+    return "element_absent";
+  }
+  const x = (points[0] + points[2] + points[4] + points[6]) / 4;
+  const y = (points[1] + points[3] + points[5] + points[7]) / 4;
+  for (const type of ["mousePressed", "mouseReleased"]) {
+    const dispatched = await channel.call("Input.dispatchMouseEvent", {
+      type,
+      x,
+      y,
+      button: "left",
+      buttons: type === "mousePressed" ? 1 : 0,
+      clickCount: 1
+    });
+    if (!dispatched.ok)
+      return "unverified";
+  }
+  return "acted";
+}
+async function typeIntoNode(channel, backendNodeId, value) {
+  if (!(await channel.call("DOM.focus", { backendNodeId })).ok)
+    return "element_absent";
+  return (await channel.call("Input.insertText", { text: value })).ok ? "acted" : "unverified";
+}
 async function actOnControlledPage(input) {
   return await withControlledPage(input.port, input.targetId, { kind: "unverified" }, async (channel) => {
     for (const method of ["Page.enable", "DOM.enable"]) {
@@ -422,39 +446,9 @@ async function actOnControlledPage(input) {
     if (input.action.kind === "fill" && isCredentialField(description)) {
       return { kind: "credential_field" };
     }
-    if (input.action.kind === "click") {
-      const box = await channel.call("DOM.getBoxModel", { backendNodeId: input.backendNodeId });
-      if (!box.ok)
-        return { kind: "element_absent" };
-      const content = record(record(box.result)?.model)?.content;
-      if (!Array.isArray(content) || content.length < 8)
-        return { kind: "element_absent" };
-      const points = content.slice(0, 8);
-      if (!points.every((value) => typeof value === "number" && Number.isFinite(value))) {
-        return { kind: "element_absent" };
-      }
-      const x = (points[0] + points[2] + points[4] + points[6]) / 4;
-      const y = (points[1] + points[3] + points[5] + points[7]) / 4;
-      for (const type of ["mousePressed", "mouseReleased"]) {
-        const dispatched = await channel.call("Input.dispatchMouseEvent", {
-          type,
-          x,
-          y,
-          button: "left",
-          buttons: type === "mousePressed" ? 1 : 0,
-          clickCount: 1
-        });
-        if (!dispatched.ok)
-          return { kind: "unverified" };
-      }
-    } else {
-      if (!(await channel.call("DOM.focus", { backendNodeId: input.backendNodeId })).ok) {
-        return { kind: "element_absent" };
-      }
-      if (!(await channel.call("Input.insertText", { text: input.action.value })).ok) {
-        return { kind: "unverified" };
-      }
-    }
+    const step = input.action.kind === "click" ? await clickNode(channel, input.backendNodeId) : await typeIntoNode(channel, input.backendNodeId, input.action.value);
+    if (step !== "acted")
+      return { kind: step };
     const after = await readBasis(channel, input.targetId);
     return after === undefined ? { kind: "unverified" } : { kind: "acted", basis: after };
   });
@@ -1223,13 +1217,13 @@ function safeUrl(value) {
     return;
   }
 }
-function optionValue(runId, command, flag, raw) {
-  if (flag === "--run-id") {
+var optionValidators = {
+  "--run-id": (runId, command, raw) => {
     if (!runIdPattern.test(raw))
       usage(runId, command, "The --run-id value is missing or invalid.");
     return raw;
-  }
-  if (flag === "--port") {
+  },
+  "--port": (runId, command, raw) => {
     if (!/^[0-9]+$/.test(raw))
       usage(runId, command, "The --port value must be a decimal port number.");
     const port = Number(raw);
@@ -1237,8 +1231,8 @@ function optionValue(runId, command, flag, raw) {
       usage(runId, command, "The --port value must be between 1024 and 65535.");
     }
     return port;
-  }
-  if (flag === "--url") {
+  },
+  "--url": (runId, command, raw) => {
     const parsed = raw.length > 2048 || controlCharacter.test(raw) ? undefined : safeUrl(raw);
     if (parsed === undefined)
       usage(runId, command, "The --url value must be an absolute URL.");
@@ -1254,17 +1248,46 @@ function optionValue(runId, command, flag, raw) {
       });
     }
     return raw;
-  }
-  if (flag === "--ref") {
+  },
+  "--ref": (runId, command, raw) => {
     if (raw === "" || raw.length > 160 || /\s/u.test(raw) || controlCharacter.test(raw)) {
       usage(runId, command, "The --ref value is missing or invalid.");
     }
     return raw;
+  },
+  "--value": (runId, command, raw) => {
+    if (raw === "" || raw.length > fillValueLimit || controlCharacter.test(raw)) {
+      usage(runId, command, "The --value text is missing or invalid.");
+    }
+    return raw;
   }
-  if (raw === "" || raw.length > fillValueLimit || controlCharacter.test(raw)) {
-    usage(runId, command, "The --value text is missing or invalid.");
+};
+function readOptions(arguments_, firstOptionIndex, command, accepted, generatedRunId) {
+  const seen = new Map;
+  let runId = generatedRunId;
+  for (let index = firstOptionIndex;index < arguments_.length; index += 1) {
+    const argument = arguments_[index];
+    if (selectorFlags.has(argument))
+      selectorRefusal(runId, command, argument);
+    const option = accepted.get(argument);
+    if (option === undefined)
+      usage(runId, command, "Warm Browser received an unsupported argument.");
+    if (seen.has(option.flag))
+      usage(runId, command, `The ${option.flag} flag may appear only once.`);
+    if (option.value === null) {
+      seen.set(option.flag, true);
+      continue;
+    }
+    const raw = arguments_[index + 1];
+    if (raw === undefined)
+      usage(runId, command, `The ${option.flag} value is missing.`);
+    const value = optionValidators[option.flag](runId, command, raw);
+    seen.set(option.flag, value);
+    if (option.flag === runIdOption.flag)
+      runId = value;
+    index += 1;
   }
-  return raw;
+  return { seen, runId };
 }
 function parseArguments(arguments_, adapter) {
   const generatedRunId = candidateRunId(arguments_, adapter);
@@ -1280,31 +1303,7 @@ function parseArguments(arguments_, adapter) {
     [runIdOption.flag, runIdOption],
     ...commandVocabulary.find(({ name }) => name === command).options.map((option) => [option.flag, option])
   ]);
-  const seen = new Map;
-  let runId = generatedRunId;
-  for (let index = first === undefined ? 0 : 1;index < arguments_.length; index += 1) {
-    const argument = arguments_[index];
-    if (selectorFlags.has(argument))
-      selectorRefusal(runId, command, argument);
-    const option = accepted.get(argument);
-    if (option === undefined)
-      usage(runId, command, "Warm Browser received an unsupported argument.");
-    if (seen.has(option.flag)) {
-      usage(runId, command, `The ${option.flag} flag may appear only once.`);
-    }
-    if (option.value === null) {
-      seen.set(option.flag, true);
-      continue;
-    }
-    const raw = arguments_[index + 1];
-    if (raw === undefined)
-      usage(runId, command, `The ${option.flag} value is missing.`);
-    const value2 = optionValue(runId, command, option.flag, raw);
-    seen.set(option.flag, value2);
-    if (option.flag === runIdOption.flag)
-      runId = value2;
-    index += 1;
-  }
+  const { seen, runId } = readOptions(arguments_, first === undefined ? 0 : 1, command, accepted, generatedRunId);
   for (const option of accepted.values()) {
     if (option.required && !seen.has(option.flag)) {
       usage(runId, command, `The ${option.flag} option is required by ${command}.`);
@@ -1765,6 +1764,22 @@ var freshSnapshotAction = "Run warm-browser snapshot --run-id ID to issue fresh 
 function pageControlUnverified(command, runId, message, transactionState) {
   staticFailure(command, runId, "PAGE_CONTROL_UNVERIFIED", 20, message, "Inspect the Browser Session and its CDP endpoint before retrying.", false, transactionState);
 }
+function refuseReference(command, runId, resolution) {
+  if (resolution === "absent") {
+    staticFailure(command, runId, "SNAPSHOT_ABSENT", 21, "This Browser Session holds no Snapshot Generation.", "Run warm-browser snapshot --run-id ID before acting on the Controlled Page.");
+  }
+  const [resultCode, message] = resolution === "malformed" ? [
+    "SNAPSHOT_REFERENCE_INVALID",
+    "Warm Browser acts through a Snapshot Reference, and this is not one."
+  ] : resolution === "unknown" ? [
+    "SNAPSHOT_REFERENCE_INVALID",
+    "The Snapshot Reference names no element of the current Snapshot Generation."
+  ] : [
+    "SNAPSHOT_REFERENCE_STALE",
+    "The Snapshot Reference belongs to another Snapshot Generation, another Controlled Page, or a generation that has expired."
+  ];
+  staticFailure(command, runId, resultCode, 21, message, freshSnapshotAction);
+}
 function credentialRefusal(command, runId) {
   staticFailure(command, runId, "CREDENTIAL_FIELD_REFUSED", 21, "Warm Browser does not type credentials into the Controlled Page.", "Use the Warm Browser login command for a credential field; it is not callable in this slice.");
 }
@@ -1849,18 +1864,8 @@ async function actOnPage(parsed, command, paths, adapter) {
     controlledPageTargetId: state.endpoint.controlledPageTargetId,
     nowEpochMs: adapter.nowEpochMs()
   });
-  if (resolution.kind === "absent") {
-    staticFailure(command, parsed.runId, "SNAPSHOT_ABSENT", 21, "This Browser Session holds no Snapshot Generation.", "Run warm-browser snapshot --run-id ID before acting on the Controlled Page.");
-  }
-  if (resolution.kind === "malformed") {
-    staticFailure(command, parsed.runId, "SNAPSHOT_REFERENCE_INVALID", 21, "Warm Browser acts through a Snapshot Reference, and this is not one.", freshSnapshotAction);
-  }
-  if (resolution.kind === "unknown") {
-    staticFailure(command, parsed.runId, "SNAPSHOT_REFERENCE_INVALID", 21, "The Snapshot Reference names no element of the current Snapshot Generation.", freshSnapshotAction);
-  }
-  if (resolution.kind === "stale") {
-    staticFailure(command, parsed.runId, "SNAPSHOT_REFERENCE_STALE", 21, "The Snapshot Reference belongs to another Snapshot Generation, another Controlled Page, or a generation that has expired.", freshSnapshotAction);
-  }
+  if (resolution.kind !== "resolved")
+    refuseReference(command, parsed.runId, resolution.kind);
   const generation = state.snapshot;
   if (command === "fill" && resolution.element.credentialField) {
     credentialRefusal(command, parsed.runId);

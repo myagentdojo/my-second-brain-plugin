@@ -210,6 +210,10 @@ async function waitForJson(path: string): Promise<Record<string, unknown>> {
 }
 
 test("help is one literal agent-native success envelope", () => {
+	// Independent oracle: the whole help envelope, including every command name,
+	// side effect, and option, restated by hand. It reads like the Command
+	// Vocabulary on purpose and must not be hoisted into it: a vocabulary that
+	// calculated this expectation would agree with itself whatever it said.
 	const result = Bun.spawnSync({
 		cmd: [process.execPath, productionEntry, "help", "--run-id", "help-run"],
 		cwd: packageRoot,

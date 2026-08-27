@@ -853,3 +853,168 @@ test.each([
 		message,
 	})
 })
+
+test("a page with more elements than one generation may carry says so", async () => {
+	// Independent oracle: one element past the bound the Module publishes.
+	const beyondTheBound = 501
+	const { probe } = await pageProbe({
+		url: "https://fixture.test/long",
+		elements: Array.from({ length: beyondTheBound }, (_, index) => ({
+			backendNodeId: 100 + index,
+			role: "button",
+			name: `Item ${index + 1}`,
+			nodeName: "BUTTON",
+			box: [0, index, 10, 10] as const,
+		})),
+	})
+
+	const snapshot = await takeSnapshot(probe, "truncated-snapshot")
+
+	expect(snapshot.data).toMatchObject({ elementCount: 500, truncated: true })
+	expect(snapshot.elements.length).toBe(500)
+	expect(snapshot.elements.at(-1)!.ref).toBe(`e500@${snapshot.generationId}`)
+	// The element beyond the bound has no reference, and asking for one says so
+	// rather than acting on whatever element 501 would have been.
+	const clicked = await runProductionCliAsync(probe, [
+		"click",
+		"--ref",
+		`e501@${snapshot.generationId}`,
+		"--run-id",
+		"truncated-click",
+	])
+	expectRefusal(clicked, 21, {
+		command: "click",
+		resultCode: "SNAPSHOT_REFERENCE_INVALID",
+		message: "The Snapshot Reference names no element of the current Snapshot Generation.",
+	})
+})
+
+test("a click whose outcome cannot be verified is never reported unchanged", async () => {
+	const { probe } = await pageProbe({
+		url: "https://fixture.test/sign-in",
+		elements: signInPage,
+		failMethods: ["Input.dispatchMouseEvent"],
+	})
+	const snapshot = await takeSnapshot(probe, "unverified-click-snapshot")
+
+	const clicked = await runProductionCliAsync(probe, [
+		"click",
+		"--ref",
+		snapshot.elements[3]!.ref,
+		"--run-id",
+		"unverified-click",
+	])
+
+	expectError(clicked, 20, {
+		schemaVersion: 1,
+		status: "error",
+		command: "click",
+		resultCode: "PAGE_CONTROL_UNVERIFIED",
+		runId: "unverified-click",
+		transactionState: "acted",
+		retrySafe: false,
+		nextAction: "Inspect the Browser Session and its CDP endpoint before retrying.",
+		message: "Warm Browser could not verify what its Controlled Page did with the action.",
+	})
+	// What reached the page is unknown, so the references that described it before
+	// are not kept either.
+	expect(readReceipt(probe).snapshot).toBeUndefined()
+})
+
+test("a navigation whose outcome cannot be verified is never reported unchanged", async () => {
+	const { probe } = await pageProbe({
+		url: "https://fixture.test/sign-in",
+		elements: signInPage,
+		failMethods: ["Page.navigate"],
+	})
+
+	const opened = await runProductionCliAsync(probe, [
+		"open",
+		"--url",
+		"https://fixture.test/next",
+		"--run-id",
+		"unverified-open",
+	])
+
+	expectRefusal(opened, 20, {
+		command: "open",
+		resultCode: "PAGE_CONTROL_UNVERIFIED",
+		transactionState: "acted",
+		message: "Warm Browser could not verify what its Controlled Page did with the navigation.",
+	})
+})
+
+test.each([
+	[
+		"a Snapshot Generation on a receipt with no verified page",
+		(receipt: Record<string, unknown>) => {
+			const endpoint = receipt.endpoint as Record<string, unknown>
+			return {
+				...receipt,
+				phase: "starting",
+				endpoint: { host: endpoint.host, port: endpoint.port },
+			}
+		},
+	],
+	[
+		"an element identity that is not a node identity",
+		(receipt: Record<string, unknown>) => {
+			const generation = receipt.snapshot as Record<string, unknown>
+			const elements = generation.elements as Record<string, unknown>[]
+			return {
+				...receipt,
+				snapshot: {
+					...generation,
+					elements: [{ ...elements[0]!, backendNodeId: 0 }, ...elements.slice(1)],
+				},
+			}
+		},
+	],
+	[
+		"an element name longer than one snapshot may carry",
+		(receipt: Record<string, unknown>) => {
+			const generation = receipt.snapshot as Record<string, unknown>
+			const elements = generation.elements as Record<string, unknown>[]
+			return {
+				...receipt,
+				snapshot: {
+					...generation,
+					elements: [{ ...elements[0]!, name: "n".repeat(257) }, ...elements.slice(1)],
+				},
+			}
+		},
+	],
+	[
+		"an identity basis with no document load",
+		(receipt: Record<string, unknown>) => {
+			const generation = receipt.snapshot as Record<string, unknown>
+			const basis = generation.basis as Record<string, unknown>
+			return {
+				...receipt,
+				snapshot: { ...generation, basis: { ...basis, loaderId: "" } },
+			}
+		},
+	],
+] as const)("a durable receipt carrying %s is refused as unsafe state", async (_name, rebreak) => {
+	const { probe } = await pageProbe({ url: "https://fixture.test/sign-in", elements: signInPage })
+	const snapshot = await takeSnapshot(probe, "unsafe-state-snapshot")
+	writeReceipt(probe, rebreak(readReceipt(probe)))
+	const stateBefore = readFileSync(probe.sessionPath, "utf8")
+
+	const clicked = await runProductionCliAsync(probe, [
+		"click",
+		"--ref",
+		snapshot.elements[3]!.ref,
+		"--run-id",
+		"unsafe-state-click",
+	])
+
+	expectRefusal(clicked, 20, {
+		command: "click",
+		resultCode: "STATE_UNSAFE",
+		message: "Warm Browser private state is unsafe or unreadable.",
+		nextAction: "Repair the private XDG state ownership and permissions before retrying.",
+	})
+	// The receipt is preserved exactly as it was found, for inspection.
+	expect(readFileSync(probe.sessionPath, "utf8")).toBe(stateBefore)
+})

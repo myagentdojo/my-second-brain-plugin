@@ -33,7 +33,12 @@ import {
 	launchOwnership,
 } from "./ownership"
 import { productionAdapter } from "./production-adapter"
-import { publishedElements, resolveSnapshotReference, type SnapshotGeneration } from "./snapshot"
+import {
+	publishedElements,
+	type ReferenceResolution,
+	resolveSnapshotReference,
+	type SnapshotGeneration,
+} from "./snapshot"
 import {
 	acquireSessionLock,
 	type BrowserSessionState,
@@ -182,24 +187,26 @@ function safeUrl(value: string): URL | undefined {
 }
 
 /**
- * The one place an option's value is judged. Each rule belongs to the flag it
- * governs, so a command that accepts a flag accepts exactly the same values for
- * it as every other command that does.
+ * What each option's value must be, declared once per flag. A command that
+ * accepts a flag accepts exactly the same values for it as every other command
+ * that does, because the rule belongs to the flag and not to the command.
  */
-function optionValue(runId: string, command: CliCommand, flag: string, raw: string): string | number {
-	if (flag === "--run-id") {
+type OptionValidator = (runId: string, command: CliCommand, raw: string) => string | number
+
+const optionValidators: Readonly<Record<string, OptionValidator>> = {
+	"--run-id": (runId, command, raw) => {
 		if (!runIdPattern.test(raw)) usage(runId, command, "The --run-id value is missing or invalid.")
 		return raw
-	}
-	if (flag === "--port") {
+	},
+	"--port": (runId, command, raw) => {
 		if (!/^[0-9]+$/.test(raw)) usage(runId, command, "The --port value must be a decimal port number.")
 		const port = Number(raw)
 		if (!Number.isSafeInteger(port) || port < 1024 || port > 65_535) {
 			usage(runId, command, "The --port value must be between 1024 and 65535.")
 		}
 		return port
-	}
-	if (flag === "--url") {
+	},
+	"--url": (runId, command, raw) => {
 		const parsed = raw.length > 2_048 || controlCharacter.test(raw) ? undefined : safeUrl(raw)
 		if (parsed === undefined) usage(runId, command, "The --url value must be an absolute URL.")
 		if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
@@ -214,17 +221,53 @@ function optionValue(runId: string, command: CliCommand, flag: string, raw: stri
 			})
 		}
 		return raw
-	}
-	if (flag === "--ref") {
+	},
+	"--ref": (runId, command, raw) => {
 		if (raw === "" || raw.length > 160 || /\s/u.test(raw) || controlCharacter.test(raw)) {
 			usage(runId, command, "The --ref value is missing or invalid.")
 		}
 		return raw
+	},
+	"--value": (runId, command, raw) => {
+		if (raw === "" || raw.length > fillValueLimit || controlCharacter.test(raw)) {
+			usage(runId, command, "The --value text is missing or invalid.")
+		}
+		return raw
+	},
+}
+
+/**
+ * Reads the options one command was given. Every rejection names the flag it is
+ * about, so the run identity is tracked as it is read: a later refusal already
+ * carries the identity the caller asked for.
+ */
+function readOptions(
+	arguments_: readonly string[],
+	firstOptionIndex: number,
+	command: CliCommand,
+	accepted: ReadonlyMap<string, CommandOption>,
+	generatedRunId: string,
+): { readonly seen: ReadonlyMap<string, string | number | true>; readonly runId: string } {
+	const seen = new Map<string, string | number | true>()
+	let runId = generatedRunId
+	for (let index = firstOptionIndex; index < arguments_.length; index += 1) {
+		const argument = arguments_[index]!
+		if (selectorFlags.has(argument)) selectorRefusal(runId, command, argument)
+		const option = accepted.get(argument)
+		if (option === undefined) usage(runId, command, "Warm Browser received an unsupported argument.")
+		if (seen.has(option.flag)) usage(runId, command, `The ${option.flag} flag may appear only once.`)
+		if (option.value === null) {
+			seen.set(option.flag, true)
+			continue
+		}
+		const raw = arguments_[index + 1]
+		if (raw === undefined) usage(runId, command, `The ${option.flag} value is missing.`)
+		const value = optionValidators[option.flag]!(runId, command, raw)
+		seen.set(option.flag, value)
+		if (option.flag === runIdOption.flag) runId = value as string
+		index += 1
 	}
-	if (raw === "" || raw.length > fillValueLimit || controlCharacter.test(raw)) {
-		usage(runId, command, "The --value text is missing or invalid.")
-	}
-	return raw
+	return { seen, runId }
 }
 
 function parseArguments(arguments_: readonly string[], adapter: WarmBrowserAdapter): ParsedCommand {
@@ -249,27 +292,13 @@ function parseArguments(arguments_: readonly string[], adapter: WarmBrowserAdapt
 		...(commandVocabulary.find(({ name }) => name === command)!.options as readonly CommandOption[])
 			.map((option) => [option.flag, option] as const),
 	])
-	const seen = new Map<string, string | number | true>()
-	let runId = generatedRunId
-	for (let index = first === undefined ? 0 : 1; index < arguments_.length; index += 1) {
-		const argument = arguments_[index]!
-		if (selectorFlags.has(argument)) selectorRefusal(runId, command, argument)
-		const option = accepted.get(argument)
-		if (option === undefined) usage(runId, command, "Warm Browser received an unsupported argument.")
-		if (seen.has(option.flag)) {
-			usage(runId, command, `The ${option.flag} flag may appear only once.`)
-		}
-		if (option.value === null) {
-			seen.set(option.flag, true)
-			continue
-		}
-		const raw = arguments_[index + 1]
-		if (raw === undefined) usage(runId, command, `The ${option.flag} value is missing.`)
-		const value = optionValue(runId, command, option.flag, raw)
-		seen.set(option.flag, value)
-		if (option.flag === runIdOption.flag) runId = value as string
-		index += 1
-	}
+	const { seen, runId } = readOptions(
+		arguments_,
+		first === undefined ? 0 : 1,
+		command,
+		accepted,
+		generatedRunId,
+	)
 	for (const option of accepted.values()) {
 		if (option.required && !seen.has(option.flag)) {
 			usage(runId, command, `The ${option.flag} option is required by ${command}.`)
@@ -1185,6 +1214,45 @@ function pageControlUnverified(
 	)
 }
 
+/**
+ * The one owner of why a reference cannot be used. Each answer is distinct on
+ * purpose: a caller that held no generation, one that named something that is
+ * not a reference, one that named an element this generation does not have, and
+ * one whose reference belongs to a generation that is gone all need different
+ * next steps.
+ */
+function refuseReference(
+	command: PageCommand,
+	runId: string,
+	resolution: Exclude<ReferenceResolution["kind"], "resolved">,
+): never {
+	if (resolution === "absent") {
+		staticFailure(
+			command,
+			runId,
+			"SNAPSHOT_ABSENT",
+			21,
+			"This Browser Session holds no Snapshot Generation.",
+			"Run warm-browser snapshot --run-id ID before acting on the Controlled Page.",
+		)
+	}
+	const [resultCode, message] = resolution === "malformed"
+		? ([
+			"SNAPSHOT_REFERENCE_INVALID",
+			"Warm Browser acts through a Snapshot Reference, and this is not one.",
+		] as const)
+		: resolution === "unknown"
+		? ([
+			"SNAPSHOT_REFERENCE_INVALID",
+			"The Snapshot Reference names no element of the current Snapshot Generation.",
+		] as const)
+		: ([
+			"SNAPSHOT_REFERENCE_STALE",
+			"The Snapshot Reference belongs to another Snapshot Generation, another Controlled Page, or a generation that has expired.",
+		] as const)
+	staticFailure(command, runId, resultCode, 21, message, freshSnapshotAction)
+}
+
 function credentialRefusal(command: PageCommand, runId: string): never {
 	staticFailure(
 		command,
@@ -1322,46 +1390,7 @@ async function actOnPage(
 		controlledPageTargetId: state.endpoint.controlledPageTargetId,
 		nowEpochMs: adapter.nowEpochMs(),
 	})
-	if (resolution.kind === "absent") {
-		staticFailure(
-			command,
-			parsed.runId,
-			"SNAPSHOT_ABSENT",
-			21,
-			"This Browser Session holds no Snapshot Generation.",
-			"Run warm-browser snapshot --run-id ID before acting on the Controlled Page.",
-		)
-	}
-	if (resolution.kind === "malformed") {
-		staticFailure(
-			command,
-			parsed.runId,
-			"SNAPSHOT_REFERENCE_INVALID",
-			21,
-			"Warm Browser acts through a Snapshot Reference, and this is not one.",
-			freshSnapshotAction,
-		)
-	}
-	if (resolution.kind === "unknown") {
-		staticFailure(
-			command,
-			parsed.runId,
-			"SNAPSHOT_REFERENCE_INVALID",
-			21,
-			"The Snapshot Reference names no element of the current Snapshot Generation.",
-			freshSnapshotAction,
-		)
-	}
-	if (resolution.kind === "stale") {
-		staticFailure(
-			command,
-			parsed.runId,
-			"SNAPSHOT_REFERENCE_STALE",
-			21,
-			"The Snapshot Reference belongs to another Snapshot Generation, another Controlled Page, or a generation that has expired.",
-			freshSnapshotAction,
-		)
-	}
+	if (resolution.kind !== "resolved") refuseReference(command, parsed.runId, resolution.kind)
 	// A resolved reference always came from the generation this session holds.
 	const generation = state.snapshot!
 	if (command === "fill" && resolution.element.credentialField) {

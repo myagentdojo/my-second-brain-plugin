@@ -25,7 +25,7 @@ export interface SnapshotGeneration {
  */
 const referencePattern = /^e([1-9][0-9]{0,3})@([A-Za-z0-9][A-Za-z0-9._:-]{0,127})$/
 
-export function snapshotReference(generationId: string, ordinal: number): string {
+function snapshotReference(generationId: string, ordinal: number): string {
 	return `e${ordinal}@${generationId}`
 }
 

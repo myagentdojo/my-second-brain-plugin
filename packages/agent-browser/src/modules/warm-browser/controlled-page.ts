@@ -125,7 +125,13 @@ function describedNode(node: Record<string, unknown>): DomNodeDescription | unde
 		: { nodeName, attributes: attributeMap(node.attributes) }
 }
 
-/** Flattens one document reply into every node it describes, keyed by identity. */
+/**
+ * Flattens one document reply into every node it describes, keyed by identity.
+ *
+ * The document is read without piercing, so it is one tree of children and this
+ * walk needs nothing else. Shadow content and framed documents are outside the
+ * reading, and therefore outside the snapshot, rather than half-covered here.
+ */
 function documentDescriptions(reply: unknown): Map<number, DomNodeDescription> | undefined {
 	const root = record(record(reply)?.root)
 	if (root === undefined) return undefined
@@ -138,16 +144,10 @@ function documentDescriptions(reply: unknown): Map<number, DomNodeDescription> |
 		if (typeof backendNodeId === "number" && description !== undefined) {
 			descriptions.set(backendNodeId, description)
 		}
-		for (const key of ["children", "shadowRoots", "pseudoElements"] as const) {
-			const children = node[key]
-			if (!Array.isArray(children)) continue
-			for (const child of children) {
-				const childRecord = record(child)
-				if (childRecord !== undefined) queue.push(childRecord)
-			}
+		for (const child of Array.isArray(node.children) ? node.children : []) {
+			const childRecord = record(child)
+			if (childRecord !== undefined) queue.push(childRecord)
 		}
-		const contentDocument = record(node.contentDocument)
-		if (contentDocument !== undefined) queue.push(contentDocument)
 	}
 	return descriptions
 }
@@ -292,6 +292,45 @@ export type ControlledPageAction =
 	| { readonly kind: "click" }
 	| { readonly kind: "fill"; readonly value: string }
 
+/** What one act on one element did, before the page identity is read again. */
+type ActionStep = "acted" | "element_absent" | "unverified"
+
+/** Clicks the centre of the element's box, or says why it could not. */
+async function clickNode(channel: CdpChannel, backendNodeId: number): Promise<ActionStep> {
+	const box = await channel.call("DOM.getBoxModel", { backendNodeId })
+	if (!box.ok) return "element_absent"
+	const content = record(record(box.result)?.model)?.content
+	if (!Array.isArray(content) || content.length < 8) return "element_absent"
+	const points = content.slice(0, 8)
+	if (!points.every((value) => typeof value === "number" && Number.isFinite(value))) {
+		return "element_absent"
+	}
+	const x = (points[0]! + points[2]! + points[4]! + points[6]!) / 4
+	const y = (points[1]! + points[3]! + points[5]! + points[7]!) / 4
+	for (const type of ["mousePressed", "mouseReleased"] as const) {
+		const dispatched = await channel.call("Input.dispatchMouseEvent", {
+			type,
+			x,
+			y,
+			button: "left",
+			buttons: type === "mousePressed" ? 1 : 0,
+			clickCount: 1,
+		})
+		if (!dispatched.ok) return "unverified"
+	}
+	return "acted"
+}
+
+/** Types into the element, or says why it could not. */
+async function typeIntoNode(
+	channel: CdpChannel,
+	backendNodeId: number,
+	value: string,
+): Promise<ActionStep> {
+	if (!(await channel.call("DOM.focus", { backendNodeId })).ok) return "element_absent"
+	return (await channel.call("Input.insertText", { text: value })).ok ? "acted" : "unverified"
+}
+
 /**
  * Acts on one element of the Controlled Page, having proved twice over that it
  * is acting on what the caller named: the page identity still equals the one
@@ -325,36 +364,10 @@ export async function actOnControlledPage(input: {
 			if (input.action.kind === "fill" && isCredentialField(description)) {
 				return { kind: "credential_field" }
 			}
-			if (input.action.kind === "click") {
-				const box = await channel.call("DOM.getBoxModel", { backendNodeId: input.backendNodeId })
-				if (!box.ok) return { kind: "element_absent" }
-				const content = record(record(box.result)?.model)?.content
-				if (!Array.isArray(content) || content.length < 8) return { kind: "element_absent" }
-				const points = content.slice(0, 8)
-				if (!points.every((value) => typeof value === "number" && Number.isFinite(value))) {
-					return { kind: "element_absent" }
-				}
-				const x = (points[0]! + points[2]! + points[4]! + points[6]!) / 4
-				const y = (points[1]! + points[3]! + points[5]! + points[7]!) / 4
-				for (const type of ["mousePressed", "mouseReleased"] as const) {
-					const dispatched = await channel.call("Input.dispatchMouseEvent", {
-						type,
-						x,
-						y,
-						button: "left",
-						buttons: type === "mousePressed" ? 1 : 0,
-						clickCount: 1,
-					})
-					if (!dispatched.ok) return { kind: "unverified" }
-				}
-			} else {
-				if (!(await channel.call("DOM.focus", { backendNodeId: input.backendNodeId })).ok) {
-					return { kind: "element_absent" }
-				}
-				if (!(await channel.call("Input.insertText", { text: input.action.value })).ok) {
-					return { kind: "unverified" }
-				}
-			}
+			const step = input.action.kind === "click"
+				? await clickNode(channel, input.backendNodeId)
+				: await typeIntoNode(channel, input.backendNodeId, input.action.value)
+			if (step !== "acted") return { kind: step }
 			const after = await readBasis(channel, input.targetId)
 			return after === undefined ? { kind: "unverified" } : { kind: "acted", basis: after }
 		},
