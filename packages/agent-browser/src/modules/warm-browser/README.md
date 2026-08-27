@@ -51,6 +51,8 @@ outlived the page it described is refused rather than followed. The page is
 reached at an address this Module computes, never at the socket the endpoint
 advertises, and a target identity it could not address again is not a Controlled
 Page at all. A replacement page is refused until one `open` is told to adopt it.
+A refusal that found no generation to drop says so instead of reporting a loss
+the caller never had.
 
 A navigation is bound to the document it asked for: `open` succeeds only on the
 frame and document load the browser said it started, an act proves the identity
@@ -59,8 +61,23 @@ the act working only when the act was a click on something that navigates.
 Anything else that moved the page is another document arriving, and success is
 never claimed about it.
 
+An act also proves it reaches the element the reference names. A click brings
+that element into view, takes a point on its own content quad, and asks the page
+what is at that point: the answer must be the element itself or its own content,
+so a click is never delivered to something covering it, and a coordinate the two
+readings disagree about is refused rather than guessed at. A `fill` asks for
+focus and then reads back which node holds it, so a focus handler cannot divert
+the value into a field the caller never named, and it types only into an empty
+field, because inserted text is appended to whatever is already there. An act
+that cannot prove all of this dispatches nothing and says which proof failed.
+
 `fill` refuses a credential field from the snapshot before saying anything to the
-page, and again from the live description immediately before typing. The login
+page, and again from the live description and accessible name immediately before
+typing. A field is classified from what the page says about it and from the name
+a reader would hear, so a field labelled `Username` carrying no attribute saying
+so is still caught. A field the document reading could not describe at all is
+credential material by default, and a field inside a shadow root is described
+rather than missed, because the document is read through them. The login
 identifier is classified with the password, because it is the half of the pair
 that names the account; both refusals route to `login`.
 

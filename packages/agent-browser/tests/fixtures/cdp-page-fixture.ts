@@ -29,6 +29,26 @@ export interface FixtureElement {
 	readonly navigatesTo?: string
 	/** The attributes the live description carries once the snapshot has been read. */
 	readonly becomesAttributes?: Readonly<Record<string, string>>
+	/** The accessible name the live element carries once the snapshot has been read. */
+	readonly becomesName?: string
+	/** The element nests inside this other one, so a hit on it is a descendant hit. */
+	readonly childOf?: number
+	/** The element lives in a shadow root, which only a piercing read describes. */
+	readonly inShadowRoot?: boolean
+	/** The document read describes no such node at all. */
+	readonly undescribed?: boolean
+	/** Scrolling the element into view fails. */
+	readonly scrollFails?: boolean
+	/** The element has no content quad, as an element outside the layout has none. */
+	readonly noQuads?: boolean
+	/** Another element covers this one, so a hit at its point resolves to that one. */
+	readonly occludedBy?: number
+	/** Focusing the element moves focus to this other element instead. */
+	readonly focusMovesTo?: number
+	/** Focusing the element fails outright. */
+	readonly focusFails?: boolean
+	/** The value the field already holds. */
+	readonly value?: string
 }
 
 export interface FixtureTarget {
@@ -74,13 +94,25 @@ export interface CdpPageFixture {
 	readonly targetId: string
 	witness(): readonly WitnessEntry[]
 	cdpMethods(): readonly string[]
+	/**
+	 * The methods of the most recent conversation alone. Each command opens its
+	 * own socket, so this is what one command said to the page, rather than
+	 * everything every command before it said.
+	 */
+	latestConversation(): readonly string[]
 	attachedTargets(): readonly string[]
 	pageUrl(): string
 	loaderId(): string
 	insertedText(): readonly string[]
+	/** What the field holds now, after whatever was typed into it. */
+	fieldValue(backendNodeId: number): string | undefined
+	/** Which node holds focus now, which a focus handler may have moved. */
+	focusedNode(): number | undefined
 	clicks(): readonly { readonly x: number; readonly y: number }[]
 	focusedNodes(): readonly number[]
 	navigate(url: string): void
+	/** Moves where the page is without starting a new document load. */
+	moveWithinDocument(url: string): void
 	replacePage(targetId: string): void
 	setTargets(targets: readonly FixtureTarget[]): void
 	setElements(elements: readonly FixtureElement[]): void
@@ -126,20 +158,6 @@ function accessibilityNode(element: FixtureElement, index: number): Record<strin
 	}
 }
 
-function boxModel(box: readonly [number, number, number, number]): Record<string, unknown> {
-	const [x, y, width, height] = box
-	return {
-		model: {
-			content: [x, y, x + width, y, x + width, y + height, x, y + height],
-			padding: [x, y, x + width, y, x + width, y + height, x, y + height],
-			border: [x, y, x + width, y, x + width, y + height, x, y + height],
-			margin: [x, y, x + width, y, x + width, y + height, x, y + height],
-			width,
-			height,
-		},
-	}
-}
-
 export function startCdpPageFixture(options: CdpPageFixtureOptions = {}): CdpPageFixture {
 	let targetId = options.targetId ?? "page-1"
 	let url = options.url ?? "https://fixture.test/start"
@@ -154,6 +172,8 @@ export function startCdpPageFixture(options: CdpPageFixtureOptions = {}): CdpPag
 	const insertedText: string[] = []
 	const clicks: { x: number; y: number }[] = []
 	const focusedNodes: number[] = []
+	const fieldValues = new Map<number, string>()
+	let focusedNode: number | undefined
 	let describedAfterSnapshot = false
 	const methodCounts = new Map<string, number>()
 
@@ -178,6 +198,61 @@ export function startCdpPageFixture(options: CdpPageFixtureOptions = {}): CdpPag
 		return elements.find((element) => element.backendNodeId === backendNodeId)
 	}
 
+	/** The value the field holds right now, which typing into it changes. */
+	function fieldValue(element: FixtureElement): string {
+		return fieldValues.get(element.backendNodeId) ?? element.value ?? ""
+	}
+
+	/** The element a point lands on, honouring whatever covers it. */
+	function elementAtPoint(x: number, y: number): FixtureElement | undefined {
+		const hit = elements.find((element) =>
+			element.box !== undefined && element.noQuads !== true &&
+			x >= element.box[0] && x <= element.box[0] + element.box[2] &&
+			y >= element.box[1] && y <= element.box[1] + element.box[3]
+		)
+		if (hit?.occludedBy === undefined) return hit
+		return findElement(hit.occludedBy) ?? hit
+	}
+
+	/** One document subtree: this element and whatever nests inside it. */
+	function domSubtree(element: FixtureElement, nodeId: number): Record<string, unknown> {
+		const children = elements.filter((child) => child.childOf === element.backendNodeId)
+		return {
+			...domNode(element, nodeId),
+			childNodeCount: children.length,
+			children: children.map((child, index) => domSubtree(child, nodeId * 100 + index + 1)),
+		}
+	}
+
+	/** Everything the document read describes, with or without piercing. */
+	function documentChildren(pierce: boolean): {
+		readonly children: Record<string, unknown>[]
+		readonly shadowRoots: Record<string, unknown>[]
+	} {
+		const described = elements.filter((element) => element.undescribed !== true)
+		const light = described.filter((element) =>
+			element.childOf === undefined && element.inShadowRoot !== true
+		)
+		const shadow = described.filter((element) =>
+			element.childOf === undefined && element.inShadowRoot === true
+		)
+		return {
+			children: light.map((element, index) => domSubtree(element, index + 4)),
+			shadowRoots: pierce && shadow.length > 0
+				? [{
+					nodeId: 3_000,
+					backendNodeId: 3_000,
+					nodeType: 11,
+					nodeName: "#document-fragment",
+					nodeValue: "",
+					shadowRootType: "open",
+					childNodeCount: shadow.length,
+					children: shadow.map((element, index) => domSubtree(element, 3_001 + index)),
+				}]
+				: [],
+		}
+	}
+
 	function reply(method: string, parameters: Record<string, unknown>): Record<string, unknown> {
 		if (method === "Page.enable" || method === "DOM.enable" || method === "Accessibility.enable") {
 			return {}
@@ -198,6 +273,7 @@ export function startCdpPageFixture(options: CdpPageFixtureOptions = {}): CdpPag
 			return { frameId: "frame-main", loaderId: loaderId() }
 		}
 		if (method === "DOM.getDocument") {
+			const body = documentChildren(parameters.pierce === true)
 			return {
 				root: {
 					nodeId: 1,
@@ -221,12 +297,55 @@ export function startCdpPageFixture(options: CdpPageFixtureOptions = {}): CdpPag
 							nodeName: "BODY",
 							nodeValue: "",
 							attributes: [],
-							childNodeCount: elements.length,
-							children: elements.map((element, index) => domNode(element, index + 4)),
+							childNodeCount: body.children.length,
+							children: body.children,
+							shadowRoots: body.shadowRoots,
 						}],
 					}],
 				},
 			}
+		}
+		if (method === "Accessibility.getPartialAXTree") {
+			const element = findElement(parameters.backendNodeId)
+			if (element === undefined) throw new Error("no such node")
+			const live = element.becomesName !== undefined && describedAfterSnapshot
+				? { ...element, name: element.becomesName }
+				: element
+			return {
+				nodes: [{
+					...accessibilityNode(live, 0),
+					value: { type: "string", value: fieldValue(element) },
+					properties: [
+						{ name: "focusable", value: { type: "booleanOrUndefined", value: true } },
+						{
+							name: "focused",
+							value: {
+								type: "booleanOrUndefined",
+								value: focusedNode === element.backendNodeId,
+							},
+						},
+					],
+				}],
+			}
+		}
+		if (method === "DOM.scrollIntoViewIfNeeded") {
+			const element = findElement(parameters.backendNodeId)
+			if (element === undefined || element.scrollFails === true) {
+				throw new Error("the node could not be scrolled into view")
+			}
+			return {}
+		}
+		if (method === "DOM.getContentQuads") {
+			const element = findElement(parameters.backendNodeId)
+			if (element === undefined) throw new Error("no such node")
+			if (element.box === undefined || element.noQuads === true) return { quads: [] }
+			const [x, y, width, height] = element.box
+			return { quads: [[x, y, x + width, y, x + width, y + height, x, y + height]] }
+		}
+		if (method === "DOM.getNodeForLocation") {
+			const hit = elementAtPoint(Number(parameters.x), Number(parameters.y))
+			if (hit === undefined) throw new Error("no node at that location")
+			return { backendNodeId: hit.backendNodeId, frameId: "frame-main" }
 		}
 		if (method === "Accessibility.getFullAXTree") {
 			const nodes = elements.map(accessibilityNode)
@@ -242,15 +361,14 @@ export function startCdpPageFixture(options: CdpPageFixtureOptions = {}): CdpPag
 				: element.attributes
 			return { node: { ...domNode(element, 0), attributes: attributeList(attributes) } }
 		}
-		if (method === "DOM.getBoxModel") {
-			const element = findElement(parameters.backendNodeId)
-			if (element?.box === undefined) throw new Error("no box model for node")
-			return boxModel(element.box)
-		}
 		if (method === "DOM.focus") {
 			const element = findElement(parameters.backendNodeId)
-			if (element === undefined) throw new Error("no such node")
+			if (element === undefined || element.focusFails === true) {
+				throw new Error("the node could not take focus")
+			}
 			focusedNodes.push(element.backendNodeId)
+			// A focus handler may move focus somewhere this caller never named.
+			focusedNode = element.focusMovesTo ?? element.backendNodeId
 			return {}
 		}
 		if (method === "Input.dispatchMouseEvent") {
@@ -268,7 +386,14 @@ export function startCdpPageFixture(options: CdpPageFixtureOptions = {}): CdpPag
 			return {}
 		}
 		if (method === "Input.insertText") {
-			insertedText.push(String(parameters.text))
+			const typed = String(parameters.text)
+			insertedText.push(typed)
+			// Text is inserted into whatever holds focus, which is the whole point
+			// of proving which node that is before typing.
+			if (focusedNode !== undefined) {
+				const target = findElement(focusedNode)
+				if (target !== undefined) fieldValues.set(focusedNode, fieldValue(target) + typed)
+			}
 			return {}
 		}
 		throw new Error(`unsupported fixture method: ${method}`)
@@ -280,8 +405,17 @@ export function startCdpPageFixture(options: CdpPageFixtureOptions = {}): CdpPag
 		fetch(request, listening) {
 			const requested = new URL(request.url)
 			if (requested.pathname.startsWith("/devtools/")) {
-				witness.push({ kind: "attach", detail: requested.pathname })
-				if (listening.upgrade(request, { data: { targetPath: requested.pathname } })) return undefined
+				// A socket exists only for a target that exists now. A stale or
+				// invented path is answered the way a browser answers one, so a
+				// caller that dialled the wrong page never gets a conversation, and
+				// no conversation is witnessed for one that was never opened.
+				const known = requested.pathname === "/devtools/browser/fixture" ||
+					targetList().some((target) => requested.pathname === `/devtools/page/${target.id}`)
+				if (!known) return new Response("no such target", { status: 404 })
+				if (listening.upgrade(request, { data: { targetPath: requested.pathname } })) {
+					witness.push({ kind: "attach", detail: requested.pathname })
+					return undefined
+				}
 				return new Response("upgrade refused", { status: 400 })
 			}
 			witness.push({ kind: "http", detail: requested.pathname })
@@ -352,14 +486,27 @@ export function startCdpPageFixture(options: CdpPageFixtureOptions = {}): CdpPag
 		witness: () => [...witness],
 		cdpMethods: () =>
 			witness.filter((entry) => entry.kind === "cdp").map((entry) => entry.detail.split(" ")[1]!),
+		latestConversation: () =>
+			witness
+				.slice(witness.findLastIndex((entry) => entry.kind === "attach"))
+				.filter((entry) => entry.kind === "cdp")
+				.map((entry) => entry.detail.split(" ")[1]!),
 		attachedTargets: () =>
 			witness.filter((entry) => entry.kind === "attach").map((entry) => entry.detail),
 		pageUrl: () => url,
 		loaderId,
 		insertedText: () => [...insertedText],
+		fieldValue: (backendNodeId) => {
+			const element = findElement(backendNodeId)
+			return element === undefined ? undefined : fieldValue(element)
+		},
+		focusedNode: () => focusedNode,
 		clicks: () => [...clicks],
 		focusedNodes: () => [...focusedNodes],
 		navigate: (nextUrl) => moveIdentity(nextUrl),
+		moveWithinDocument: (nextUrl) => {
+			url = nextUrl
+		},
 		replacePage: (nextTargetId) => {
 			targetId = nextTargetId
 			if (targets !== undefined) targets = [{ id: nextTargetId, type: "page", url }]
@@ -370,6 +517,8 @@ export function startCdpPageFixture(options: CdpPageFixtureOptions = {}): CdpPag
 		setElements: (nextElements) => {
 			elements = nextElements
 			describedAfterSnapshot = false
+			fieldValues.clear()
+			focusedNode = undefined
 		},
 		stop: () => {
 			server.stop(true)

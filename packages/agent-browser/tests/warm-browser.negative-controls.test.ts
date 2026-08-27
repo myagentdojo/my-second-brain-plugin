@@ -48,8 +48,12 @@ interface Mutation {
 	readonly replace: string
 }
 
-/** The comment one removed guard leaves behind, so the copy still parses. */
-const removed = "\t\t\t// negative control: the guard under proof is gone"
+/**
+ * The comment one removed guard leaves behind, so the copy still parses. It is
+ * written once and used by every control: the replacement is only there to keep
+ * the file valid, and the oracle each control owns is the guard text it names.
+ */
+const removed = "// negative control: the guard under proof is gone"
 
 /**
  * Copies the package and removes exactly one guard from it. The literal must
@@ -100,7 +104,7 @@ test("removing the generation binding lets a reference from an earlier generatio
 		await scenario(mutatedPackage({
 			file: "src/modules/warm-browser/snapshot.ts",
 			find: '\tif (match[2] !== generation.generationId) return { kind: "stale" }',
-			replace: "\t// negative control: the guard under proof is gone",
+			replace: removed,
 		})),
 	).toEqual({ resultCode: "ELEMENT_CLICKED", exitCode: 0 })
 })
@@ -130,7 +134,7 @@ test("removing the reference lifetime lets an expired reference act", async () =
 		await scenario(mutatedPackage({
 			file: "src/modules/warm-browser/snapshot.ts",
 			find: '\tif (age < 0 || age > snapshotReferenceTimeoutMs) return { kind: "stale" }',
-			replace: "\t// negative control: the guard under proof is gone",
+			replace: removed,
 		})),
 	).toEqual({ resultCode: "ELEMENT_CLICKED", exitCode: 0 })
 })
@@ -173,7 +177,7 @@ test("removing the page binding changes which layer refuses a wrong-page referen
 		await scenario(mutatedPackage({
 			file: "src/modules/warm-browser/snapshot.ts",
 			find: '\tif (generation.basis.targetId !== input.controlledPageTargetId) return { kind: "stale" }',
-			replace: "\t// negative control: the guard under proof is gone",
+			replace: removed,
 		})),
 	).toEqual({ resultCode: "PAGE_IDENTITY_CHANGED", exitCode: 21 })
 })
@@ -314,7 +318,7 @@ test("removing the post-dispatch binding reports a stolen document as a click th
 					attributes: { type: "button" },
 					box: [10, 10, 80, 24],
 				}],
-				navigateAfterMethod: { method: "DOM.getBoxModel", url: "https://fixture.test/stolen" },
+				navigateAfterMethod: { method: "DOM.getContentQuads", url: "https://fixture.test/stolen" },
 			},
 			root,
 		)
@@ -477,8 +481,8 @@ test("removing the live credential refusal types into a field that became one", 
 	expect(
 		await scenario(mutatedPackage({
 			file: "src/modules/warm-browser/controlled-page.ts",
-			find: '\t\t\tif (input.action.kind === "fill" && isCredentialField(description)) {',
-			replace: "\t\t\tif (false) {",
+			find: '\tif (isCredentialField(description, field.name)) return { kind: "credential_field" }',
+			replace: removed,
 		})),
 	).toEqual({ resultCode: "FIELD_FILLED", exitCode: 0, typed: ["123456"] })
 })
@@ -554,7 +558,7 @@ test("removing the post-action invalidation keeps references a navigation destro
 			file: "src/modules/warm-browser/warm-browser.ts",
 			find:
 				'\tif (invalidatedReferences) invalidateReferences(command, parsed.runId, paths, state, "acted")',
-			replace: "\t// negative control: the guard under proof is gone",
+			replace: removed,
 		})),
 	).toEqual({ resultCode: "ELEMENT_CLICKED", exitCode: 0, retained: true })
 })
@@ -604,6 +608,267 @@ test("removing the login identifier signals lets a public fill of a username fie
 			replace: "] as const",
 		})),
 	).toEqual({ resultCode: "FIELD_FILLED", exitCode: 0, typed: ["someone"] })
+})
+
+test("removing the hit-target proof clicks whatever is covering the referenced element", async () => {
+	const scenario = async (root: string): Promise<Reading & { clicks: number }> => {
+		const { fixture, probe } = await pageProbe(
+			{
+				url: "https://fixture.test/sign-in",
+				elements: [
+					{
+						backendNodeId: 99,
+						role: "generic",
+						name: "Overlay",
+						nodeName: "DIV",
+						box: [0, 0, 400, 400],
+						focusable: false,
+					},
+					{
+						backendNodeId: 71,
+						role: "button",
+						name: "Buried",
+						nodeName: "BUTTON",
+						box: [10, 10, 80, 24],
+					},
+				],
+			},
+			root,
+		)
+		const snapshot = await takeSnapshot(probe, "control-hit", root)
+		const result = await runProductionCliAsync(
+			probe,
+			["click", "--ref", snapshot.elements[0]!.ref, "--run-id", "control-click"],
+			root,
+		)
+		return { ...reading(result), clicks: fixture.clicks().length }
+	}
+
+	expect(await scenario(packageRoot)).toEqual({
+		resultCode: "ELEMENT_NOT_ACTIONABLE",
+		exitCode: 21,
+		clicks: 0,
+	})
+	// With the proof gone, a real click is dispatched at a point that belongs to
+	// the overlay, and the caller is told the referenced element was clicked.
+	expect(
+		await scenario(mutatedPackage({
+			file: "src/modules/warm-browser/controlled-page.ts",
+			find:
+				'\tif (!(await hitsReferencedNode(channel, point, backendNodeId))) {\n\t\treturn undeliverable("click_target_unproved")\n\t}',
+			replace: removed,
+		})),
+	).toEqual({ resultCode: "ELEMENT_CLICKED", exitCode: 0, clicks: 1 })
+})
+
+test("removing the focus proof types the caller's value into the field focus moved to", async () => {
+	const scenario = async (root: string): Promise<Reading & { password: string | undefined }> => {
+		const { fixture, probe } = await pageProbe(
+			{
+				url: "https://fixture.test/sign-in",
+				elements: [
+					{
+						backendNodeId: 13,
+						role: "textbox",
+						name: "Password",
+						nodeName: "INPUT",
+						attributes: { type: "password" },
+						box: [10, 100, 200, 24],
+					},
+					{
+						backendNodeId: 91,
+						role: "searchbox",
+						name: "Search",
+						nodeName: "INPUT",
+						attributes: { type: "search", name: "q" },
+						box: [10, 10, 200, 24],
+						focusMovesTo: 13,
+					},
+				],
+			},
+			root,
+		)
+		const snapshot = await takeSnapshot(probe, "control-focus", root)
+		const result = await runProductionCliAsync(
+			probe,
+			[
+				"fill",
+				"--ref",
+				snapshot.elements[1]!.ref,
+				"--value",
+				"warm browser",
+				"--run-id",
+				"control-fill",
+			],
+			root,
+		)
+		return { ...reading(result), password: fixture.fieldValue(13) }
+	}
+
+	expect(await scenario(packageRoot)).toEqual({
+		resultCode: "ELEMENT_NOT_ACTIONABLE",
+		exitCode: 21,
+		password: "",
+	})
+	// With the proof gone, the value the caller typed into an ordinary search box
+	// ends up in the password field the page moved focus to.
+	expect(
+		await scenario(mutatedPackage({
+			file: "src/modules/warm-browser/controlled-page.ts",
+			find: '\tif (!focused.focused) return undeliverable("field_focus_moved")',
+			replace: removed,
+		})),
+	).toEqual({ resultCode: "FIELD_FILLED", exitCode: 0, password: "warm browser" })
+})
+
+test("removing the accessible name lets a public fill of a label-only username field proceed", async () => {
+	const scenario = async (root: string): Promise<Reading & { typed: readonly string[] }> => {
+		const { fixture, probe } = await pageProbe(
+			{
+				url: "https://fixture.test/sign-in",
+				// Nothing but the label says what this field is for.
+				elements: [{
+					backendNodeId: 42,
+					role: "textbox",
+					name: "Username",
+					nodeName: "INPUT",
+					box: [10, 10, 100, 20],
+				}],
+			},
+			root,
+		)
+		const snapshot = await takeSnapshot(probe, "control-label", root)
+		const result = await runProductionCliAsync(
+			probe,
+			[
+				"fill",
+				"--ref",
+				snapshot.elements[0]!.ref,
+				"--value",
+				"someone",
+				"--run-id",
+				"control-fill",
+			],
+			root,
+		)
+		return { ...reading(result), typed: fixture.insertedText() }
+	}
+
+	expect(await scenario(packageRoot)).toEqual({
+		resultCode: "CREDENTIAL_FIELD_REFUSED",
+		exitCode: 21,
+		typed: [],
+	})
+	expect(
+		await scenario(mutatedPackage({
+			file: "src/modules/warm-browser/credential-fields.ts",
+			find: "\t\tnormalise(accessibleName),\n",
+			replace: "",
+		})),
+	).toEqual({ resultCode: "FIELD_FILLED", exitCode: 0, typed: ["someone"] })
+})
+
+test("classifying an undescribed field as ordinary lets a public fill of it proceed", async () => {
+	const scenario = async (root: string): Promise<Reading & { typed: readonly string[] }> => {
+		const { fixture, probe } = await pageProbe(
+			{
+				url: "https://fixture.test/sign-in",
+				// The document reading describes no such node, so nothing about it can
+				// be ruled out.
+				elements: [{
+					backendNodeId: 95,
+					role: "textbox",
+					name: "Mystery",
+					nodeName: "INPUT",
+					box: [10, 10, 100, 20],
+					undescribed: true,
+				}],
+			},
+			root,
+		)
+		const snapshot = await takeSnapshot(probe, "control-undescribed", root)
+		const result = await runProductionCliAsync(
+			probe,
+			[
+				"fill",
+				"--ref",
+				snapshot.elements[0]!.ref,
+				"--value",
+				"someone",
+				"--run-id",
+				"control-fill",
+			],
+			root,
+		)
+		return { ...reading(result), typed: fixture.insertedText() }
+	}
+
+	expect(await scenario(packageRoot)).toEqual({
+		resultCode: "CREDENTIAL_FIELD_REFUSED",
+		exitCode: 21,
+		typed: [],
+	})
+	// This control turns the default the other way instead of deleting it, because
+	// a classifier with no answer for an undescribed field cannot run at all.
+	expect(
+		await scenario(mutatedPackage({
+			file: "src/modules/warm-browser/credential-fields.ts",
+			find: "\tif (description === undefined) return true",
+			replace: "\tif (description === undefined) return false",
+		})),
+	).toEqual({ resultCode: "FIELD_FILLED", exitCode: 0, typed: ["someone"] })
+})
+
+test("reading the document without piercing refuses an ordinary field it cannot see", async () => {
+	const scenario = async (root: string): Promise<Reading & { typed: readonly string[] }> => {
+		const { fixture, probe } = await pageProbe(
+			{
+				url: "https://fixture.test/sign-in",
+				elements: [{
+					backendNodeId: 96,
+					role: "searchbox",
+					name: "Search",
+					nodeName: "INPUT",
+					attributes: { type: "search", name: "q" },
+					box: [10, 10, 200, 24],
+					inShadowRoot: true,
+				}],
+			},
+			root,
+		)
+		const snapshot = await takeSnapshot(probe, "control-pierce", root)
+		const result = await runProductionCliAsync(
+			probe,
+			[
+				"fill",
+				"--ref",
+				snapshot.elements[0]!.ref,
+				"--value",
+				"warm browser",
+				"--run-id",
+				"control-fill",
+			],
+			root,
+		)
+		return { ...reading(result), typed: fixture.insertedText() }
+	}
+
+	// The piercing read is what makes the classification truthful in both
+	// directions: with it, a shadow field is described and judged on what the page
+	// says; without it, the same field is undescribed, and the fail-closed default
+	// refuses an ordinary search box as though it were credential material.
+	expect(await scenario(packageRoot)).toEqual({
+		resultCode: "FIELD_FILLED",
+		exitCode: 0,
+		typed: ["warm browser"],
+	})
+	expect(
+		await scenario(mutatedPackage({
+			file: "src/modules/warm-browser/controlled-page.ts",
+			find: '\tconst document = await channel.call("DOM.getDocument", { depth: -1, pierce: true })',
+			replace: '\tconst document = await channel.call("DOM.getDocument", { depth: -1, pierce: false })',
+		})),
+	).toEqual({ resultCode: "CREDENTIAL_FIELD_REFUSED", exitCode: 21, typed: [] })
 })
 
 /** What one refusal answered, and whether the session still holds a generation. */
@@ -674,7 +939,7 @@ test.each([
 		// The refusal is the same either way. What the guard owns is the state it
 		// leaves behind, so that is what these two rows disagree about.
 		expect(await scenario(packageRoot)).toEqual({ resultCode, exitCode, retained: false })
-		expect(await scenario(mutatedPackage({ file, find, replace: removed.trimStart() })))
+		expect(await scenario(mutatedPackage({ file, find, replace: removed })))
 			.toEqual({ resultCode, exitCode, retained: true })
 	},
 )

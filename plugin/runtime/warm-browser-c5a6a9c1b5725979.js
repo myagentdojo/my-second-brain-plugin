@@ -7,12 +7,12 @@ var commandVocabulary = [
   { name: "help", sideEffects: "none", options: [] },
   {
     name: "start",
-    sideEffects: "may stop a proved stale owned browser process group, then starts one owned browser process group",
+    sideEffects: "may stop a proved stale owned browser process group and invalidate every earlier Snapshot Reference, then starts one owned browser process group",
     options: [{ flag: "--port", value: "NUMBER", required: false }]
   },
   {
     name: "status",
-    sideEffects: "may stop a proved stale owned browser process group and remove its private state",
+    sideEffects: "may stop a proved stale owned browser process group, remove its private state, and invalidate every earlier Snapshot Reference",
     options: []
   },
   {
@@ -30,18 +30,22 @@ var commandVocabulary = [
   },
   {
     name: "click",
-    sideEffects: "dispatches one click on one referenced element of the Controlled Page",
+    sideEffects: "dispatches one click on one referenced element of the Controlled Page and may invalidate every earlier Snapshot Reference",
     options: [{ flag: "--ref", value: "REFERENCE", required: true }]
   },
   {
     name: "fill",
-    sideEffects: "types one non-secret value into one referenced field of the Controlled Page",
+    sideEffects: "types one non-secret value into one referenced empty field of the Controlled Page and may invalidate every earlier Snapshot Reference",
     options: [
       { flag: "--ref", value: "REFERENCE", required: true },
       { flag: "--value", value: "TEXT", required: true }
     ]
   },
-  { name: "stop", sideEffects: "stops one verified owned browser process group", options: [] }
+  {
+    name: "stop",
+    sideEffects: "stops one verified owned browser process group and removes its private state, including every Snapshot Reference",
+    options: []
+  }
 ];
 
 class SpawnCleanupUnverifiedError extends Error {
@@ -190,7 +194,9 @@ var identifierAttributes = ["name", "id", "autocomplete", "aria-label", "placeho
 function normalise(value) {
   return value.toLowerCase().replaceAll(/[^a-z0-9]/g, "");
 }
-function isCredentialField(description) {
+function isCredentialField(description, accessibleName = "") {
+  if (description === undefined)
+    return true;
   const attributes = description.attributes;
   const type = (attributes.type ?? "").trim().toLowerCase();
   if (credentialInputTypes.includes(type))
@@ -199,7 +205,10 @@ function isCredentialField(description) {
   if (autocomplete.some((token) => credentialAutocompleteTokens.includes(token))) {
     return true;
   }
-  const identifier = identifierAttributes.map((attribute) => normalise(attributes[attribute] ?? "")).join(" ");
+  const identifier = [
+    ...identifierAttributes.map((attribute) => normalise(attributes[attribute] ?? "")),
+    normalise(accessibleName)
+  ].join(" ");
   return credentialIdentifierFragments.some((fragment) => identifier.includes(fragment));
 }
 
@@ -267,26 +276,83 @@ function describedNode(node) {
   const nodeName = nonEmptyText(node.nodeName);
   return nodeName === undefined ? undefined : { nodeName, attributes: attributeMap(node.attributes) };
 }
-function documentDescriptions(reply) {
+function documentReading(reply) {
   const root = record(record(reply)?.root);
   if (root === undefined)
     return;
   const descriptions = new Map;
-  const queue = [root];
+  const parents = new Map;
+  const queue = [
+    { node: root, parent: undefined }
+  ];
   while (queue.length > 0) {
-    const node = queue.pop();
+    const { node, parent } = queue.pop();
     const backendNodeId = node.backendNodeId;
+    const identified = typeof backendNodeId === "number" ? backendNodeId : undefined;
     const description = describedNode(node);
-    if (typeof backendNodeId === "number" && description !== undefined) {
-      descriptions.set(backendNodeId, description);
+    if (identified !== undefined) {
+      if (description !== undefined)
+        descriptions.set(identified, description);
+      if (parent !== undefined)
+        parents.set(identified, parent);
     }
-    for (const child of Array.isArray(node.children) ? node.children : []) {
-      const childRecord = record(child);
-      if (childRecord !== undefined)
-        queue.push(childRecord);
+    const nested = identified ?? parent;
+    for (const key of ["children", "shadowRoots", "pseudoElements"]) {
+      for (const child of Array.isArray(node[key]) ? node[key] : []) {
+        const childRecord = record(child);
+        if (childRecord !== undefined)
+          queue.push({ node: childRecord, parent: nested });
+      }
     }
+    const contentDocument = record(node.contentDocument);
+    if (contentDocument !== undefined)
+      queue.push({ node: contentDocument, parent: nested });
   }
-  return descriptions;
+  return { descriptions, parents };
+}
+async function readDocument(channel) {
+  const document = await channel.call("DOM.getDocument", { depth: -1, pierce: true });
+  return document.ok ? documentReading(document.result) : undefined;
+}
+function isWithin(parents, node, ancestor) {
+  let current = node;
+  for (let step = 0;step < 128 && current !== undefined; step += 1) {
+    if (current === ancestor)
+      return true;
+    current = parents.get(current);
+  }
+  return false;
+}
+function hasProperty(node, name) {
+  const properties = Array.isArray(node.properties) ? node.properties : [];
+  return properties.some((property) => {
+    const entry = record(property);
+    return entry?.name === name && record(entry.value)?.value === true;
+  });
+}
+function nodeAccessibility(reply, backendNodeId) {
+  const nodes = record(reply)?.nodes;
+  if (!Array.isArray(nodes))
+    return;
+  for (const entry of nodes) {
+    const node = record(entry);
+    if (node === undefined || node.backendDOMNodeId !== backendNodeId)
+      continue;
+    const value = record(node.value)?.value;
+    return {
+      name: readableText(record(node.name)?.value),
+      holdsValue: typeof value === "string" && value !== "",
+      focused: hasProperty(node, "focused")
+    };
+  }
+  return;
+}
+async function readNodeAccessibility(channel, backendNodeId) {
+  const reply = await channel.call("Accessibility.getPartialAXTree", {
+    backendNodeId,
+    fetchRelatives: false
+  });
+  return reply.ok ? nodeAccessibility(reply.result, backendNodeId) : undefined;
 }
 function accessibilityNodes(reply) {
   const nodes = record(reply)?.nodes;
@@ -300,15 +366,10 @@ function accessibilityNodes(reply) {
     const backendNodeId = node.backendDOMNodeId;
     if (typeof backendNodeId !== "number" || !Number.isSafeInteger(backendNodeId) || backendNodeId < 1)
       continue;
-    const properties = Array.isArray(node.properties) ? node.properties : [];
-    const focusable = properties.some((property) => {
-      const entryRecord = record(property);
-      return entryRecord?.name === "focusable" && record(entryRecord.value)?.value === true;
-    });
     readings.push({
       role: readableText(record(node.role)?.value),
       name: readableText(record(node.name)?.value),
-      focusable,
+      focusable: hasProperty(node, "focusable"),
       ignored: node.ignored === true,
       backendNodeId
     });
@@ -322,9 +383,9 @@ function interpretElements(nodes, descriptions) {
     if (node.ignored)
       continue;
     const description = descriptions.get(node.backendNodeId);
-    const credentialField = description !== undefined && isCredentialField(description);
+    const credentialField = isCredentialField(description, node.name);
     const actionable = node.focusable || actionableRoles.includes(node.role);
-    if (!actionable && !credentialField)
+    if (!actionable && !(description !== undefined && credentialField))
       continue;
     if (elements.length === snapshotElementLimit) {
       truncated = true;
@@ -382,11 +443,8 @@ async function readControlledPageSnapshot(input) {
     const before = await readBasis(channel, input.targetId);
     if (before === undefined)
       return { kind: "unverified" };
-    const document = await channel.call("DOM.getDocument", { depth: -1, pierce: false });
-    if (!document.ok)
-      return { kind: "unverified" };
-    const descriptions = documentDescriptions(document.result);
-    if (descriptions === undefined)
+    const reading = await readDocument(channel);
+    if (reading === undefined)
       return { kind: "unverified" };
     const tree = await channel.call("Accessibility.getFullAXTree", {});
     if (!tree.ok)
@@ -399,9 +457,12 @@ async function readControlledPageSnapshot(input) {
       return { kind: "unverified" };
     if (!sameBasis(before, after))
       return { kind: "identity_changed" };
-    const { elements, truncated } = interpretElements(nodes, descriptions);
+    const { elements, truncated } = interpretElements(nodes, reading.descriptions);
     return { kind: "observed", basis: after, elements, truncated };
   });
+}
+function undeliverable(reason) {
+  return { kind: "undeliverable", reason };
 }
 function mayNavigate(description) {
   const attributes = description.attributes;
@@ -414,42 +475,88 @@ function mayNavigate(description) {
     return true;
   return nodeName === "BUTTON" && attributes.type === undefined;
 }
-async function clickNode(channel, backendNodeId) {
-  const box = await channel.call("DOM.getBoxModel", { backendNodeId });
-  if (!box.ok)
-    return "element_absent";
-  const content = record(record(box.result)?.model)?.content;
-  if (!Array.isArray(content) || content.length < 8)
-    return "element_absent";
-  const points = content.slice(0, 8);
-  if (!points.every((value) => typeof value === "number" && Number.isFinite(value))) {
-    return "element_absent";
+function contentPoint(reply) {
+  const quads = record(reply)?.quads;
+  const quad = Array.isArray(quads) ? quads[0] : undefined;
+  if (!Array.isArray(quad) || quad.length < 8)
+    return;
+  const corners = quad.slice(0, 8);
+  if (!corners.every((value) => typeof value === "number" && Number.isFinite(value))) {
+    return;
   }
-  const x = (points[0] + points[2] + points[4] + points[6]) / 4;
-  const y = (points[1] + points[3] + points[5] + points[7]) / 4;
+  return {
+    x: Math.round((corners[0] + corners[2] + corners[4] + corners[6]) / 4),
+    y: Math.round((corners[1] + corners[3] + corners[5] + corners[7]) / 4)
+  };
+}
+async function hitsReferencedNode(channel, point, backendNodeId) {
+  const hit = await channel.call("DOM.getNodeForLocation", {
+    x: point.x,
+    y: point.y,
+    includeUserAgentShadowDOM: false
+  });
+  if (!hit.ok)
+    return false;
+  const hitNodeId = record(hit.result)?.backendNodeId;
+  if (typeof hitNodeId !== "number")
+    return false;
+  if (hitNodeId === backendNodeId)
+    return true;
+  const reading = await readDocument(channel);
+  return reading !== undefined && isWithin(reading.parents, hitNodeId, backendNodeId);
+}
+async function clickNode(channel, backendNodeId) {
+  if (!(await channel.call("DOM.scrollIntoViewIfNeeded", { backendNodeId })).ok) {
+    return undeliverable("click_target_unproved");
+  }
+  const quads = await channel.call("DOM.getContentQuads", { backendNodeId });
+  if (!quads.ok)
+    return { kind: "element_absent" };
+  const point = contentPoint(quads.result);
+  if (point === undefined)
+    return undeliverable("click_target_unproved");
+  if (!await hitsReferencedNode(channel, point, backendNodeId)) {
+    return undeliverable("click_target_unproved");
+  }
   for (const type of ["mousePressed", "mouseReleased"]) {
     const dispatched = await channel.call("Input.dispatchMouseEvent", {
       type,
-      x,
-      y,
+      x: point.x,
+      y: point.y,
       button: "left",
       buttons: type === "mousePressed" ? 1 : 0,
       clickCount: 1
     });
     if (!dispatched.ok)
-      return "unverified";
+      return { kind: "unverified" };
   }
-  return "acted";
+  return { kind: "acted" };
 }
 async function typeIntoNode(channel, backendNodeId, value) {
-  if (!(await channel.call("DOM.focus", { backendNodeId })).ok)
-    return "element_absent";
-  return (await channel.call("Input.insertText", { text: value })).ok ? "acted" : "unverified";
+  if (!(await channel.call("DOM.focus", { backendNodeId })).ok) {
+    return undeliverable("field_not_focusable");
+  }
+  const focused = await readNodeAccessibility(channel, backendNodeId);
+  if (focused === undefined)
+    return undeliverable("field_unreadable");
+  if (!focused.focused)
+    return undeliverable("field_focus_moved");
+  return (await channel.call("Input.insertText", { text: value })).ok ? { kind: "acted" } : { kind: "unverified" };
 }
 function outcomeAfterAct(input) {
   if (sameBasis(input.after, input.atDispatch))
     return { kind: "acted", basis: input.after };
   return input.action.kind === "click" && mayNavigate(input.description) ? { kind: "acted", basis: input.after } : { kind: "superseded" };
+}
+async function refuseUnfillableField(channel, backendNodeId, description) {
+  if (!(await channel.call("Accessibility.enable", {})).ok)
+    return { kind: "unverified" };
+  const field = await readNodeAccessibility(channel, backendNodeId);
+  if (field === undefined)
+    return { kind: "undeliverable", reason: "field_unreadable" };
+  if (isCredentialField(description, field.name))
+    return { kind: "credential_field" };
+  return field.holdsValue ? { kind: "undeliverable", reason: "field_not_empty" } : undefined;
 }
 async function actOnControlledPage(input) {
   return await withControlledPage(input.port, input.targetId, { kind: "unverified" }, async (channel) => {
@@ -470,8 +577,10 @@ async function actOnControlledPage(input) {
     const description = describedNode(record(record(described.result)?.node) ?? {});
     if (description === undefined)
       return { kind: "element_absent" };
-    if (input.action.kind === "fill" && isCredentialField(description)) {
-      return { kind: "credential_field" };
+    if (input.action.kind === "fill") {
+      const refusal = await refuseUnfillableField(channel, input.backendNodeId, description);
+      if (refusal !== undefined)
+        return refusal;
     }
     const atDispatch = await readBasis(channel, input.targetId);
     if (atDispatch === undefined)
@@ -479,8 +588,8 @@ async function actOnControlledPage(input) {
     if (!sameBasis(atDispatch, input.basis))
       return { kind: "identity_changed" };
     const step = input.action.kind === "click" ? await clickNode(channel, input.backendNodeId) : await typeIntoNode(channel, input.backendNodeId, input.action.value);
-    if (step !== "acted")
-      return { kind: step };
+    if (step.kind !== "acted")
+      return step;
     const after = await readBasis(channel, input.targetId);
     if (after === undefined)
       return { kind: "unverified" };
@@ -1247,6 +1356,10 @@ function selectorRefusal(runId, command, flag) {
     message: `Warm Browser acts through Snapshot References, not the ${flag} selector.`
   });
 }
+var optionFlag = /^--[a-z][a-z0-9-]{0,31}$/;
+function unsupportedArgument(argument) {
+  return optionFlag.test(argument) ? `Warm Browser does not accept the ${argument} option here.` : "Warm Browser accepts options here, and this argument is not one.";
+}
 function safeUrl(value) {
   try {
     return new URL(value);
@@ -1308,7 +1421,7 @@ function readOptions(arguments_, firstOptionIndex, command, accepted, generatedR
       selectorRefusal(runId, command, argument);
     const option = accepted.get(argument);
     if (option === undefined)
-      usage(runId, command, "Warm Browser received an unsupported argument.");
+      usage(runId, command, unsupportedArgument(argument));
     if (seen.has(option.flag))
       usage(runId, command, `The ${option.flag} flag may appear only once.`);
     if (option.value === null) {
@@ -1398,8 +1511,8 @@ function canonicalProcess(value) {
   };
 }
 function adoptControlledPage(state, controlledPageTargetId) {
-  const { snapshot: _invalidated, ...rest } = state;
-  return { ...rest, endpoint: { ...state.endpoint, controlledPageTargetId } };
+  const rebound = withoutSnapshot(state);
+  return { ...rebound, endpoint: { ...rebound.endpoint, controlledPageTargetId } };
 }
 function recoverAbsentLaunch(command, runId, paths, state, adapter) {
   const owners = adapter.findProfileProcesses(state.profileRoot);
@@ -1524,8 +1637,9 @@ async function inspectSession(command, runId, paths, adapter, pageReplacement = 
   }
   if (verification.endpoint.controlledPageTargetId !== state.endpoint.controlledPageTargetId) {
     if (pageReplacement === "refuse") {
+      const transaction = invalidationState(state);
       invalidateReferences(command, runId, paths, state, "invalidated");
-      staticFailure(command, runId, "CONTROLLED_PAGE_REPLACED", 20, "The Browser Session's Controlled Page was replaced by another page.", "Run warm-browser open --url URL --adopt-page --run-id ID to bind the replacement Controlled Page.", false, "invalidated");
+      staticFailure(command, runId, "CONTROLLED_PAGE_REPLACED", 20, "The Browser Session's Controlled Page was replaced by another page.", "Run warm-browser open --url URL --adopt-page --run-id ID to bind the replacement Controlled Page.", false, transaction);
     }
     const adopted = adoptControlledPage(state, verification.endpoint.controlledPageTargetId);
     writeSessionState(paths, adopted);
@@ -1788,6 +1902,9 @@ function withoutSnapshot(state) {
   const { snapshot: _invalidated, ...rest } = state;
   return rest;
 }
+function invalidationState(state) {
+  return state.snapshot === undefined ? "unchanged" : "invalidated";
+}
 function invalidateReferences(command, runId, paths, state, transactionState) {
   if (state.snapshot === undefined)
     return state;
@@ -1817,6 +1934,16 @@ function refuseReference(command, runId, resolution) {
     "The Snapshot Reference belongs to another Snapshot Generation, another Controlled Page, or a generation that has expired."
   ];
   staticFailure(command, runId, resultCode, 21, message, freshSnapshotAction);
+}
+var undeliverableMessages = {
+  click_target_unproved: "Warm Browser could not prove the click would reach the referenced element.",
+  field_unreadable: "Warm Browser could not read the referenced field before typing into it.",
+  field_not_empty: "Warm Browser fills an empty field, and the referenced one already holds a value.",
+  field_not_focusable: "Warm Browser could not focus the referenced field.",
+  field_focus_moved: "Warm Browser could not prove the referenced field holds focus."
+};
+function undeliverableAct(command, runId, reason) {
+  staticFailure(command, runId, "ELEMENT_NOT_ACTIONABLE", 21, undeliverableMessages[reason], freshSnapshotAction);
 }
 function credentialRefusal(command, runId) {
   staticFailure(command, runId, "CREDENTIAL_FIELD_REFUSED", 21, "Warm Browser does not type credentials into the Controlled Page.", "Use the Warm Browser login command for a credential field; it is not callable in this slice.");
@@ -1863,8 +1990,9 @@ async function snapshot(parsed, paths, adapter) {
     targetId: state.endpoint.controlledPageTargetId
   });
   if (reading.kind === "identity_changed") {
+    const transaction = invalidationState(state);
     invalidateReferences("snapshot", parsed.runId, paths, state, "invalidated");
-    staticFailure("snapshot", parsed.runId, "PAGE_IDENTITY_CHANGED", 21, "The Controlled Page moved while it was being read, so no Snapshot Reference was issued.", freshSnapshotAction, false, "invalidated");
+    staticFailure("snapshot", parsed.runId, "PAGE_IDENTITY_CHANGED", 21, "The Controlled Page moved while it was being read, so no Snapshot Reference was issued.", freshSnapshotAction, false, transaction);
   }
   if (reading.kind === "unverified") {
     pageControlUnverified("snapshot", parsed.runId, "Warm Browser could not read the Controlled Page.", "unchanged");
@@ -1921,9 +2049,12 @@ async function actOnPage(parsed, command, paths, adapter) {
     action
   });
   if (outcome.kind === "identity_changed") {
+    const transaction = invalidationState(state);
     invalidateReferences(command, parsed.runId, paths, state, "invalidated");
-    staticFailure(command, parsed.runId, "PAGE_IDENTITY_CHANGED", 21, "The Controlled Page is no longer the page this Snapshot Reference was issued against.", freshSnapshotAction, false, "invalidated");
+    staticFailure(command, parsed.runId, "PAGE_IDENTITY_CHANGED", 21, "The Controlled Page is no longer the page this Snapshot Reference was issued against.", freshSnapshotAction, false, transaction);
   }
+  if (outcome.kind === "undeliverable")
+    undeliverableAct(command, parsed.runId, outcome.reason);
   if (outcome.kind === "element_absent") {
     staticFailure(command, parsed.runId, "SNAPSHOT_REFERENCE_STALE", 21, "The referenced element is no longer part of the Controlled Page.", freshSnapshotAction);
   }

@@ -27,12 +27,13 @@ export const commandVocabulary = [
 	{
 		name: "start",
 		sideEffects:
-			"may stop a proved stale owned browser process group, then starts one owned browser process group",
+			"may stop a proved stale owned browser process group and invalidate every earlier Snapshot Reference, then starts one owned browser process group",
 		options: [{ flag: "--port", value: "NUMBER", required: false }],
 	},
 	{
 		name: "status",
-		sideEffects: "may stop a proved stale owned browser process group and remove its private state",
+		sideEffects:
+			"may stop a proved stale owned browser process group, remove its private state, and invalidate every earlier Snapshot Reference",
 		options: [],
 	},
 	{
@@ -51,18 +52,25 @@ export const commandVocabulary = [
 	},
 	{
 		name: "click",
-		sideEffects: "dispatches one click on one referenced element of the Controlled Page",
+		sideEffects:
+			"dispatches one click on one referenced element of the Controlled Page and may invalidate every earlier Snapshot Reference",
 		options: [{ flag: "--ref", value: "REFERENCE", required: true }],
 	},
 	{
 		name: "fill",
-		sideEffects: "types one non-secret value into one referenced field of the Controlled Page",
+		sideEffects:
+			"types one non-secret value into one referenced empty field of the Controlled Page and may invalidate every earlier Snapshot Reference",
 		options: [
 			{ flag: "--ref", value: "REFERENCE", required: true },
 			{ flag: "--value", value: "TEXT", required: true },
 		],
 	},
-	{ name: "stop", sideEffects: "stops one verified owned browser process group", options: [] },
+	{
+		name: "stop",
+		sideEffects:
+			"stops one verified owned browser process group and removes its private state, including every Snapshot Reference",
+		options: [],
+	},
 ] as const
 
 export type CliCommand = (typeof commandVocabulary)[number]["name"]
@@ -114,6 +122,7 @@ export type ResultCode =
 	| "ELEMENT_CLICKED"
 	| "FIELD_FILLED"
 	| "SNAPSHOT_ABSENT"
+	| "ELEMENT_NOT_ACTIONABLE"
 	| "SNAPSHOT_REFERENCE_INVALID"
 	| "SNAPSHOT_REFERENCE_STALE"
 	| "PAGE_IDENTITY_CHANGED"
@@ -231,10 +240,28 @@ export type PageSnapshotReading =
 	| { readonly kind: "identity_changed" }
 	| { readonly kind: "unverified" }
 
+/**
+ * Why an act could never be delivered to the element the caller referenced.
+ *
+ * Each one is something the live page did that stops Warm Browser proving the
+ * act would land where the reference points: a point that resolves to another
+ * element, a field that will not take or hold focus, a field that already holds
+ * text a fill would append to, and a field the page will not describe. None of
+ * them is a failure of the act, because the act never happened.
+ */
+export type UndeliverableAct =
+	| "click_target_unproved"
+	| "field_unreadable"
+	| "field_not_empty"
+	| "field_not_focusable"
+	| "field_focus_moved"
+
 export type PageActionOutcome =
 	| { readonly kind: "acted"; readonly basis: ControlledPageBasis }
 	/** The page was not the one the reference was issued against. */
 	| { readonly kind: "identity_changed" }
+	/** Nothing was dispatched, because delivery to the element was not provable. */
+	| { readonly kind: "undeliverable"; readonly reason: UndeliverableAct }
 	/**
 	 * The act reached the page, and the page then moved to a document the act
 	 * could not have asked for. Success is never claimed about that document.

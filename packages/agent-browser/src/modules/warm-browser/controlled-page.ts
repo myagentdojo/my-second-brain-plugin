@@ -6,6 +6,7 @@ import type {
 	PageActionOutcome,
 	PageNavigation,
 	PageSnapshotReading,
+	UndeliverableAct,
 } from "./contract"
 import { type DomNodeDescription, isCredentialField } from "./credential-fields"
 
@@ -126,30 +127,113 @@ function describedNode(node: Record<string, unknown>): DomNodeDescription | unde
 }
 
 /**
- * Flattens one document reply into every node it describes, keyed by identity.
+ * What one document reading says: how each node is described, and which node
+ * each one sits inside.
  *
- * The document is read without piercing, so it is one tree of children and this
- * walk needs nothing else. Shadow content and framed documents are outside the
- * reading, and therefore outside the snapshot, rather than half-covered here.
+ * The read pierces shadow roots, because a password field inside one is a
+ * password field and a snapshot that could not see it would publish it as
+ * ordinary. Every container the reply nests is followed for the same reason.
  */
-function documentDescriptions(reply: unknown): Map<number, DomNodeDescription> | undefined {
+interface DocumentReading {
+	readonly descriptions: Map<number, DomNodeDescription>
+	readonly parents: Map<number, number>
+}
+
+function documentReading(reply: unknown): DocumentReading | undefined {
 	const root = record(record(reply)?.root)
 	if (root === undefined) return undefined
 	const descriptions = new Map<number, DomNodeDescription>()
-	const queue: Record<string, unknown>[] = [root]
+	const parents = new Map<number, number>()
+	const queue: { readonly node: Record<string, unknown>; readonly parent: number | undefined }[] = [
+		{ node: root, parent: undefined },
+	]
 	while (queue.length > 0) {
-		const node = queue.pop()!
+		const { node, parent } = queue.pop()!
 		const backendNodeId = node.backendNodeId
+		const identified = typeof backendNodeId === "number" ? backendNodeId : undefined
 		const description = describedNode(node)
-		if (typeof backendNodeId === "number" && description !== undefined) {
-			descriptions.set(backendNodeId, description)
+		if (identified !== undefined) {
+			if (description !== undefined) descriptions.set(identified, description)
+			if (parent !== undefined) parents.set(identified, parent)
 		}
-		for (const child of Array.isArray(node.children) ? node.children : []) {
-			const childRecord = record(child)
-			if (childRecord !== undefined) queue.push(childRecord)
+		const nested = identified ?? parent
+		for (const key of ["children", "shadowRoots", "pseudoElements"] as const) {
+			for (const child of Array.isArray(node[key]) ? (node[key] as unknown[]) : []) {
+				const childRecord = record(child)
+				if (childRecord !== undefined) queue.push({ node: childRecord, parent: nested })
+			}
+		}
+		const contentDocument = record(node.contentDocument)
+		if (contentDocument !== undefined) queue.push({ node: contentDocument, parent: nested })
+	}
+	return { descriptions, parents }
+}
+
+async function readDocument(channel: CdpChannel): Promise<DocumentReading | undefined> {
+	const document = await channel.call("DOM.getDocument", { depth: -1, pierce: true })
+	return document.ok ? documentReading(document.result) : undefined
+}
+
+/** Whether one node sits inside another, so a hit on it is a hit on that one. */
+function isWithin(parents: Map<number, number>, node: number, ancestor: number): boolean {
+	let current: number | undefined = node
+	for (let step = 0; step < 128 && current !== undefined; step += 1) {
+		if (current === ancestor) return true
+		current = parents.get(current)
+	}
+	return false
+}
+
+/** Whether the page reports one boolean accessibility property as true. */
+function hasProperty(node: Record<string, unknown>, name: string): boolean {
+	const properties = Array.isArray(node.properties) ? node.properties : []
+	return properties.some((property) => {
+		const entry = record(property)
+		return entry?.name === name && record(entry.value)?.value === true
+	})
+}
+
+/**
+ * What the page says about one node in its accessibility tree: the name a
+ * reader would hear, whether it already holds text, and whether it holds focus.
+ *
+ * The text itself is never carried out of this reading. Whether a field is
+ * empty is all any decision here needs, and page content that could be a secret
+ * has no reason to travel further than the question about it.
+ */
+interface NodeAccessibility {
+	readonly name: string
+	readonly holdsValue: boolean
+	readonly focused: boolean
+}
+
+function nodeAccessibility(reply: unknown, backendNodeId: number): NodeAccessibility | undefined {
+	const nodes = record(reply)?.nodes
+	if (!Array.isArray(nodes)) return undefined
+	for (const entry of nodes) {
+		const node = record(entry)
+		// The reply may carry ancestors as well, so the node the caller asked about
+		// is selected by identity rather than by position.
+		if (node === undefined || node.backendDOMNodeId !== backendNodeId) continue
+		const value = record(node.value)?.value
+		return {
+			name: readableText(record(node.name)?.value),
+			holdsValue: typeof value === "string" && value !== "",
+			focused: hasProperty(node, "focused"),
 		}
 	}
-	return descriptions
+	return undefined
+}
+
+async function readNodeAccessibility(
+	channel: CdpChannel,
+	backendNodeId: number,
+): Promise<NodeAccessibility | undefined> {
+	const reply = await channel.call("Accessibility.getPartialAXTree", {
+		backendNodeId,
+		fetchRelatives: false,
+	})
+	return reply.ok ? nodeAccessibility(reply.result, backendNodeId) : undefined
 }
 
 function accessibilityNodes(reply: unknown): readonly AccessibilityNodeReading[] | undefined {
@@ -167,15 +251,10 @@ function accessibilityNodes(reply: unknown): readonly AccessibilityNodeReading[]
 			typeof backendNodeId !== "number" || !Number.isSafeInteger(backendNodeId) ||
 			backendNodeId < 1
 		) continue
-		const properties = Array.isArray(node.properties) ? node.properties : []
-		const focusable = properties.some((property) => {
-			const entryRecord = record(property)
-			return entryRecord?.name === "focusable" && record(entryRecord.value)?.value === true
-		})
 		readings.push({
 			role: readableText(record(node.role)?.value),
 			name: readableText(record(node.name)?.value),
-			focusable,
+			focusable: hasProperty(node, "focusable"),
 			ignored: node.ignored === true,
 			backendNodeId,
 		})
@@ -197,10 +276,14 @@ function interpretElements(
 	for (const node of nodes) {
 		if (node.ignored) continue
 		const description = descriptions.get(node.backendNodeId)
-		const credentialField = description !== undefined && isCredentialField(description)
+		const credentialField = isCredentialField(description, node.name)
 		const actionable = node.focusable ||
 			(actionableRoles as readonly string[]).includes(node.role)
-		if (!actionable && !credentialField) continue
+		// An element a caller can act on always enters the snapshot, and one it
+		// cannot enters only when the page described it as credential material. An
+		// undescribed node is credential by default, so it is never carried in on
+		// that default alone.
+		if (!actionable && !(description !== undefined && credentialField)) continue
 		if (elements.length === snapshotElementLimit) {
 			truncated = true
 			break
@@ -283,10 +366,8 @@ export async function readControlledPageSnapshot(input: {
 			}
 			const before = await readBasis(channel, input.targetId)
 			if (before === undefined) return { kind: "unverified" }
-			const document = await channel.call("DOM.getDocument", { depth: -1, pierce: false })
-			if (!document.ok) return { kind: "unverified" }
-			const descriptions = documentDescriptions(document.result)
-			if (descriptions === undefined) return { kind: "unverified" }
+			const reading = await readDocument(channel)
+			if (reading === undefined) return { kind: "unverified" }
 			const tree = await channel.call("Accessibility.getFullAXTree", {})
 			if (!tree.ok) return { kind: "unverified" }
 			const nodes = accessibilityNodes(tree.result)
@@ -297,7 +378,7 @@ export async function readControlledPageSnapshot(input: {
 			const after = await readBasis(channel, input.targetId)
 			if (after === undefined) return { kind: "unverified" }
 			if (!sameBasis(before, after)) return { kind: "identity_changed" }
-			const { elements, truncated } = interpretElements(nodes, descriptions)
+			const { elements, truncated } = interpretElements(nodes, reading.descriptions)
 			return { kind: "observed", basis: after, elements, truncated }
 		},
 	)
@@ -308,7 +389,15 @@ export type ControlledPageAction =
 	| { readonly kind: "fill"; readonly value: string }
 
 /** What one act on one element did, before the page identity is read again. */
-type ActionStep = "acted" | "element_absent" | "unverified"
+type ActionStep =
+	| { readonly kind: "acted" }
+	| { readonly kind: "element_absent" }
+	| { readonly kind: "undeliverable"; readonly reason: UndeliverableAct }
+	| { readonly kind: "unverified" }
+
+function undeliverable(reason: UndeliverableAct): ActionStep {
+	return { kind: "undeliverable", reason }
+}
 
 /**
  * Whether a navigation this element caused is one the caller asked for.
@@ -331,40 +420,119 @@ function mayNavigate(description: DomNodeDescription): boolean {
 	return nodeName === "BUTTON" && attributes.type === undefined
 }
 
-/** Clicks the centre of the element's box, or says why it could not. */
-async function clickNode(channel: CdpChannel, backendNodeId: number): Promise<ActionStep> {
-	const box = await channel.call("DOM.getBoxModel", { backendNodeId })
-	if (!box.ok) return "element_absent"
-	const content = record(record(box.result)?.model)?.content
-	if (!Array.isArray(content) || content.length < 8) return "element_absent"
-	const points = content.slice(0, 8)
-	if (!points.every((value) => typeof value === "number" && Number.isFinite(value))) {
-		return "element_absent"
+interface ClickPoint {
+	readonly x: number
+	readonly y: number
+}
+
+/**
+ * One point on the element's own content, from the first quad the page reports
+ * for it.
+ *
+ * A content quad is the area the element actually occupies, which a box drawn
+ * around it is not: a wrapped link's box spans text belonging to other elements,
+ * and its centre can sit outside the link entirely. The point is rounded to
+ * whole numbers, because that is how the page is asked what is at it.
+ */
+function contentPoint(reply: unknown): ClickPoint | undefined {
+	const quads = record(reply)?.quads
+	const quad = Array.isArray(quads) ? quads[0] : undefined
+	if (!Array.isArray(quad) || quad.length < 8) return undefined
+	const corners = quad.slice(0, 8)
+	if (!corners.every((value) => typeof value === "number" && Number.isFinite(value))) {
+		return undefined
 	}
-	const x = (points[0]! + points[2]! + points[4]! + points[6]!) / 4
-	const y = (points[1]! + points[3]! + points[5]! + points[7]!) / 4
+	return {
+		x: Math.round((corners[0]! + corners[2]! + corners[4]! + corners[6]!) / 4),
+		y: Math.round((corners[1]! + corners[3]! + corners[5]! + corners[7]!) / 4),
+	}
+}
+
+/**
+ * Whether a click at this point would reach the element the caller referenced.
+ *
+ * The page is asked what is at the point, and the answer must be that element or
+ * something nested inside it: the label inside a button is the button's own
+ * content, and a hit on it is a hit on the button. Anything else is another
+ * element covering it, and a click there is not the click that was asked for.
+ *
+ * This is also what makes the coordinates safe. The point is read in one space
+ * and dispatched in another, and the two are only the same once the element is
+ * in view; asking the page what is at the point closes that gap by refusing
+ * rather than by guessing, because the hit test and the dispatch address the
+ * page the same way.
+ */
+async function hitsReferencedNode(
+	channel: CdpChannel,
+	point: ClickPoint,
+	backendNodeId: number,
+): Promise<boolean> {
+	const hit = await channel.call("DOM.getNodeForLocation", {
+		x: point.x,
+		y: point.y,
+		includeUserAgentShadowDOM: false,
+	})
+	if (!hit.ok) return false
+	const hitNodeId = record(hit.result)?.backendNodeId
+	if (typeof hitNodeId !== "number") return false
+	if (hitNodeId === backendNodeId) return true
+	const reading = await readDocument(channel)
+	return reading !== undefined && isWithin(reading.parents, hitNodeId, backendNodeId)
+}
+
+/**
+ * Clicks a point proved to reach the referenced element, or says why it could
+ * not. The element is brought into view first, because an element outside the
+ * viewport cannot be clicked at all and a page that will not scroll to it is a
+ * page this click cannot reach.
+ */
+async function clickNode(channel: CdpChannel, backendNodeId: number): Promise<ActionStep> {
+	if (!(await channel.call("DOM.scrollIntoViewIfNeeded", { backendNodeId })).ok) {
+		return undeliverable("click_target_unproved")
+	}
+	const quads = await channel.call("DOM.getContentQuads", { backendNodeId })
+	if (!quads.ok) return { kind: "element_absent" }
+	const point = contentPoint(quads.result)
+	if (point === undefined) return undeliverable("click_target_unproved")
+	if (!(await hitsReferencedNode(channel, point, backendNodeId))) {
+		return undeliverable("click_target_unproved")
+	}
 	for (const type of ["mousePressed", "mouseReleased"] as const) {
 		const dispatched = await channel.call("Input.dispatchMouseEvent", {
 			type,
-			x,
-			y,
+			x: point.x,
+			y: point.y,
 			button: "left",
 			buttons: type === "mousePressed" ? 1 : 0,
 			clickCount: 1,
 		})
-		if (!dispatched.ok) return "unverified"
+		if (!dispatched.ok) return { kind: "unverified" }
 	}
-	return "acted"
+	return { kind: "acted" }
 }
 
-/** Types into the element, or says why it could not. */
+/**
+ * Types into the element, having proved the element is the one holding focus.
+ *
+ * Focus is asked for and then read back, because asking is not the same as
+ * getting it: a focus handler or a focus trap can move focus to a field this
+ * caller never named, and text goes wherever focus went. A field that did not
+ * keep focus is refused before anything is typed.
+ */
 async function typeIntoNode(
 	channel: CdpChannel,
 	backendNodeId: number,
 	value: string,
 ): Promise<ActionStep> {
-	if (!(await channel.call("DOM.focus", { backendNodeId })).ok) return "element_absent"
-	return (await channel.call("Input.insertText", { text: value })).ok ? "acted" : "unverified"
+	if (!(await channel.call("DOM.focus", { backendNodeId })).ok) {
+		return undeliverable("field_not_focusable")
+	}
+	const focused = await readNodeAccessibility(channel, backendNodeId)
+	if (focused === undefined) return undeliverable("field_unreadable")
+	if (!focused.focused) return undeliverable("field_focus_moved")
+	return (await channel.call("Input.insertText", { text: value })).ok
+		? { kind: "acted" }
+		: { kind: "unverified" }
 }
 
 /**
@@ -388,10 +556,36 @@ function outcomeAfterAct(input: {
 }
 
 /**
+ * What a `fill` must prove about the live field before anything is typed, over
+ * and above the identity proofs every act makes.
+ *
+ * The accessible name is part of the classification, so a field labelled
+ * `Username` and carrying no attribute saying so is caught here as well as in
+ * the snapshot that named it. An outcome is returned only when the fill must
+ * stop; `undefined` means the field is one this command may go on to type into.
+ */
+async function refuseUnfillableField(
+	channel: CdpChannel,
+	backendNodeId: number,
+	description: DomNodeDescription,
+): Promise<PageActionOutcome | undefined> {
+	if (!(await channel.call("Accessibility.enable", {})).ok) return { kind: "unverified" }
+	const field = await readNodeAccessibility(channel, backendNodeId)
+	if (field === undefined) return { kind: "undeliverable", reason: "field_unreadable" }
+	if (isCredentialField(description, field.name)) return { kind: "credential_field" }
+	// Warm Browser types into an empty field. Text inserted into a field that
+	// already holds some is appended to it, so a field with content in it is
+	// refused rather than filled with something neither the caller nor the page
+	// asked for.
+	return field.holdsValue ? { kind: "undeliverable", reason: "field_not_empty" } : undefined
+}
+
+/**
  * Acts on one element of the Controlled Page, having proved twice over that it
  * is acting on what the caller named: the page identity still equals the one
  * the reference was issued against, and the live element is still described the
- * way the refusal rules require.
+ * way the refusal rules require. The act itself then proves it reaches that
+ * element before it is delivered.
  */
 export async function actOnControlledPage(input: {
 	readonly port: number
@@ -417,19 +611,25 @@ export async function actOnControlledPage(input: {
 			if (!described.ok) return { kind: "element_absent" }
 			const description = describedNode(record(record(described.result)?.node) ?? {})
 			if (description === undefined) return { kind: "element_absent" }
-			if (input.action.kind === "fill" && isCredentialField(description)) {
-				return { kind: "credential_field" }
+			if (input.action.kind === "fill") {
+				const refusal = await refuseUnfillableField(channel, input.backendNodeId, description)
+				if (refusal !== undefined) return refusal
 			}
 			// The page identity is proved once more immediately before the act. The
 			// reads above take time, and a navigation that landed during them would
 			// otherwise receive input meant for the document that is gone.
+			//
+			// The act then keeps proving. Its own last reading before it dispatches
+			// is about the referenced node itself, and a node identity belongs to one
+			// document, so a document that arrived after this proof fails that
+			// reading rather than receiving the input.
 			const atDispatch = await readBasis(channel, input.targetId)
 			if (atDispatch === undefined) return { kind: "unverified" }
 			if (!sameBasis(atDispatch, input.basis)) return { kind: "identity_changed" }
 			const step = input.action.kind === "click"
 				? await clickNode(channel, input.backendNodeId)
 				: await typeIntoNode(channel, input.backendNodeId, input.action.value)
-			if (step !== "acted") return { kind: step }
+			if (step.kind !== "acted") return step
 			const after = await readBasis(channel, input.targetId)
 			if (after === undefined) return { kind: "unverified" }
 			return outcomeAfterAct({ action: input.action, description, atDispatch, after })

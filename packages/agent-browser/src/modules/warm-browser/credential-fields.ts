@@ -62,7 +62,20 @@ function normalise(value: string): string {
 	return value.toLowerCase().replaceAll(/[^a-z0-9]/g, "")
 }
 
-export function isCredentialField(description: DomNodeDescription): boolean {
+/**
+ * Classifies one field from what the page says about it and from the name a
+ * reader would hear.
+ *
+ * The accessible name is part of the identity: a field labelled `Username` with
+ * no attribute saying so is still the field that names the account. A field this
+ * Module could not describe at all is also treated as credential material,
+ * because an undescribed field cannot be ruled out and a refusal is recoverable.
+ */
+export function isCredentialField(
+	description: DomNodeDescription | undefined,
+	accessibleName = "",
+): boolean {
+	if (description === undefined) return true
 	const attributes = description.attributes
 	const type = (attributes.type ?? "").trim().toLowerCase()
 	if ((credentialInputTypes as readonly string[]).includes(type)) return true
@@ -70,8 +83,9 @@ export function isCredentialField(description: DomNodeDescription): boolean {
 	if (autocomplete.some((token) => (credentialAutocompleteTokens as readonly string[]).includes(token))) {
 		return true
 	}
-	const identifier = identifierAttributes
-		.map((attribute) => normalise(attributes[attribute] ?? ""))
-		.join(" ")
+	const identifier = [
+		...identifierAttributes.map((attribute) => normalise(attributes[attribute] ?? "")),
+		normalise(accessibleName),
+	].join(" ")
 	return credentialIdentifierFragments.some((fragment) => identifier.includes(fragment))
 }

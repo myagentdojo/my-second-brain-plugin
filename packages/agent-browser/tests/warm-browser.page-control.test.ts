@@ -271,6 +271,12 @@ test("the Controlled Page socket is the one Warm Browser derives, not the one de
 		`ws://127.0.0.1:${fixture.port}/devtools/page/DECOY`,
 	)
 	expect(fixture.attachedTargets()).toEqual(["/devtools/page/page-1"])
+	// The advertised socket names no target that exists, and the endpoint answers
+	// it the way a browser answers a stale one. A Module that followed the
+	// advertisement would have had no conversation to hold at all.
+	const decoy = await fetch(`http://127.0.0.1:${fixture.port}/devtools/page/DECOY`)
+	expect(decoy.status).toBe(404)
+	expect(fixture.attachedTargets()).toEqual(["/devtools/page/page-1"])
 })
 
 test("a fresh Snapshot Generation invalidates every earlier reference", async () => {
@@ -845,10 +851,14 @@ test("an element that has left the Controlled Page is refused as a stale referen
 				role: "button",
 				name: "Ghost",
 				nodeName: "BUTTON",
+				box: [10, 10, 80, 24],
 			},
 		],
 	})
 	const snapshot = await takeSnapshot(probe, "ghost-snapshot")
+	// The element the reference names is gone from the document, so the page can
+	// no longer describe it at all.
+	fixture.setElements([])
 
 	const result = await runProductionCliAsync(probe, [
 		"click",
@@ -983,7 +993,11 @@ test.each([
 	["open", ["open"], "The --url option is required by open."],
 	["click", ["click"], "The --ref option is required by click."],
 	["fill", ["fill", "--ref", "e1@snapshot-x"], "The --value option is required by fill."],
-	["snapshot", ["snapshot", "--port", "9333"], "Warm Browser received an unsupported argument."],
+	[
+		"snapshot",
+		["snapshot", "--port", "9333"],
+		"Warm Browser does not accept the --port option here.",
+	],
 ] as const)("%s states the argument contract it was given wrong", async (_name, argv, message) => {
 	const probe = productionCliProbe({ processTable: verifiedReading(systemRows) })
 
@@ -1284,7 +1298,9 @@ test("a navigation that wins after the dispatch is never reported as a click tha
 			attributes: { type: "button" },
 			box: [10, 10, 80, 24],
 		}],
-		navigateAfterMethod: { method: "DOM.getBoxModel", url: "https://fixture.test/stolen" },
+		// The page moves once the element has been measured, which is after the
+		// identity proof this click made and before the click itself lands.
+		navigateAfterMethod: { method: "DOM.getContentQuads", url: "https://fixture.test/stolen" },
 	})
 	const snapshot = await takeSnapshot(probe, "stolen-click-snapshot")
 
@@ -1451,4 +1467,451 @@ test("independent evidence falsifies a Controlled Page the Browser Session never
 	const refused = await runProductionCliAsync(probe, ["snapshot", "--run-id", "falsified-page"])
 	expectRefusal(refused, 20, { command: "snapshot", resultCode: "CONTROLLED_PAGE_REPLACED" })
 	expect(fixture.attachedTargets()).toEqual([])
+})
+
+test("a click is proved to reach the referenced element before it is dispatched", async () => {
+	const { fixture, probe } = await pageProbe({
+		url: "https://fixture.test/sign-in",
+		elements: signInPage,
+	})
+	const snapshot = await takeSnapshot(probe, "delivery-snapshot")
+
+	const clicked = await runProductionCliAsync(probe, [
+		"click",
+		"--ref",
+		snapshot.elements[3]!.ref,
+		"--run-id",
+		"delivery-click",
+	])
+
+	expect(clicked.stderr).toBe("")
+	expect(clicked.exitCode).toBe(0)
+	// Independent oracle: the element is brought into view, its own quad is read,
+	// and the point is proved to land on it before anything is dispatched. The
+	// point lands on the element itself here, so no document reading is needed to
+	// account for it.
+	const methods = fixture.latestConversation()
+	expect(methods.slice(0, methods.indexOf("Input.dispatchMouseEvent"))).toEqual([
+		"Page.enable",
+		"DOM.enable",
+		"Page.getFrameTree",
+		"DOM.describeNode",
+		"Page.getFrameTree",
+		"DOM.scrollIntoViewIfNeeded",
+		"DOM.getContentQuads",
+		"DOM.getNodeForLocation",
+	])
+	expect(fixture.clicks()).toEqual([{ x: 55, y: 156 }])
+})
+
+test.each([
+	["nothing to click", { noQuads: true }],
+	["a place it cannot be scrolled to", { scrollFails: true }],
+	["something else covering it", { occludedBy: 99 }],
+] as const)("a click is refused when the referenced element has %s", async (_name, trait) => {
+	const { fixture, probe } = await pageProbe({
+		url: "https://fixture.test/sign-in",
+		elements: [
+			{
+				backendNodeId: 99,
+				role: "generic",
+				name: "Overlay",
+				nodeName: "DIV",
+				box: [0, 0, 400, 400],
+				focusable: false,
+			},
+			{
+				backendNodeId: 71,
+				role: "button",
+				name: "Buried",
+				nodeName: "BUTTON",
+				box: [10, 10, 80, 24],
+				...trait,
+			},
+		],
+	})
+	const snapshot = await takeSnapshot(probe, "unreachable-snapshot")
+
+	const clicked = await runProductionCliAsync(probe, [
+		"click",
+		"--ref",
+		snapshot.elements.at(-1)!.ref,
+		"--run-id",
+		"unreachable-click",
+	])
+
+	expectError(clicked, 21, {
+		schemaVersion: 1,
+		status: "error",
+		command: "click",
+		resultCode: "ELEMENT_NOT_ACTIONABLE",
+		runId: "unreachable-click",
+		transactionState: "unchanged",
+		retrySafe: false,
+		nextAction: "Run warm-browser snapshot --run-id ID to issue fresh Snapshot References.",
+		message: "Warm Browser could not prove the click would reach the referenced element.",
+	})
+	expect(fixture.clicks()).toEqual([])
+})
+
+test("a click that lands on the referenced element's own content is delivered", async () => {
+	const { fixture, probe } = await pageProbe({
+		url: "https://fixture.test/sign-in",
+		elements: [
+			// The label sits inside the button and takes the hit, which is the
+			// referenced element's own content rather than something covering it.
+			{
+				backendNodeId: 82,
+				role: "generic",
+				name: "Continue",
+				nodeName: "SPAN",
+				childOf: 81,
+				box: [10, 10, 60, 20],
+				focusable: false,
+			},
+			{
+				backendNodeId: 81,
+				role: "button",
+				name: "Continue",
+				nodeName: "BUTTON",
+				box: [0, 0, 80, 40],
+			},
+		],
+	})
+	const snapshot = await takeSnapshot(probe, "descendant-snapshot")
+
+	const clicked = await runProductionCliAsync(probe, [
+		"click",
+		"--ref",
+		snapshot.elements[0]!.ref,
+		"--run-id",
+		"descendant-click",
+	])
+
+	expect(clicked.stderr).toBe("")
+	expect(clicked.exitCode).toBe(0)
+	expect(fixture.clicks()).toEqual([{ x: 40, y: 20 }])
+	// The hit was not the referenced node itself, so the document was read to
+	// account for it, and it accounted for it as the button's own content.
+	expect(fixture.latestConversation()).toContain("DOM.getDocument")
+})
+
+test("a fill proves the referenced field holds focus and ends up holding the value", async () => {
+	const { fixture, probe } = await pageProbe({
+		url: "https://fixture.test/sign-in",
+		elements: signInPage,
+	})
+	const snapshot = await takeSnapshot(probe, "focus-proof-snapshot")
+
+	const filled = await runProductionCliAsync(probe, [
+		"fill",
+		"--ref",
+		snapshot.elements[4]!.ref,
+		"--value",
+		"warm browser",
+		"--run-id",
+		"focus-proof-fill",
+	])
+
+	expect(filled.stderr).toBe("")
+	expect(filled.exitCode).toBe(0)
+	expect(fixture.focusedNode()).toBe(16)
+	expect(fixture.fieldValue(16)).toBe("warm browser")
+})
+
+test.each([
+	[
+		"focus moved somewhere else",
+		{ focusMovesTo: 13 },
+		"Warm Browser could not prove the referenced field holds focus.",
+	],
+	[
+		"the field could not take focus",
+		{ focusFails: true },
+		"Warm Browser could not focus the referenced field.",
+	],
+	[
+		"the field already holds a value",
+		{ value: "already here" },
+		"Warm Browser fills an empty field, and the referenced one already holds a value.",
+	],
+] as const)("a fill is refused when %s", async (_name, trait, message) => {
+	const { fixture, probe } = await pageProbe({
+		url: "https://fixture.test/sign-in",
+		elements: [
+			{
+				backendNodeId: 13,
+				role: "textbox",
+				name: "Password",
+				nodeName: "INPUT",
+				attributes: { type: "password" },
+				box: [10, 100, 200, 24],
+			},
+			{
+				backendNodeId: 91,
+				role: "searchbox",
+				name: "Search",
+				nodeName: "INPUT",
+				attributes: { type: "search", name: "q" },
+				box: [10, 10, 200, 24],
+				...trait,
+			},
+		],
+	})
+	const snapshot = await takeSnapshot(probe, "fill-refusal-snapshot")
+
+	const filled = await runProductionCliAsync(probe, [
+		"fill",
+		"--ref",
+		snapshot.elements.at(-1)!.ref,
+		"--value",
+		"warm browser",
+		"--run-id",
+		"fill-refusal",
+	])
+
+	expectRefusal(filled, 21, {
+		command: "fill",
+		resultCode: "ELEMENT_NOT_ACTIONABLE",
+		transactionState: "unchanged",
+		message,
+	})
+	// Nothing was typed anywhere, least of all into the password field beside it.
+	expect(fixture.insertedText()).toEqual([])
+	expect(fixture.fieldValue(13)).toBe("")
+})
+
+test.each([
+	[
+		"a label naming it and no attributes at all",
+		{ role: "textbox", name: "Username", nodeName: "INPUT", attributes: {} },
+	],
+	[
+		"a password type inside a shadow root",
+		{
+			role: "textbox",
+			name: "Secret",
+			nodeName: "INPUT",
+			attributes: { type: "password" },
+			inShadowRoot: true,
+		},
+	],
+	[
+		"no description the document read could give",
+		{ role: "textbox", name: "Mystery", nodeName: "INPUT", attributes: {}, undescribed: true },
+	],
+] as const)("a snapshot names a credential field carrying %s", async (_name, element) => {
+	const { fixture, probe } = await pageProbe({
+		url: "https://fixture.test/sign-in",
+		elements: [{ backendNodeId: 95, box: [10, 10, 200, 24], ...element }],
+	})
+
+	const snapshot = await takeSnapshot(probe, "credential-shape-snapshot")
+
+	expect(snapshot.data).toMatchObject({
+		elements: [{ ref: `e1@${snapshot.generationId}`, credentialField: true }],
+	})
+	const attachedBefore = fixture.attachedTargets().length
+	const filled = await runProductionCliAsync(probe, [
+		"fill",
+		"--ref",
+		snapshot.elements[0]!.ref,
+		"--value",
+		"someone",
+		"--run-id",
+		"credential-shape-fill",
+	])
+	expectRefusal(filled, 21, { command: "fill", resultCode: "CREDENTIAL_FIELD_REFUSED" })
+	expect(fixture.attachedTargets().length).toBe(attachedBefore)
+})
+
+test("a fill is refused when the page will not describe the referenced field", async () => {
+	const { fixture, probe } = await pageProbe({
+		url: "https://fixture.test/sign-in",
+		elements: signInPage,
+		failMethods: ["Accessibility.getPartialAXTree"],
+	})
+	const snapshot = await takeSnapshot(probe, "unreadable-field-snapshot")
+
+	const filled = await runProductionCliAsync(probe, [
+		"fill",
+		"--ref",
+		snapshot.elements[4]!.ref,
+		"--value",
+		"warm browser",
+		"--run-id",
+		"unreadable-field-fill",
+	])
+
+	expectRefusal(filled, 21, {
+		command: "fill",
+		resultCode: "ELEMENT_NOT_ACTIONABLE",
+		transactionState: "unchanged",
+		message: "Warm Browser could not read the referenced field before typing into it.",
+	})
+	// A field nothing could be proved about was never focused, let alone typed in.
+	expect(fixture.focusedNodes()).toEqual([])
+	expect(fixture.insertedText()).toEqual([])
+})
+
+test("fill refuses a field the page renamed a login identifier after the snapshot", async () => {
+	const { fixture, probe } = await pageProbe({
+		url: "https://fixture.test/sign-in",
+		elements: [{
+			backendNodeId: 22,
+			role: "textbox",
+			name: "Code",
+			nodeName: "INPUT",
+			attributes: { type: "text", name: "code" },
+			box: [10, 10, 100, 20],
+			// No attribute ever says so; only the name a reader would hear changes.
+			becomesName: "Username",
+		}],
+	})
+	const snapshot = await takeSnapshot(probe, "renamed-snapshot")
+	expect(snapshot.data).toMatchObject({
+		elements: [{ ref: `e1@${snapshot.generationId}`, credentialField: false }],
+	})
+
+	const filled = await runProductionCliAsync(probe, [
+		"fill",
+		"--ref",
+		snapshot.elements[0]!.ref,
+		"--value",
+		"someone",
+		"--run-id",
+		"renamed-fill",
+	])
+
+	expectRefusal(filled, 21, { command: "fill", resultCode: "CREDENTIAL_FIELD_REFUSED" })
+	expect(fixture.focusedNodes()).toEqual([])
+	expect(fixture.insertedText()).toEqual([])
+})
+
+test("a field inside a shadow root is classified from what the page says about it", async () => {
+	const { fixture, probe } = await pageProbe({
+		url: "https://fixture.test/sign-in",
+		elements: [{
+			backendNodeId: 96,
+			role: "searchbox",
+			name: "Search",
+			nodeName: "INPUT",
+			attributes: { type: "search", name: "q" },
+			box: [10, 10, 200, 24],
+			inShadowRoot: true,
+		}],
+	})
+
+	const snapshot = await takeSnapshot(probe, "shadow-ordinary-snapshot")
+
+	// The page describes it as an ordinary search field, and the snapshot says so
+	// rather than refusing a field it could not see into.
+	expect(snapshot.data).toMatchObject({
+		elements: [{ ref: `e1@${snapshot.generationId}`, credentialField: false }],
+	})
+	const filled = await runProductionCliAsync(probe, [
+		"fill",
+		"--ref",
+		snapshot.elements[0]!.ref,
+		"--value",
+		"warm browser",
+		"--run-id",
+		"shadow-ordinary-fill",
+	])
+	expect(filled.stderr).toBe("")
+	expect(filled.exitCode).toBe(0)
+	expect(fixture.fieldValue(96)).toBe("warm browser")
+})
+
+test("a same-document navigation is still a page this reference does not describe", async () => {
+	const { fixture, probe } = await pageProbe({
+		url: "https://fixture.test/sign-in",
+		elements: signInPage,
+	})
+	const snapshot = await takeSnapshot(probe, "same-document-snapshot")
+	// The document load is unchanged; only where the page is has changed.
+	fixture.moveWithinDocument("https://fixture.test/sign-in#step-2")
+
+	const clicked = await runProductionCliAsync(probe, [
+		"click",
+		"--ref",
+		snapshot.elements[3]!.ref,
+		"--run-id",
+		"same-document-click",
+	])
+
+	expectRefusal(clicked, 21, {
+		command: "click",
+		resultCode: "PAGE_IDENTITY_CHANGED",
+		transactionState: "invalidated",
+	})
+	expect(fixture.clicks()).toEqual([])
+})
+
+test("an invalidation that had nothing to drop does not claim it dropped something", async () => {
+	const { fixture, probe } = await pageProbe({
+		url: "https://fixture.test/sign-in",
+		elements: signInPage,
+	})
+	// No snapshot was ever taken, so this session holds no references at all.
+	fixture.replacePage("page-2")
+
+	const refused = await runProductionCliAsync(probe, ["status", "--run-id", "nothing-held"])
+
+	expectRefusal(refused, 20, {
+		command: "status",
+		resultCode: "CONTROLLED_PAGE_REPLACED",
+		transactionState: "unchanged",
+	})
+})
+
+test("an unsupported flag is named without echoing what followed it", async () => {
+	const probe = productionCliProbe({ processTable: verifiedReading(systemRows) })
+
+	const result = await runProductionCliAsync(probe, [
+		"snapshot",
+		"--not-a-flag",
+		"s3cr3t-value",
+		"--run-id",
+		"named-argument",
+	])
+
+	expectError(result, 2, {
+		schemaVersion: 1,
+		status: "error",
+		command: "snapshot",
+		resultCode: "USAGE_ERROR",
+		runId: "named-argument",
+		transactionState: "unchanged",
+		retrySafe: false,
+		nextAction: "Run warm-browser help --run-id ID and correct the command arguments.",
+		message: "Warm Browser does not accept the --not-a-flag option here.",
+	})
+	expect(result.stderr).not.toContain("s3cr3t-value")
+})
+
+test("an argument that is not an option is described rather than repeated back", async () => {
+	const probe = productionCliProbe({ processTable: verifiedReading(systemRows) })
+
+	const result = await runProductionCliAsync(probe, [
+		"snapshot",
+		"s3cr3t-value",
+		"--run-id",
+		"bare-argument",
+	])
+
+	expectError(result, 2, {
+		schemaVersion: 1,
+		status: "error",
+		command: "snapshot",
+		resultCode: "USAGE_ERROR",
+		runId: "bare-argument",
+		transactionState: "unchanged",
+		retrySafe: false,
+		nextAction: "Run warm-browser help --run-id ID and correct the command arguments.",
+		message: "Warm Browser accepts options here, and this argument is not one.",
+	})
+	// An argument in a value's place may be a value, and a value is never said
+	// back to a caller that may log the result.
+	expect(result.stderr).not.toContain("s3cr3t-value")
 })

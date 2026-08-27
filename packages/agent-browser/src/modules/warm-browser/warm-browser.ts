@@ -16,6 +16,7 @@ import {
 	SpawnCleanupUnverifiedError,
 	type SuccessEnvelope,
 	type TransactionState,
+	type UndeliverableAct,
 } from "./contract"
 import type { WarmBrowserAdapter } from "./adapter"
 import { fillValueLimit, startingTimeoutMs } from "./bounds"
@@ -178,6 +179,23 @@ function selectorRefusal(runId: string, command: CliCommand | "unknown", flag: s
 	})
 }
 
+/** The shape of an option name, which is the only argument text ever repeated. */
+const optionFlag = /^--[a-z][a-z0-9-]{0,31}$/
+
+/**
+ * Says which argument was rejected, without saying what came with it.
+ *
+ * An option is named, because its name is the thing the caller has to correct
+ * and an option name carries nothing private. Anything else is described rather
+ * than repeated: a bare argument is where a value would be, and a value may be
+ * anything at all, so it is never echoed into a result a caller may log.
+ */
+function unsupportedArgument(argument: string): string {
+	return optionFlag.test(argument)
+		? `Warm Browser does not accept the ${argument} option here.`
+		: "Warm Browser accepts options here, and this argument is not one."
+}
+
 function safeUrl(value: string): URL | undefined {
 	try {
 		return new URL(value)
@@ -254,7 +272,7 @@ function readOptions(
 		const argument = arguments_[index]!
 		if (selectorFlags.has(argument)) selectorRefusal(runId, command, argument)
 		const option = accepted.get(argument)
-		if (option === undefined) usage(runId, command, "Warm Browser received an unsupported argument.")
+		if (option === undefined) usage(runId, command, unsupportedArgument(argument))
 		if (seen.has(option.flag)) usage(runId, command, `The ${option.flag} flag may appear only once.`)
 		if (option.value === null) {
 			seen.set(option.flag, true)
@@ -467,8 +485,8 @@ function adoptControlledPage(
 	state: RunningBrowserSessionState,
 	controlledPageTargetId: string,
 ): RunningBrowserSessionState {
-	const { snapshot: _invalidated, ...rest } = state
-	return { ...rest, endpoint: { ...state.endpoint, controlledPageTargetId } }
+	const rebound = withoutSnapshot(state)
+	return { ...rebound, endpoint: { ...rebound.endpoint, controlledPageTargetId } }
 }
 
 /**
@@ -725,6 +743,7 @@ async function inspectSession(
 			// stops existing here whether or not the caller ever adopts the
 			// replacement, and a later command reloading this receipt cannot find
 			// one to resolve.
+			const transaction = invalidationState(state)
 			invalidateReferences(command, runId, paths, state, "invalidated")
 			staticFailure(
 				command,
@@ -734,7 +753,7 @@ async function inspectSession(
 				"The Browser Session's Controlled Page was replaced by another page.",
 				"Run warm-browser open --url URL --adopt-page --run-id ID to bind the replacement Controlled Page.",
 				false,
-				"invalidated",
+				transaction,
 			)
 		}
 		const adopted = adoptControlledPage(state, verification.endpoint.controlledPageTargetId)
@@ -1185,6 +1204,20 @@ function withoutSnapshot(state: RunningBrowserSessionState): RunningBrowserSessi
 }
 
 /**
+ * What a refusal that drops this session's references may truthfully call
+ * itself.
+ *
+ * A session that held a generation really did lose durable state and says so. A
+ * session that held none lost nothing, and calling that `invalidated` would
+ * claim a loss the caller never suffered.
+ */
+function invalidationState(
+	state: RunningBrowserSessionState,
+): Extract<TransactionState, "invalidated" | "unchanged"> {
+	return state.snapshot === undefined ? "unchanged" : "invalidated"
+}
+
+/**
  * Drops every reference this session issued. Invalidation is durable and it is
  * total: there is no list of dead references to consult later, because the
  * generation they name stops existing.
@@ -1269,6 +1302,34 @@ function refuseReference(
 			"The Snapshot Reference belongs to another Snapshot Generation, another Controlled Page, or a generation that has expired.",
 		] as const)
 	staticFailure(command, runId, resultCode, 21, message, freshSnapshotAction)
+}
+
+/**
+ * The one owner of what an act that could not be delivered says to its caller.
+ *
+ * Each reason is a different thing the live page did, and each is said plainly,
+ * because "not actionable" alone would leave the caller guessing between an
+ * element something is covering, a field that would not hold focus, and a field
+ * that already has content in it. All of them are answered by taking a fresh
+ * snapshot and looking again, so they share one result code and one next step.
+ */
+const undeliverableMessages: Readonly<Record<UndeliverableAct, string>> = {
+	click_target_unproved: "Warm Browser could not prove the click would reach the referenced element.",
+	field_unreadable: "Warm Browser could not read the referenced field before typing into it.",
+	field_not_empty: "Warm Browser fills an empty field, and the referenced one already holds a value.",
+	field_not_focusable: "Warm Browser could not focus the referenced field.",
+	field_focus_moved: "Warm Browser could not prove the referenced field holds focus.",
+}
+
+function undeliverableAct(command: PageCommand, runId: string, reason: UndeliverableAct): never {
+	staticFailure(
+		command,
+		runId,
+		"ELEMENT_NOT_ACTIONABLE",
+		21,
+		undeliverableMessages[reason],
+		freshSnapshotAction,
+	)
 }
 
 function credentialRefusal(command: PageCommand, runId: string): never {
@@ -1362,6 +1423,7 @@ async function snapshot(
 		// The page moved, so the generation this session was still holding
 		// described a page that is gone. No new reference was issued and none of
 		// the old ones survives the reading that proved the page moved.
+		const transaction = invalidationState(state)
 		invalidateReferences("snapshot", parsed.runId, paths, state, "invalidated")
 		staticFailure(
 			"snapshot",
@@ -1371,7 +1433,7 @@ async function snapshot(
 			"The Controlled Page moved while it was being read, so no Snapshot Reference was issued.",
 			freshSnapshotAction,
 			false,
-			"invalidated",
+			transaction,
 		)
 	}
 	if (reading.kind === "unverified") {
@@ -1445,6 +1507,7 @@ async function actOnPage(
 	if (outcome.kind === "identity_changed") {
 		// Nothing was dispatched, and nothing survives either: the references were
 		// issued against a page this command has just proved is gone.
+		const transaction = invalidationState(state)
 		invalidateReferences(command, parsed.runId, paths, state, "invalidated")
 		staticFailure(
 			command,
@@ -1454,9 +1517,10 @@ async function actOnPage(
 			"The Controlled Page is no longer the page this Snapshot Reference was issued against.",
 			freshSnapshotAction,
 			false,
-			"invalidated",
+			transaction,
 		)
 	}
+	if (outcome.kind === "undeliverable") undeliverableAct(command, parsed.runId, outcome.reason)
 	if (outcome.kind === "element_absent") {
 		staticFailure(
 			command,

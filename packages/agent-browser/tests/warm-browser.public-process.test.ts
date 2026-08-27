@@ -241,13 +241,13 @@ test("help is one literal agent-native success envelope", () => {
 						{
 							name: "start",
 							sideEffects:
-								"may stop a proved stale owned browser process group, then starts one owned browser process group",
+								"may stop a proved stale owned browser process group and invalidate every earlier Snapshot Reference, then starts one owned browser process group",
 							options: [{ flag: "--port", value: "NUMBER", required: false }],
 						},
 						{
 							name: "status",
 							sideEffects:
-								"may stop a proved stale owned browser process group and remove its private state",
+								"may stop a proved stale owned browser process group, remove its private state, and invalidate every earlier Snapshot Reference",
 							options: [],
 						},
 						{
@@ -266,13 +266,14 @@ test("help is one literal agent-native success envelope", () => {
 						},
 						{
 							name: "click",
-							sideEffects: "dispatches one click on one referenced element of the Controlled Page",
+							sideEffects:
+								"dispatches one click on one referenced element of the Controlled Page and may invalidate every earlier Snapshot Reference",
 							options: [{ flag: "--ref", value: "REFERENCE", required: true }],
 						},
 						{
 							name: "fill",
 							sideEffects:
-								"types one non-secret value into one referenced field of the Controlled Page",
+								"types one non-secret value into one referenced empty field of the Controlled Page and may invalidate every earlier Snapshot Reference",
 							options: [
 								{ flag: "--ref", value: "REFERENCE", required: true },
 								{ flag: "--value", value: "TEXT", required: true },
@@ -280,7 +281,8 @@ test("help is one literal agent-native success envelope", () => {
 						},
 						{
 							name: "stop",
-							sideEffects: "stops one verified owned browser process group",
+							sideEffects:
+								"stops one verified owned browser process group and removes its private state, including every Snapshot Reference",
 							options: [],
 						},
 					],
@@ -299,17 +301,29 @@ test("help states every side effect each command can actually have", () => {
 		["help", "none"],
 		[
 			"start",
-			"may stop a proved stale owned browser process group, then starts one owned browser process group",
+			"may stop a proved stale owned browser process group and invalidate every earlier Snapshot Reference, then starts one owned browser process group",
 		],
-		["status", "may stop a proved stale owned browser process group and remove its private state"],
+		[
+			"status",
+			"may stop a proved stale owned browser process group, remove its private state, and invalidate every earlier Snapshot Reference",
+		],
 		[
 			"open",
 			"navigates the one Controlled Page and invalidates every earlier Snapshot Reference",
 		],
 		["snapshot", "reads the Controlled Page and replaces every earlier Snapshot Reference"],
-		["click", "dispatches one click on one referenced element of the Controlled Page"],
-		["fill", "types one non-secret value into one referenced field of the Controlled Page"],
-		["stop", "stops one verified owned browser process group"],
+		[
+			"click",
+			"dispatches one click on one referenced element of the Controlled Page and may invalidate every earlier Snapshot Reference",
+		],
+		[
+			"fill",
+			"types one non-secret value into one referenced empty field of the Controlled Page and may invalidate every earlier Snapshot Reference",
+		],
+		[
+			"stop",
+			"stops one verified owned browser process group and removes its private state, including every Snapshot Reference",
+		],
 	] as const
 	const result = Bun.spawnSync({
 		cmd: [process.execPath, productionEntry, "help", "--run-id", "effects-run"],
@@ -330,9 +344,11 @@ test("help states every side effect each command can actually have", () => {
 		const advertised = commands.find((command) => command.name === name)?.sideEffects ?? ""
 		expect(advertised, name).toContain("stop a proved stale owned browser process group")
 	}
-	// The three commands that invalidate Snapshot References say so, because a
+	// Every command that reaches the Browser Session can drop the references it
+	// holds, because every one of them proves the Controlled Page identity first
+	// and a page that moved takes its references with it. Each says so, because a
 	// caller holding one has to know its reference did not survive the command.
-	for (const name of ["open", "snapshot"] as const) {
+	for (const name of ["start", "status", "open", "snapshot", "click", "fill", "stop"] as const) {
 		const advertised = commands.find((command) => command.name === name)?.sideEffects ?? ""
 		expect(advertised, name).toContain("Snapshot Reference")
 	}
