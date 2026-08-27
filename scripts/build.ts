@@ -1649,6 +1649,7 @@ const capabilityAssetFiles = [
 ].sort(compareCodeUnits)
 const nonBundledSkillPayloadFiles = [
 	"skills/agent-browser/AGENTS.md",
+	"skills/agent-browser/CODING_STANDARDS.md",
 	"skills/agent-browser/CONTEXT.md",
 	"skills/agent-browser/SKILL.md",
 	"skills/capability-tour/SKILL.md",

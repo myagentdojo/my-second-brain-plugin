@@ -4,8 +4,8 @@
   browser mechanics and repair guidance with Warm Browser.
 - Keep exactly two future Modules: Warm Browser and Private Delivery. Warm
   Browser owns the future Command Vocabulary and Result Vocabulary; Browser
-  Session, Controlled Page, Snapshot Generation, and Snapshot Reference
-  validity remain internal to Warm Browser.
+  Session, Controlled Page, Snapshot Generation, Snapshot Reference validity,
+  and Screenshot ownership remain internal to Warm Browser.
 - Keep the production Adapter fixed and every mock internal. Do not introduce
   a public or general seam.
 - Use the canonical terms in `CONTEXT.md` across the skill, package, CLI, tests,
@@ -26,5 +26,5 @@
 - Keep browser runtime, Playwright dependencies, CLI implementation, catalog
   activation, installation regeneration, and profile changes outside this
   documentation-only Architecture Shell.
-- Keep `CODING_STANDARDS.md` absent until the accepted Architecture Shell and
-  Test Design evidence support the separate Coding Standards checkpoint.
+- Follow [`CODING_STANDARDS.md`](CODING_STANDARDS.md) for the accepted
+  Agent-Plugin-Kit-derived CLI idioms and public-process proof boundary.

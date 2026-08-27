@@ -19,19 +19,25 @@ CLI. Preserve browser-local continuity in the Agent Chrome Profile while
 keeping credential metadata, usernames, passwords, and authentication material
 outside the agent process.
 
+The intended public Command Vocabulary is `start`, `status`, `open`,
+`snapshot`, `screenshot`, `click`, `fill`, `login`, and `stop`.
+
 ## Workflow contract
 
 1. Start or inspect the Browser Session. Use port `9242` unless the current
    start needs an explicit `--port <number>` override.
 2. Take a snapshot and act only through its short-lived Snapshot References.
-3. Treat navigation, page replacement, and a fresh snapshot generation as
+3. Take a Screenshot when visual evidence is needed. Keep the returned private
+   session-owned path within the current task and do not treat it as a Snapshot
+   Reference source or permanent archive.
+4. Treat navigation, page replacement, and a fresh snapshot generation as
    reference-invalidating events. Take another snapshot before continuing.
-4. For login, select the intended username or password field from the current
+5. For login, select the intended username or password field from the current
    snapshot. Require human approval immediately before credential access.
-5. Let Private Delivery resolve exactly one Login item for the current exact
+6. Let Private Delivery resolve exactly one Login item for the current exact
    origin, revalidate that origin, fill one selected field, report only
    non-secret shape, and exit.
-6. Discard earlier references after a private fill. Take a fresh snapshot before
+7. Discard earlier references after a private fill. Take a fresh snapshot before
    any final submit, and require human approval for a consequential submission.
 
 ## Boundaries
@@ -41,6 +47,9 @@ outside the agent process.
   directly from this skill.
 - Use one Browser Session, one Controlled Page, and the existing Agent Chrome
   Profile. Do not create named sessions or manage multiple pages.
+- Screenshots are private session-owned PNG artifacts. Warm Browser returns
+  path, dimensions, and SHA-256 metadata, refuses arbitrary output paths, and
+  removes owned Screenshots on stop or bounded stale-session cleanup.
 - Fail closed when the exact process, CDP endpoint, Controlled Page, origin, or
   unique Credential Match cannot be proved.
 - Cross-origin login frames, other browser applications, other 1Password

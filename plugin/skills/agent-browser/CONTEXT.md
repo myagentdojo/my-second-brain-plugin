@@ -38,6 +38,11 @@ A short-lived element identity whose validity is internal to Warm Browser and
 bound to one Controlled Page and one Snapshot Generation.
 _Avoid_: selector, stable ref, element id
 
+**Screenshot**:
+A visual capture of the Controlled Page owned by its Browser Session and kept
+separate from the structured interaction snapshot.
+_Avoid_: Snapshot, permanent capture, visual archive
+
 **Credential Vault**:
 The one configured 1Password vault eligible for private exact-origin login
 matching. Other accounts and vaults remain outside Agent Browser discovery.
