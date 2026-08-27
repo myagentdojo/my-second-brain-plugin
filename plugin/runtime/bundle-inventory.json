@@ -1,6 +1,11 @@
 {
   "schemaVersion": 1,
   "bundles": {
+    "agent-browser": {
+      "path": "runtime/warm-browser-be2fae1c71e0f472.js",
+      "bytes": 34541,
+      "sha256": "be2fae1c71e0f472dcec87c03361f11b8e9a0ab735fd7c9a3bd80c02f6e288da"
+    },
     "frontier-runner": {
       "path": "runtime/frontier-runner-659b5dedecb84722.js",
       "bytes": 109683,
@@ -24,7 +29,7 @@
   },
   "notices": {
     "path": "THIRD-PARTY-NOTICES.md",
-    "bytes": 3494,
-    "sha256": "20b5719200371f8eae2220d821df7702ec2bc1902fedcde443eb7228a9388b45"
+    "bytes": 14934,
+    "sha256": "d346ce715a8bc2ab11309500e3dc2a21b87a6567d060b6b6eba98b776b3ca04c"
   }
 }

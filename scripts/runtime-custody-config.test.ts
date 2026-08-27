@@ -53,6 +53,7 @@ test("renders one custody launcher for every catalog skill", () => {
 		.map((file) => file.path)
 
 	expect(launchers).toEqual([
+		"plugin/bin/warm-browser",
 		"plugin/bin/frontier-runner",
 		"plugin/bin/hello-world",
 		"plugin/bin/skill-a",
@@ -99,6 +100,21 @@ test("generated launchers resolve the plugin without trusting PATH", () => {
 	expect(result.exitCode).toBe(0)
 	expect(result.stdout.toString().trim()).toBe("run skill-a --")
 	expect(existsSync(sentinelPath)).toBe(false)
+})
+
+test("a projected launcher keeps the logical skill id as its runtime dispatch", () => {
+	const launcher = renderRuntimeCustodyFiles(root).find(
+		(file) => file.path === "plugin/bin/warm-browser",
+	)
+	if (!launcher) throw new Error("warm-browser launcher was not rendered")
+	expect(launcher.contents).toContain('runtime-exec" run agent-browser --')
+	expect(launcher.contents).not.toContain('runtime-exec" run warm-browser --')
+
+	const unchanged = renderRuntimeCustodyFiles(root).find(
+		(file) => file.path === "plugin/bin/skill-a",
+	)
+	if (!unchanged) throw new Error("skill-a launcher was not rendered")
+	expect(unchanged.contents).toContain('runtime-exec" run skill-a --')
 })
 
 test("rejects a runtime lock schema version other than 1", () => {
@@ -285,5 +301,45 @@ test("rejects a skill workspace outside the packages shape", () => {
 	})
 	expect(() => loadSkillCatalog(fixtureRoot)).toThrow(
 		/skill catalog workspace is invalid for skill-a/,
+	)
+})
+
+test("rejects unsafe and colliding launcher projections", () => {
+	const unsafe = custodyFixture((_lock, catalog) => {
+		catalog.skills["agent-browser"].launcher = "../browser"
+	})
+	expect(() => loadSkillCatalog(unsafe)).toThrow(
+		/skill catalog launcher is invalid for agent-browser/,
+	)
+
+	const duplicateProjection = custodyFixture((_lock, catalog) => {
+		catalog.skills["agent-browser"].launcher = "skill-a"
+	})
+	expect(() => loadSkillCatalog(duplicateProjection)).toThrow(
+		/skill catalog launcher skill-a collides between agent-browser and skill-a/,
+	)
+
+	const defaultCollision = custodyFixture((_lock, catalog) => {
+		catalog.skills["warm-browser"] = {
+			entry: "runtime/another-browser.js",
+			runtimeProfile: "bun",
+			workspace: "packages/agent-browser",
+		}
+	})
+	expect(() => loadSkillCatalog(defaultCollision)).toThrow(
+		/skill catalog launcher warm-browser collides between agent-browser and warm-browser/,
+	)
+})
+
+test("rejects two logical skills projecting the same runtime entry", () => {
+	const fixtureRoot = custodyFixture((_lock, catalog) => {
+		catalog.skills["another-skill"] = {
+			entry: "runtime/warm-browser.js",
+			runtimeProfile: "bun",
+			workspace: "packages/agent-browser",
+		}
+	})
+	expect(() => loadSkillCatalog(fixtureRoot)).toThrow(
+		/skill catalog entry runtime\/warm-browser\.js collides between agent-browser and another-skill/,
 	)
 })

@@ -3,7 +3,7 @@
 	"skills": [
 		{
 			"id": "agent-browser",
-			"execution": "model-only",
+			"execution": "bun-backed",
 			"hookDependence": "hook-independent"
 		},
 		{

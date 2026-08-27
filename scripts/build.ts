@@ -771,6 +771,7 @@ export async function bundleWorkspaceSkill(
 	skillId: string,
 	workspace: string,
 	stagingDirectory: string,
+	artifactName = skillId,
 ): Promise<BundleArtifact> {
 	const realRoot = realpathSync(repositoryRoot)
 	const workspaceRoot = join(realRoot, workspace)
@@ -830,7 +831,7 @@ export async function bundleWorkspaceSkill(
 		result = await Bun.build({
 			entrypoints: [entryPoint],
 			outdir: outputDirectory,
-			naming: `${skillId}.js`,
+			naming: `${artifactName}.js`,
 			target: "bun",
 			format: "esm",
 			splitting: false,
@@ -863,7 +864,7 @@ export async function bundleWorkspaceSkill(
 			`bundle emitted native addon artifacts: ${nativeOutputs.join(", ")}`,
 		)
 	}
-	if (outputs.length !== 1 || outputs[0] !== `${skillId}.js`) {
+	if (outputs.length !== 1 || outputs[0] !== `${artifactName}.js`) {
 		throw new BundleValidationError(
 			skillId,
 			"unexpected-output",
@@ -871,12 +872,12 @@ export async function bundleWorkspaceSkill(
 		)
 	}
 
-	const contents = new Uint8Array(readFileSync(join(outputDirectory, `${skillId}.js`)))
+	const contents = new Uint8Array(readFileSync(join(outputDirectory, `${artifactName}.js`)))
 	validateBundleText(skillId, new TextDecoder().decode(contents))
 	const sha256 = sha256Hex(contents)
 	return {
 		skillId,
-		fileName: `${skillId}-${sha256.slice(0, 16)}.js`,
+		fileName: `${artifactName}-${sha256.slice(0, 16)}.js`,
 		bytes: contents.byteLength,
 		sha256,
 		contents,
@@ -1372,7 +1373,7 @@ export function admitDependencyClosure(root: string): AdmittedDependency[] {
 export function renderThirdPartyNotices(dependencies: AdmittedDependency[]): string {
 	const sections = dependencies.map((dependency) => {
 		const heading = `## ${dependency.name}@${dependency.version} (${dependency.license})`
-		const text = dependency.licenseText?.trimEnd()
+		const text = dependency.licenseText?.replace(/\r\n?/g, "\n").trimEnd()
 		return text
 			? `${heading}\n\n${text}\n`
 			: `${heading}\n\nLicense text not distributed by the package.\n`
@@ -1467,8 +1468,15 @@ export async function buildWorkspaceBundles(root: string): Promise<BundleClosure
 			artifacts.push(await buildHelloWorldRuntime(root, stagingDirectory))
 		}
 		for (const [skillId, skill] of workspaceSkills) {
+			const artifactName = skill.entry.slice("runtime/".length, -".js".length)
 			artifacts.push(
-				await bundleWorkspaceSkill(root, skillId, skill.workspace as string, stagingDirectory),
+				await bundleWorkspaceSkill(
+					root,
+					skillId,
+					skill.workspace as string,
+					stagingDirectory,
+					artifactName,
+				),
 			)
 		}
 	} finally {
@@ -1579,7 +1587,7 @@ export function validateBundleClosure(root: string): void {
 		const expectedPath =
 			skill.workspace === undefined
 				? skill.entry
-				: `runtime/${skillId}-${record.sha256.slice(0, 16)}.js`
+				: `${skill.entry.slice(0, -".js".length)}-${record.sha256.slice(0, 16)}.js`
 		if (record.path !== expectedPath) {
 			throw new Error(
 				`bundle closure: invalid bundle path ${record.path} for ${skillId}; run bun run build`,
@@ -1651,7 +1659,6 @@ const nonBundledSkillPayloadFiles = [
 	"skills/agent-browser/AGENTS.md",
 	"skills/agent-browser/CODING_STANDARDS.md",
 	"skills/agent-browser/CONTEXT.md",
-	"skills/agent-browser/SKILL.md",
 	"skills/capability-tour/SKILL.md",
 	"skills/capability-tour/references/capability-reviewer.md",
 	"skills/decision-view/AGENTS.md",
@@ -1732,7 +1739,7 @@ export function validateBunOnlyPayload(root: string): void {
 		readFileSync(join(root, "plugin", "runtime", "bundle-inventory.json"), "utf8"),
 	) as { bundles: Record<string, BundleRecord> }
 	for (const [skillId, skill] of Object.entries(catalog.skills)) {
-		required.push(`bin/${skillId}`, `skills/${skillId}/SKILL.md`)
+		required.push(`bin/${skill.launcher ?? skillId}`, `skills/${skillId}/SKILL.md`)
 		required.push(
 			skill.workspace === undefined
 				? skill.entry
@@ -1774,7 +1781,9 @@ export function validateBunOnlyPayload(root: string): void {
 	const launchers = inventory
 		.filter((path) => path.startsWith("bin/"))
 		.map((path) => path.slice("bin/".length))
-	const expectedLaunchers = Object.keys(catalog.skills).sort(compareCodeUnits)
+	const expectedLaunchers = Object.entries(catalog.skills)
+		.map(([skillId, skill]) => skill.launcher ?? skillId)
+		.sort(compareCodeUnits)
 	if (launchers.join("\0") !== expectedLaunchers.join("\0")) {
 		throw new Error("Bun payload closure: launcher inventory does not match the skill catalog")
 	}

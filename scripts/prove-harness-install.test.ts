@@ -901,6 +901,7 @@ test("AE10: a versioned release changes exact payload evidence without changing 
 })
 
 test.each([
+	"bin/warm-browser",
 	"bin/hello-world",
 	"bin/skill-a",
 	"bin/skill-b",

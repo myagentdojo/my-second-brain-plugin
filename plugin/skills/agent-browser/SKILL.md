@@ -24,8 +24,10 @@ The intended public Command Vocabulary is `start`, `status`, `open`,
 
 ## Workflow contract
 
-1. Start or inspect the Browser Session. Use port `9242` unless the current
-   start needs an explicit `--port <number>` override.
+1. Start or inspect the Browser Session through
+   `<plugin-root>/bin/warm-browser`. Use port `9242` unless the current start
+   needs an explicit `--port <number>` override. Supply `--run-id <ID>` for
+   correlation.
 2. Take a snapshot and act only through its short-lived Snapshot References.
 3. Take a Screenshot when visual evidence is needed. Keep the returned private
    session-owned path within the current task and do not treat it as a Snapshot
@@ -60,6 +62,8 @@ The intended public Command Vocabulary is `start`, `status`, `open`,
 
 ## Current maturity
 
-Maturity: `scaffolded`. This file records the accepted workflow and boundaries,
-but Warm Browser is not implemented, installed, activated, or released. Stop
-and report that state instead of claiming browser behaviour.
+Maturity: `lifecycle-slice`. The generated payload activates Warm Browser
+`help`, `start`, `status`, and `stop`; the other accepted product commands are
+not callable. Profile Cutover, credential delivery, installation, and release
+remain separate tickets. Do not claim profile exclusivity or a real-profile
+launch until their owning proofs complete.

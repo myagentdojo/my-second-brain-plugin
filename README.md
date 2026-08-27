@@ -156,7 +156,7 @@ plugin/
 ├── .codex-plugin/plugin.json
 ├── skills/<id>/SKILL.md
 ├── skill-inventory.json
-├── bin/{frontier-runner,hello-world,skill-a,skill-b}
+├── bin/{frontier-runner,hello-world,skill-a,skill-b,warm-browser}
 ├── THIRD-PARTY-NOTICES.md
 └── runtime/
     ├── runtime-exec

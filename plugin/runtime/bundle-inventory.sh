@@ -2,6 +2,11 @@
 # Generated from bundle-inventory.json by scripts/build.ts. Edit workspace sources, then run bun run build.
 runtime_inventory_select_bundle() {
 	case "$1" in
+	'agent-browser')
+		RUNTIME_BUNDLE_PATH='runtime/warm-browser-be2fae1c71e0f472.js'
+		RUNTIME_BUNDLE_BYTES='34541'
+		RUNTIME_BUNDLE_SHA256='be2fae1c71e0f472dcec87c03361f11b8e9a0ab735fd7c9a3bd80c02f6e288da'
+		;;
 	'frontier-runner')
 		RUNTIME_BUNDLE_PATH='runtime/frontier-runner-659b5dedecb84722.js'
 		RUNTIME_BUNDLE_BYTES='109683'

@@ -74,6 +74,12 @@ test("runtime custody sources generate one thin launcher and checked shell proje
 	expect(catalog).toEqual({
 		schemaVersion: 1,
 		skills: {
+			"agent-browser": {
+				entry: "runtime/warm-browser.js",
+				runtimeProfile: "bun",
+				workspace: "packages/agent-browser",
+				launcher: "warm-browser",
+			},
 			"frontier-runner": {
 				entry: "runtime/frontier-runner.js",
 				runtimeProfile: "bun",
@@ -137,8 +143,13 @@ test("runtime custody sources generate one thin launcher and checked shell proje
 	// Every logical catalog member is active through one generated custody launcher.
 	const { renderRuntimeCustodyFiles } = await import("./runtime-custody-config")
 	const generated = renderRuntimeCustodyFiles(fileURLToPath(new URL("..", import.meta.url)))
-	for (const skillId of Object.keys(catalog.skills)) {
-		const launcher = await Bun.file(new URL(`../plugin/bin/${skillId}`, import.meta.url)).text()
+	for (const [skillId, skill] of Object.entries(
+		catalog.skills as Record<string, { launcher?: string }>,
+	)) {
+		const launcherName = skill.launcher ?? skillId
+		const launcher = await Bun.file(
+			new URL(`../plugin/bin/${launcherName}`, import.meta.url),
+		).text()
 		expect(launcher).toContain(`runtime-exec\" run ${skillId} --`)
 		expect(launcher).not.toContain("hooks/")
 		const skillDocument = await Bun.file(
@@ -146,21 +157,31 @@ test("runtime custody sources generate one thin launcher and checked shell proje
 		).text()
 		expect(skillDocument).not.toContain("Status: not yet invocable")
 	}
-	expect(generated.filter((file) => file.path.startsWith("plugin/bin/")).length).toBe(4)
+	expect(generated.filter((file) => file.path.startsWith("plugin/bin/")).length).toBe(5)
 	const launcherNames = readdirSync(
 		fileURLToPath(new URL("../plugin/bin", import.meta.url)),
 	).sort()
-	expect(launcherNames).toEqual(["frontier-runner", "hello-world", "skill-a", "skill-b"])
+	expect(launcherNames).toEqual([
+		"frontier-runner",
+		"hello-world",
+		"skill-a",
+		"skill-b",
+		"warm-browser",
+	])
 	const bundleInventory = await Bun.file(
 		new URL("../plugin/runtime/bundle-inventory.json", import.meta.url),
 	).json()
 	expect(Object.keys(bundleInventory.bundles).sort()).toEqual([
+		"agent-browser",
 		"frontier-runner",
 		"hello-world",
 		"skill-a",
 		"skill-b",
 	])
 	expect(bundleInventory.bundles).not.toHaveProperty("capability-tour")
+	expect(bundleInventory.bundles["agent-browser"].path).toMatch(
+		/^runtime\/warm-browser-[a-f0-9]{16}\.js$/,
+	)
 
 	const lockProjection = await Bun.file(
 		new URL("../plugin/runtime/runtime-lock.sh", import.meta.url),
@@ -173,4 +194,5 @@ test("runtime custody sources generate one thin launcher and checked shell proje
 	).text()
 	expect(catalogProjection).toContain("Generated from runtime/skill-catalog.json")
 	expect(catalogProjection).toContain("RUNTIME_SKILL_ENTRY='runtime/hello-world.js'")
+	expect(catalogProjection).toContain("RUNTIME_SKILL_ENTRY='runtime/warm-browser.js'")
 })

@@ -1296,15 +1296,25 @@ export function proveInstalledCapabilityEvidence(
 		join(pluginRoot, "runtime", "skill-catalog.sh"),
 		"utf8",
 	)
-	if (JSON.stringify(launchers) !== JSON.stringify(executableSkills)) {
+	if (launchers.length !== executableSkills.length) {
 		throw new Error(`${client} installed launcher inventory differs`)
 	}
+	const claimedLaunchers = new Set<string>()
 	for (const skillId of executableSkills) {
 		if (!catalogProjection.includes(`\n\t${skillId})`)) {
 			throw new Error(`${client} installed runtime catalog omits ${skillId}`)
 		}
-		const launcher = readFileSync(join(pluginRoot, "bin", skillId), "utf8")
-		if (!launcher.includes(`runtime/runtime-exec\" run ${skillId} --`) || launcher.includes("hooks/")) {
+		const matches = launchers.filter((launcherName) => {
+			const contents = readFileSync(join(pluginRoot, "bin", launcherName), "utf8")
+			return contents.includes(`runtime/runtime-exec\" run ${skillId} --`)
+		})
+		if (matches.length !== 1 || claimedLaunchers.has(matches[0]!)) {
+			throw new Error(`${client} installed launcher inventory differs`)
+		}
+		const launcherName = matches[0]!
+		claimedLaunchers.add(launcherName)
+		const launcher = readFileSync(join(pluginRoot, "bin", launcherName), "utf8")
+		if (launcher.includes("hooks/")) {
 			throw new Error(`${client} installed ${skillId} launcher is not hook-independent`)
 		}
 	}

@@ -11,7 +11,7 @@ const glossary = readFileSync(join(skillRoot, "CONTEXT.md"), "utf8")
 const standards = readFileSync(join(skillRoot, "CODING_STANDARDS.md"), "utf8")
 const contextMap = readFileSync(join(root, "CONTEXT-MAP.md"), "utf8")
 
-test("Agent Browser source scaffold follows the repository discovery contract", () => {
+test("Agent Browser lifecycle source follows the repository discovery contract", () => {
 	const requiredPaths = [
 		"plugin/skills/agent-browser/SKILL.md",
 		"plugin/skills/agent-browser/AGENTS.md",
@@ -20,6 +20,12 @@ test("Agent Browser source scaffold follows the repository discovery contract", 
 		"packages/agent-browser/README.md",
 		"packages/agent-browser/scripts/prove-cdp-compatibility.ts",
 		"packages/agent-browser/scripts/prove-cdp-compatibility.test.ts",
+		"packages/agent-browser/src/main.ts",
+		"packages/agent-browser/src/modules/warm-browser/contract.ts",
+		"packages/agent-browser/src/modules/warm-browser/production-adapter.ts",
+		"packages/agent-browser/src/modules/warm-browser/state.ts",
+		"packages/agent-browser/src/modules/warm-browser/warm-browser.ts",
+		"packages/agent-browser/tests/warm-browser.public-process.test.ts",
 		"scripts/agent-browser.test.ts",
 	] as const
 
@@ -30,7 +36,8 @@ test("Agent Browser source scaffold follows the repository discovery contract", 
 	expect(skill).toMatch(/^---\nname: agent-browser\ndescription: "[^"]+"\n---\n/)
 	expect(skill).not.toContain("disable-model-invocation: true")
 	expect(skill).toContain("Read [`CONTEXT.md`](CONTEXT.md) before using this skill.")
-	expect(skill).toContain("Maturity: `scaffolded`")
+	expect(skill).toContain("Maturity: `lifecycle-slice`")
+	expect(skill).toContain("<plugin-root>/bin/warm-browser")
 	expect(guidance).toContain("Agent Browser Source Guidance")
 	expect(glossary).toContain("**Agent Browser**")
 	expect(glossary).toContain("**Warm Browser**")
@@ -44,7 +51,7 @@ test("Agent Browser source scaffold follows the repository discovery contract", 
 	)
 })
 
-test("Agent Browser has the approved dependency-proof workspace shell", () => {
+test("Agent Browser has the approved lifecycle workspace and generated activation", () => {
 	expect(existsSync(join(skillRoot, "CODING_STANDARDS.md"))).toBe(true)
 	const repositoryPackageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8"))
 	expect(repositoryPackageJson.packageManager).toBe("bun@1.4.0")
@@ -57,11 +64,12 @@ test("Agent Browser has the approved dependency-proof workspace shell", () => {
 
 	const packageRoot = join(root, "packages", "agent-browser")
 	const packageJson = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"))
-	expect(packageJson).toEqual({
+		expect(packageJson).toEqual({
 		name: "agent-browser",
 		version: "0.0.0",
 		private: true,
 		type: "module",
+		main: "src/main.ts",
 		scripts: {
 			"prove:cdp": "bun scripts/prove-cdp-compatibility.ts",
 		},
@@ -73,8 +81,9 @@ test("Agent Browser has the approved dependency-proof workspace shell", () => {
 	const moduleRoot = join(packageRoot, "src", "modules")
 	expect(readdirSync(moduleRoot).sort()).toEqual(["private-delivery", "warm-browser"])
 	const warmBrowser = readFileSync(join(moduleRoot, "warm-browser", "README.md"), "utf8")
-	expect(warmBrowser).toContain("exactly two future Agent Browser Modules")
-	expect(warmBrowser).toContain("future Command Vocabulary and Result Vocabulary")
+	expect(warmBrowser).toContain("exactly two Agent Browser Modules")
+	expect(warmBrowser).toContain("owns the Command Vocabulary and Result Vocabulary")
+	expect(warmBrowser).toContain("`start`, `status`, and `stop`")
 	expect(warmBrowser).toContain("Snapshot Generation")
 	expect(warmBrowser).toContain("Screenshot lifecycle")
 	expect(warmBrowser).toContain("private session-owned PNG")
@@ -89,16 +98,23 @@ test("Agent Browser has the approved dependency-proof workspace shell", () => {
 	expect(privateDelivery).toContain("redacted non-secret results")
 	expect(privateDelivery).toMatch(/no public or general\s+seam/)
 
-	expect(existsSync(join(root, "plugin", "bin", "warm-browser"))).toBe(false)
+	expect(existsSync(join(root, "plugin", "bin", "warm-browser"))).toBe(true)
 	expect(existsSync(join(packageRoot, "src", "index.ts"))).toBe(false)
-	expect(existsSync(join(packageRoot, "src", "main.ts"))).toBe(false)
+	expect(existsSync(join(packageRoot, "src", "main.ts"))).toBe(true)
 
-	const catalog = readFileSync(join(root, "runtime", "skill-catalog.json"), "utf8")
-	expect(catalog).not.toContain('"agent-browser"')
+	const catalog = JSON.parse(readFileSync(join(root, "runtime", "skill-catalog.json"), "utf8"))
+	expect(catalog.skills["agent-browser"]).toEqual({
+		entry: "runtime/warm-browser.js",
+		runtimeProfile: "bun",
+		workspace: "packages/agent-browser",
+		launcher: "warm-browser",
+	})
 	const packageText = readFileSync(join(packageRoot, "package.json"), "utf8")
 	expect(packageText).not.toContain("bin")
-	expect(packageText).not.toContain('"playwright"')
+	expect(packageText).toContain('"playwright-core": "1.62.1"')
 	const packageReadme = readFileSync(join(packageRoot, "README.md"), "utf8")
+	expect(packageReadme).toContain("$XDG_STATE_HOME/my-second-brain/warm-browser/")
+	expect(packageReadme).toMatch(/Profile Cutover has not\s+happened/)
 	expect(packageReadme).toContain(
 		"AGENT_BROWSER_CDP_FIXTURE_ACKNOWLEDGED=1 bun run prove:agent-browser-cdp -- --run-id <ID>",
 	)

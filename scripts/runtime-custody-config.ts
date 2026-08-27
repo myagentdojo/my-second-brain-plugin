@@ -32,6 +32,8 @@ export interface SkillCatalogEntry {
 	runtimeProfile: string
 	/** Repository-relative workspace package that authors this skill's bundle. */
 	workspace?: string
+	/** Optional payload launcher basename when the public command differs from the skill id. */
+	launcher?: string
 }
 
 /** The one logical skill catalog owning every runtime-custody skill registration. */
@@ -114,6 +116,8 @@ function validateSkillCatalog(catalog: SkillCatalog, lock: RuntimeLock): void {
 	if (catalog.schemaVersion !== 1) throw new Error("skill catalog schemaVersion must be 1")
 	if (!isRecord(catalog.skills)) throw new Error("skill catalog skills must be an object")
 	if (Object.keys(catalog.skills).length === 0) throw new Error("skill catalog must not be empty")
+	const launcherOwners = new Map<string, string>()
+	const entryOwners = new Map<string, string>()
 	for (const [skillId, skill] of Object.entries(catalog.skills)) {
 		if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(skillId)) {
 			throw new Error(`skill catalog id is invalid: ${skillId}`)
@@ -130,6 +134,24 @@ function validateSkillCatalog(catalog: SkillCatalog, lock: RuntimeLock): void {
 		) {
 			throw new Error(`skill catalog workspace is invalid for ${skillId}`)
 		}
+		if (skill.launcher !== undefined && !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(skill.launcher)) {
+			throw new Error(`skill catalog launcher is invalid for ${skillId}`)
+		}
+		const launcher = skill.launcher ?? skillId
+		const launcherOwner = launcherOwners.get(launcher)
+		if (launcherOwner !== undefined) {
+			throw new Error(
+				`skill catalog launcher ${launcher} collides between ${launcherOwner} and ${skillId}`,
+			)
+		}
+		launcherOwners.set(launcher, skillId)
+		const entryOwner = entryOwners.get(skill.entry)
+		if (entryOwner !== undefined) {
+			throw new Error(
+				`skill catalog entry ${skill.entry} collides between ${entryOwner} and ${skillId}`,
+			)
+		}
+		entryOwners.set(skill.entry, skillId)
 	}
 }
 
@@ -249,7 +271,7 @@ export function renderRuntimeCustodyFiles(root: string): GeneratedFile[] {
 		...Object.keys(catalog.skills)
 			.sort(compareCodeUnits)
 			.map((skillId) => ({
-				path: `plugin/bin/${skillId}`,
+				path: `plugin/bin/${catalog.skills[skillId]?.launcher ?? skillId}`,
 				contents: renderLauncher(skillId),
 			})),
 	]

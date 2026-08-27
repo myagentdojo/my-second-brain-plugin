@@ -393,10 +393,13 @@ test("dependency admission returns the pure-JavaScript permissive-license closur
 		"camelcase@8.0.0",
 		"kleur@4.1.5",
 		"ms@2.1.3",
+		"playwright-core@1.62.1",
 	])
 	for (const dependency of dependencies) {
-		expect(["MIT", "ISC"]).toContain(dependency.license)
-		expect(dependency.licenseText).toContain("Permission")
+		expect(["MIT", "ISC", "Apache-2.0"]).toContain(dependency.license)
+		expect(dependency.licenseText).toContain(
+			dependency.name === "playwright-core" ? "Apache License" : "Permission",
+		)
 	}
 })
 
@@ -1030,6 +1033,19 @@ test("third-party notices carry package name, version, license, and text", () =>
 	expect(notices).toContain("Generated from bun.lock")
 })
 
+test("third-party notices normalize CRLF license text to repository LF", () => {
+	const notices = renderThirdPartyNotices([
+		{
+			name: "playwright-core",
+			version: "1.62.1",
+			license: "Apache-2.0",
+			licenseText: "First license line\r\nSecond license line\r\n",
+		},
+	])
+	expect(notices).not.toContain("\r")
+	expect(notices).toContain("First license line\nSecond license line\n")
+})
+
 test("a phantom bare import fails with a precise unresolved-import error", async () => {
 	const fixture = fixtureWorkspace(`import leftPad from "left-pad";console.log(leftPad("x", 3));`)
 	await expectBundleRejection(fixture, "unresolved-import", /unresolved bare import "left-pad"/)
@@ -1464,6 +1480,7 @@ function runRepositoryBuild(): {
 test("workspace bundles build, relocate, and execute without hooks, workspaces, or node_modules", () => {
 	const result = runRepositoryBuild()
 	expect(Object.keys(result.bundles)).toEqual([
+		"agent-browser",
 		"frontier-runner",
 		"hello-world",
 		"skill-a",
@@ -1478,6 +1495,31 @@ test("workspace bundles build, relocate, and execute without hooks, workspaces, 
 		"capability tour",
 	)
 	const environment = { PATH: "/usr/bin:/bin", HOME: installedRoot }
+	const agentBrowserBundle = result.bundles["agent-browser"]
+	if (agentBrowserBundle === undefined) throw new Error("missing agent-browser bundle")
+	expect(agentBrowserBundle.path).toMatch(/^runtime\/warm-browser-[a-f0-9]{16}\.js$/)
+	const agentBrowser = Bun.spawnSync({
+		cmd: [
+			process.execPath,
+			join(installedRoot, agentBrowserBundle.path),
+			"help",
+			"--run-id",
+			"relocated-help",
+		],
+		cwd: installedRoot,
+		env: environment,
+		stdout: "pipe",
+		stderr: "pipe",
+	})
+	expect(agentBrowser.stderr.toString()).toBe("")
+	expect(agentBrowser.exitCode).toBe(0)
+	expect(JSON.parse(agentBrowser.stdout.toString())).toMatchObject({
+		schemaVersion: 1,
+		status: "ok",
+		command: "help",
+		resultCode: "HELP",
+		runId: "relocated-help",
+	})
 	const helloWorldBundle = result.bundles["hello-world"]
 	if (helloWorldBundle === undefined) throw new Error("missing hello-world bundle")
 	const helloWorld = Bun.spawnSync({

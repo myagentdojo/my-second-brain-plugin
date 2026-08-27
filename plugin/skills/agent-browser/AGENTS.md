@@ -2,8 +2,8 @@
 
 - Keep `SKILL.md` as the Agent Browser workflow owner. Keep deterministic
   browser mechanics and repair guidance with Warm Browser.
-- Keep exactly two future Modules: Warm Browser and Private Delivery. Warm
-  Browser owns the future Command Vocabulary and Result Vocabulary; Browser
+- Keep exactly two Modules: Warm Browser and Private Delivery. Warm Browser
+  owns the Command Vocabulary and Result Vocabulary; Browser
   Session, Controlled Page, Snapshot Generation, Snapshot Reference validity,
   and Screenshot ownership remain internal to Warm Browser.
 - Keep the production Adapter fixed and every mock internal. Do not introduce
@@ -17,14 +17,13 @@
 - Preserve the single Browser Session, single Controlled Page, exact-origin
   Credential Match, field-by-field Private Delivery, and explicit human
   approval boundaries.
-- Keep the scaffold truthful. Do not claim implementation, native discovery,
-  installation, activation, release, or credential safety without proof at the
-  owning seam.
+- Keep maturity truthful. Do not claim Profile Cutover, installation, release,
+  or credential safety without proof at the owning seam.
 - Use the Agent Plugin Kit only as the pattern for one domain owner of Command
   Vocabulary and Result Vocabulary. Do not add its facade, Branch Station,
   Station Map, LogTape, events, telemetry, or audit machinery.
 - Keep browser runtime, Playwright dependencies, CLI implementation, catalog
-  activation, installation regeneration, and profile changes outside this
-  documentation-only Architecture Shell.
+  activation, and installation generation in their owning package, runtime
+  sources, and build pipeline. Keep profile changes outside this skill source.
 - Follow [`CODING_STANDARDS.md`](CODING_STANDARDS.md) for the accepted
   Agent-Plugin-Kit-derived CLI idioms and public-process proof boundary.
