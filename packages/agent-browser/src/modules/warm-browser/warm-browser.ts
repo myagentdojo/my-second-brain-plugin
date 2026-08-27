@@ -200,6 +200,19 @@ function identityFailure(command: SliceCommand, runId: string): never {
 	)
 }
 
+function launchCleanupUnverified(runId: string, transactionState: TransactionState): never {
+	staticFailure(
+		"start",
+		runId,
+		"UNEXPECTED_FAILURE",
+		1,
+		"Warm Browser could not verify cleanup of its launched browser process group.",
+		"Inspect the durable launch intent and marker-matched processes before retrying.",
+		false,
+		transactionState,
+	)
+}
+
 function hasLaunchContract(
 	observed: BrowserProcessIdentity,
 	executable: string,
@@ -685,19 +698,13 @@ async function start(
 	} catch (error) {
 		if (error instanceof WarmBrowserFailure) throw error
 		if (error instanceof SpawnCleanupUnverifiedError) {
-			staticFailure(
-				"start",
-				parsed.runId,
-				"UNEXPECTED_FAILURE",
-				1,
-				"Warm Browser could not verify cleanup of its launched browser process group.",
-				"Inspect the durable launch intent and marker-matched processes before retrying.",
-				false,
-				priorTx,
-			)
+			launchCleanupUnverified(parsed.runId, priorTx)
 		}
 		if (spawned !== undefined) {
-			if (await adapter.terminateProcessGroup(spawned)) removeOwnedState(paths, sessionId)
+			if (!(await adapter.terminateProcessGroup(spawned))) {
+				launchCleanupUnverified(parsed.runId, priorTx)
+			}
+			removeOwnedState(paths, sessionId)
 		} else if (intentWritten) {
 			removeOwnedState(paths, sessionId)
 		} else {

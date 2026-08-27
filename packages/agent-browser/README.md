@@ -29,6 +29,11 @@ that ownership algorithm. Whether installed Google Chrome retains this unknown
 marker flag in its process-table command line still requires the separately
 acknowledged real-Chrome qualification; this ticket does not claim that proof.
 
+A launched process group that Warm Browser cannot prove it stopped is never
+reported as a rollback. That failure keeps the durable intent, keeps the live
+process, and returns the unverified-cleanup result so recovery can inspect the
+exact marker.
+
 Private one-owner state lives at
 `$XDG_STATE_HOME/my-second-brain/warm-browser/` (falling back to
 `$HOME/.local/state/my-second-brain/warm-browser/`). Directories and the durable

@@ -22,6 +22,7 @@ interface FixturePlan {
 	readonly launchProcessSecondQueryCount?: number
 	readonly portStatus?: "free" | "occupied" | "unverifiable"
 	readonly endpointKind?: EndpointVerification["kind"]
+	readonly verifyThrows?: boolean
 	readonly holdVerificationUntil?: string
 	readonly holdSpawnReturnUntil?: string
 	readonly crashBeforeVerify?: boolean
@@ -173,6 +174,7 @@ const adapter: WarmBrowserAdapter = {
 	verifyEndpoint: async ({ port, process: expected }) => {
 		const currentPlan = plan()
 		if (currentPlan.holdVerificationUntil) await waitFor(currentPlan.holdVerificationUntil)
+		if (currentPlan.verifyThrows) throw new Error("fixture verification failure")
 		if (currentPlan.crashBeforeVerify) {
 			const current = ledger()
 			const observed = current.processes.find((processIdentity) =>

@@ -772,6 +772,55 @@ test("unverified post-spawn cleanup preserves durable launch intent and live pro
 	expect(actions(testFixture).map((entry) => entry.action)).toEqual(["spawn"])
 })
 
+test("an unexpected post-spawn failure reports rollback only after the owned group is stopped", () => {
+	const testFixture = fixture({ verifyThrows: true })
+	const result = run(testFixture, ["start", "--run-id", "post-spawn-rollback"])
+	expectError(result, 1, {
+		schemaVersion: 1,
+		status: "error",
+		command: "start",
+		resultCode: "UNEXPECTED_FAILURE",
+		runId: "post-spawn-rollback",
+		transactionState: "rolled_back",
+		retrySafe: false,
+		nextAction: "Inspect private state and the owned process group before retrying.",
+		message: "Warm Browser start failed unexpectedly.",
+	})
+	expect(existsSync(testFixture.sessionPath)).toBe(false)
+	expect(existsSync(testFixture.lockPath)).toBe(false)
+	expect(readJson(join(testFixture.fakeRoot, "processes.json"))).toMatchObject({
+		processes: [{ alive: false }],
+	})
+	expect(actions(testFixture).map((entry) => entry.action)).toEqual(["spawn", "terminate"])
+})
+
+test("an unstoppable owned group after an unexpected failure never claims a rollback", () => {
+	const testFixture = fixture({ verifyThrows: true, terminateFails: true })
+	const result = run(testFixture, ["start", "--run-id", "post-spawn-unstoppable"])
+	expectError(result, 1, {
+		schemaVersion: 1,
+		status: "error",
+		command: "start",
+		resultCode: "UNEXPECTED_FAILURE",
+		runId: "post-spawn-unstoppable",
+		transactionState: "unchanged",
+		retrySafe: false,
+		nextAction: "Inspect the durable launch intent and marker-matched processes before retrying.",
+		message: "Warm Browser could not verify cleanup of its launched browser process group.",
+	})
+	expect(readJson(testFixture.sessionPath)).toMatchObject({
+		phase: "starting",
+		sessionId: "session-1",
+		launchMarker: "session-1",
+		process: { pid: 4101, processGroupId: 4101 },
+	})
+	expect(existsSync(testFixture.lockPath)).toBe(true)
+	expect(readJson(join(testFixture.fakeRoot, "processes.json"))).toMatchObject({
+		processes: [{ alive: true }],
+	})
+	expect(actions(testFixture).map((entry) => entry.action)).toEqual(["spawn"])
+})
+
 test("status terminates only an exact stale starting owner before cleanup", () => {
 	const testFixture = fixture()
 	expect(run(testFixture, ["start", "--run-id", "stale-start"]).exitCode).toBe(0)

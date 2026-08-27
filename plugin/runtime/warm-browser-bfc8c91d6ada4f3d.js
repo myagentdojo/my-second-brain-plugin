@@ -579,6 +579,9 @@ function inspectionFailure(command, runId, tx = "unchanged") {
 function identityFailure(command, runId) {
   staticFailure(command, runId, "PROCESS_IDENTITY_UNVERIFIED", 20, "The stored browser process identity does not match the live process.", "Inspect the live process and private Warm Browser state; do not signal the stored process id.");
 }
+function launchCleanupUnverified(runId, transactionState) {
+  staticFailure("start", runId, "UNEXPECTED_FAILURE", 1, "Warm Browser could not verify cleanup of its launched browser process group.", "Inspect the durable launch intent and marker-matched processes before retrying.", false, transactionState);
+}
 function hasLaunchContract(observed, executable, profileRoot, port, marker) {
   const hasArgument = (argument) => ` ${observed.commandLine} `.includes(` ${argument} `);
   return observed.processGroupId === observed.pid && observed.executable === executable && observed.commandLine.startsWith(executable) && (hasArgument(`--user-data-dir=${profileRoot}`) || hasArgument(`--user-data-dir="${profileRoot}"`)) && hasArgument("--remote-debugging-address=127.0.0.1") && hasArgument(`--remote-debugging-port=${port}`) && hasArgument(`--agent-browser-launch-marker=${marker}`);
@@ -818,11 +821,13 @@ async function start(parsed, paths, adapter) {
     if (error instanceof WarmBrowserFailure)
       throw error;
     if (error instanceof SpawnCleanupUnverifiedError) {
-      staticFailure("start", parsed.runId, "UNEXPECTED_FAILURE", 1, "Warm Browser could not verify cleanup of its launched browser process group.", "Inspect the durable launch intent and marker-matched processes before retrying.", false, priorTx);
+      launchCleanupUnverified(parsed.runId, priorTx);
     }
     if (spawned !== undefined) {
-      if (await adapter.terminateProcessGroup(spawned))
-        removeOwnedState(paths, sessionId);
+      if (!await adapter.terminateProcessGroup(spawned)) {
+        launchCleanupUnverified(parsed.runId, priorTx);
+      }
+      removeOwnedState(paths, sessionId);
     } else if (intentWritten) {
       removeOwnedState(paths, sessionId);
     } else {
