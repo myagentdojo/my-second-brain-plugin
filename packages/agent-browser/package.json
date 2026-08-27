@@ -2,5 +2,11 @@
   "name": "agent-browser",
   "version": "0.0.0",
   "private": true,
-  "type": "module"
+  "type": "module",
+  "scripts": {
+    "prove:cdp": "bun scripts/prove-cdp-compatibility.ts"
+  },
+  "dependencies": {
+    "playwright-core": "1.62.1"
+  }
 }

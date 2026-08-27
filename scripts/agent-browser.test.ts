@@ -17,6 +17,8 @@ test("Agent Browser source scaffold follows the repository discovery contract", 
 		"plugin/skills/agent-browser/AGENTS.md",
 		"plugin/skills/agent-browser/CONTEXT.md",
 		"plugin/skills/agent-browser/CODING_STANDARDS.md",
+		"packages/agent-browser/scripts/prove-cdp-compatibility.ts",
+		"packages/agent-browser/scripts/prove-cdp-compatibility.test.ts",
 		"scripts/agent-browser.test.ts",
 	] as const
 
@@ -41,8 +43,13 @@ test("Agent Browser source scaffold follows the repository discovery contract", 
 	)
 })
 
-test("Agent Browser has the approved documentation-only workspace shell", () => {
+test("Agent Browser has the approved dependency-proof workspace shell", () => {
 	expect(existsSync(join(skillRoot, "CODING_STANDARDS.md"))).toBe(true)
+	const repositoryPackageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8"))
+	expect(repositoryPackageJson.packageManager).toBe("bun@1.4.0")
+	expect(repositoryPackageJson.scripts["prove:agent-browser-cdp"]).toBe(
+		"bun packages/agent-browser/scripts/prove-cdp-compatibility.ts",
+	)
 
 	const packageRoot = join(root, "packages", "agent-browser")
 	const packageJson = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"))
@@ -51,6 +58,12 @@ test("Agent Browser has the approved documentation-only workspace shell", () => 
 		version: "0.0.0",
 		private: true,
 		type: "module",
+		scripts: {
+			"prove:cdp": "bun scripts/prove-cdp-compatibility.ts",
+		},
+		dependencies: {
+			"playwright-core": "1.62.1",
+		},
 	})
 
 	const moduleRoot = join(packageRoot, "src", "modules")
@@ -79,7 +92,6 @@ test("Agent Browser has the approved documentation-only workspace shell", () => 
 	const catalog = readFileSync(join(root, "runtime", "skill-catalog.json"), "utf8")
 	expect(catalog).not.toContain('"agent-browser"')
 	const packageText = readFileSync(join(packageRoot, "package.json"), "utf8")
-	expect(packageText).not.toContain("dependencies")
 	expect(packageText).not.toContain("bin")
-	expect(packageText).not.toContain("playwright")
+	expect(packageText).not.toContain('"playwright"')
 })

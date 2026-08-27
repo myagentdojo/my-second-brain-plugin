@@ -31,7 +31,7 @@ const skillIdPattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 const skillInventoryPath = "plugin/skill-inventory.json" as const
 
 // Hook dependence has one owner. Current payload skills all run without hooks.
-const hookDependentSkillIds = [] as const
+const hookDependentSkillIds: readonly string[] = []
 
 function sameSkill(left: PluginPayloadSkill, right: PluginPayloadSkill): boolean {
 	return (
@@ -94,9 +94,16 @@ function directSkillDefinitionName(path: string, source: string, id: string): st
 	const contents = readFileSync(path, "utf8")
 	const frontmatter = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(contents)
 	if (!frontmatter) throw new Error(`${source} skill frontmatter is missing: ${id}`)
-	const names = [...frontmatter[1].matchAll(/^name:\s*(.*)$/gm)]
+	const frontmatterBody = frontmatter[1]
+	if (frontmatterBody === undefined) {
+		throw new Error(`${source} skill frontmatter is missing: ${id}`)
+	}
+	const names = [...frontmatterBody.matchAll(/^name:\s*(.*)$/gm)]
 	if (names.length !== 1) throw new Error(`${source} skill frontmatter must contain exactly one name: ${id}`)
-	const value = names[0][1].trim()
+	const value = names[0]?.[1]?.trim()
+	if (value === undefined) {
+		throw new Error(`${source} skill frontmatter must contain exactly one name: ${id}`)
+	}
 	const quoted = /^(?:"([a-z0-9]+(?:-[a-z0-9]+)*)"|'([a-z0-9]+(?:-[a-z0-9]+)*)')$/.exec(
 		value,
 	)
@@ -120,7 +127,11 @@ function skillIdsFromInventory(
 		if (!path.startsWith("skills/")) continue
 		const match = /^skills\/([^/]+)\/(.+)$/.exec(path)
 		if (!match) throw new Error(`${source} skill path is invalid: ${path}`)
-		const [, id, descendant] = match
+		const id = match[1]
+		const descendant = match[2]
+		if (id === undefined || descendant === undefined) {
+			throw new Error(`${source} skill path is invalid: ${path}`)
+		}
 		if (!skillIdPattern.test(id)) throw new Error(`${source} skill id is invalid: ${id}`)
 		const subtree = skillSubtrees.get(id) ?? { hasDirectDefinition: false }
 		if (descendant === "SKILL.md") {
@@ -234,8 +245,9 @@ function parseInstalledProjection(contents: string): readonly PluginPayloadSkill
 			throw new Error("installed plugin skill inventory has an invalid skill schema")
 		}
 	}
-	const skills = normalizeSkills(projection.skills as PluginPayloadSkill[], "installed plugin skill inventory")
-	if (skills.some((skill, index) => !sameSkill(skill, projection.skills![index] as PluginPayloadSkill))) {
+	const projectedSkills = projection.skills
+	const skills = normalizeSkills(projectedSkills as PluginPayloadSkill[], "installed plugin skill inventory")
+	if (skills.some((skill, index) => !sameSkill(skill, projectedSkills[index] as PluginPayloadSkill))) {
 		throw new Error("installed plugin skill inventory must use code-unit skill ordering")
 	}
 	return skills

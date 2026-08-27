@@ -15,6 +15,7 @@ const root = resolve(import.meta.dir, "..")
 const temporaryRoots: string[] = []
 
 const expectedSkills = [
+	["agent-browser", "model-only", "hook-independent"],
 	["capability-tour", "model-only", "hook-independent"],
 	["decision-view", "model-only", "hook-independent"],
 	["dev-mode", "model-only", "hook-independent"],

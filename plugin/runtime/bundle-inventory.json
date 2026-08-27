@@ -9,17 +9,17 @@
     "hello-world": {
       "path": "runtime/hello-world.js",
       "bytes": 995,
-      "sha256": "aedde54417e663d86bb183dda8115095c48e53a9e9fc91d8b0d4dec4b09e6202"
+      "sha256": "7fb7acb17dabccf51e13f33d5eb5b204ce6b9dc2c5629bee13c4b702f778d1d3"
     },
     "skill-a": {
-      "path": "runtime/skill-a-27cb243179e5c93d.js",
-      "bytes": 7838,
-      "sha256": "27cb243179e5c93dc6d7c5730b483fcbf4adf82def672dddca476594a3e4bf80"
+      "path": "runtime/skill-a-8ca2c71e66871303.js",
+      "bytes": 7928,
+      "sha256": "8ca2c71e668713037c57ffa39f85bf6c82be830119cb30f285c85946dc0c9748"
     },
     "skill-b": {
-      "path": "runtime/skill-b-535431fb5dd1ed0a.js",
-      "bytes": 6422,
-      "sha256": "535431fb5dd1ed0a30a02105818a77bcbcadfa4395b029f614fe4283a7346ec7"
+      "path": "runtime/skill-b-a7d9599c270986ec.js",
+      "bytes": 6437,
+      "sha256": "a7d9599c270986ece563c9bdabd87f3ccc650deb505cdf10f3dd8905042c58f3"
     }
   },
   "notices": {
