@@ -81,18 +81,52 @@ function output(value: Record<string, unknown>): string {
 	return `${JSON.stringify(value)}\n`
 }
 
-function inspectionUnverified(command: "start" | "status" | "stop", runId: string) {
-	return {
-		schemaVersion: 1,
-		status: "error",
-		command,
-		resultCode: "PROCESS_INSPECTION_UNVERIFIED",
-		runId,
-		transactionState: "unchanged",
-		retrySafe: false,
-		nextAction: "Inspect the host process table and private Warm Browser state before retrying.",
-		message: "Warm Browser could not verify the local process table.",
-	}
+/**
+ * Independent oracle: a start token the production row pattern cannot parse,
+ * because it carries neither a weekday nor a year.
+ */
+const unparsedStartToken = "Aug 27 09:52:01"
+
+/** One reading whose only Chrome row is the exact owned command line. */
+function ownedRowReading(probe: ProductionCliProbe): Record<string, unknown> {
+	return verifiedReading(
+		`${systemRows}${processRow("4242", "4242", chromeCommand(probe.profileRoot))}`,
+	)
+}
+
+/** The same owned row, framed by a start token the production parser rejects. */
+function unparsedOwnedRowReading(probe: ProductionCliProbe): Record<string, unknown> {
+	return verifiedReading(
+		`${systemRows}${
+			processRow("4242", "4242", chromeCommand(probe.profileRoot), unparsedStartToken)
+		}`,
+	)
+}
+
+/**
+ * Independent oracle: the exact refusal an unverifiable process-table
+ * observation must produce, restated here so no production table supplies it.
+ */
+function expectInspectionUnverified(
+	result: Bun.ReadableSyncSubprocess,
+	command: "start" | "status" | "stop",
+	runId: string,
+): void {
+	expect(result.exitCode).toBe(20)
+	expect(result.stdout.toString()).toBe("")
+	expect(result.stderr.toString()).toBe(
+		output({
+			schemaVersion: 1,
+			status: "error",
+			command,
+			resultCode: "PROCESS_INSPECTION_UNVERIFIED",
+			runId,
+			transactionState: "unchanged",
+			retrySafe: false,
+			nextAction: "Inspect the host process table and private Warm Browser state before retrying.",
+			message: "Warm Browser could not verify the local process table.",
+		}),
+	)
 }
 
 const ambiguousReadings: ReadonlyArray<
@@ -155,9 +189,7 @@ test.each(ambiguousReadings)(
 
 		const result = runProductionCli(probe, ["start", "--run-id", "table-start"])
 
-		expect(result.exitCode).toBe(20)
-		expect(result.stdout.toString()).toBe("")
-		expect(result.stderr.toString()).toBe(output(inspectionUnverified("start", "table-start")))
+		expectInspectionUnverified(result, "start", "table-start")
 		expect(existsSync(probe.lockPath)).toBe(false)
 		expect(hostEffects(probe)).toEqual([])
 	},
@@ -165,19 +197,11 @@ test.each(ambiguousReadings)(
 
 test("an unparsed profile owner never reads as an unused Agent Chrome Profile", () => {
 	const probe = productionCliProbe()
-	writeHostEffectsPlan(probe, {
-		processTable: verifiedReading(
-			`${systemRows}${
-				processRow("4242", "4242", chromeCommand(probe.profileRoot), "Aug 27 09:52:01")
-			}`,
-		),
-	})
+	writeHostEffectsPlan(probe, { processTable: unparsedOwnedRowReading(probe) })
 
 	const result = runProductionCli(probe, ["start", "--run-id", "profile-owner-start"])
 
-	expect(result.exitCode).toBe(20)
-	expect(result.stdout.toString()).toBe("")
-	expect(result.stderr.toString()).toBe(output(inspectionUnverified("start", "profile-owner-start")))
+	expectInspectionUnverified(result, "start", "profile-owner-start")
 	expect(existsSync(probe.lockPath)).toBe(false)
 	expect(hostEffects(probe)).toEqual([])
 })
@@ -186,19 +210,11 @@ test("an unparsed owned row never proves the running Browser Session absent", ()
 	const probe = productionCliProbe()
 	seedSessionState(probe, runningState(probe))
 	const stateBefore = readFileSync(probe.sessionPath, "utf8")
-	writeHostEffectsPlan(probe, {
-		processTable: verifiedReading(
-			`${systemRows}${
-				processRow("4242", "4242", chromeCommand(probe.profileRoot), "Aug 27 09:52:01")
-			}`,
-		),
-	})
+	writeHostEffectsPlan(probe, { processTable: unparsedOwnedRowReading(probe) })
 
 	const result = runProductionCli(probe, ["stop", "--run-id", "owned-row-stop"])
 
-	expect(result.exitCode).toBe(20)
-	expect(result.stdout.toString()).toBe("")
-	expect(result.stderr.toString()).toBe(output(inspectionUnverified("stop", "owned-row-stop")))
+	expectInspectionUnverified(result, "stop", "owned-row-stop")
 	expect(readFileSync(probe.sessionPath, "utf8")).toBe(stateBefore)
 	expect(hostEffects(probe)).toEqual([])
 })
@@ -207,30 +223,18 @@ test("an unparsed marked row never proves the stale launch intent absent", () =>
 	const probe = productionCliProbe()
 	seedSessionState(probe, launchingState(probe))
 	const stateBefore = readFileSync(probe.sessionPath, "utf8")
-	writeHostEffectsPlan(probe, {
-		processTable: verifiedReading(
-			`${systemRows}${
-				processRow("4242", "4242", chromeCommand(probe.profileRoot), "Aug 27 09:52:01")
-			}`,
-		),
-	})
+	writeHostEffectsPlan(probe, { processTable: unparsedOwnedRowReading(probe) })
 
 	const result = runProductionCli(probe, ["status", "--run-id", "marked-row-status"])
 
-	expect(result.exitCode).toBe(20)
-	expect(result.stdout.toString()).toBe("")
-	expect(result.stderr.toString()).toBe(output(inspectionUnverified("status", "marked-row-status")))
+	expectInspectionUnverified(result, "status", "marked-row-status")
 	expect(readFileSync(probe.sessionPath, "utf8")).toBe(stateBefore)
 	expect(hostEffects(probe)).toEqual([])
 })
 
 test("a well-formed table still proves one live profile owner without signalling it", () => {
 	const probe = productionCliProbe()
-	writeHostEffectsPlan(probe, {
-		processTable: verifiedReading(
-			`${systemRows}${processRow("4242", "4242", chromeCommand(probe.profileRoot))}`,
-		),
-	})
+	writeHostEffectsPlan(probe, { processTable: ownedRowReading(probe) })
 
 	const result = runProductionCli(probe, ["start", "--run-id", "profile-in-use-start"])
 
@@ -315,11 +319,7 @@ test("a well-formed owned row is still matched exactly before endpoint verificat
 	const probe = productionCliProbe()
 	seedSessionState(probe, runningState(probe))
 	const stateBefore = readFileSync(probe.sessionPath, "utf8")
-	writeHostEffectsPlan(probe, {
-		processTable: verifiedReading(
-			`${systemRows}${processRow("4242", "4242", chromeCommand(probe.profileRoot))}`,
-		),
-	})
+	writeHostEffectsPlan(probe, { processTable: ownedRowReading(probe) })
 
 	const result = runProductionCli(probe, ["stop", "--run-id", "owned-row-verify"])
 
@@ -337,9 +337,7 @@ test("a well-formed marked row is still matched exactly before stale-launch clea
 	const probe = productionCliProbe()
 	seedSessionState(probe, launchingState(probe))
 	writeHostEffectsPlan(probe, {
-		processTable: verifiedReading(
-			`${systemRows}${processRow("4242", "4242", chromeCommand(probe.profileRoot))}`,
-		),
+		processTable: ownedRowReading(probe),
 		signalOutcome: "denied",
 	})
 
@@ -360,11 +358,7 @@ test("a well-formed marked row is still matched exactly before stale-launch clea
 test("a well-formed marked row is stopped and cleaned when its group is proved gone", () => {
 	const probe = productionCliProbe()
 	seedSessionState(probe, launchingState(probe))
-	writeHostEffectsPlan(probe, {
-		processTable: verifiedReading(
-			`${systemRows}${processRow("4242", "4242", chromeCommand(probe.profileRoot))}`,
-		),
-	})
+	writeHostEffectsPlan(probe, { processTable: ownedRowReading(probe) })
 
 	const result = runProductionCli(probe, ["status", "--run-id", "marked-row-recovered"])
 

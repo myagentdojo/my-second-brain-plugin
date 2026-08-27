@@ -103,6 +103,60 @@ function writeJson(path: string, value: unknown): void {
 	writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`)
 }
 
+interface ProcessLedger {
+	spawnCount: number
+	processes: Array<{
+		pid: number
+		processGroupId: number
+		startedAtToken: string
+		executable: string
+		commandLine: string
+		alive: boolean
+	}>
+}
+
+function ledgerPath(testFixture: Fixture): string {
+	return join(testFixture.fakeRoot, "processes.json")
+}
+
+/** The driver fixture's own ledger of every process it has spawned. */
+function readLedger(testFixture: Fixture): ProcessLedger {
+	return readJson(ledgerPath(testFixture)) as unknown as ProcessLedger
+}
+
+/**
+ * Applies one perturbation to that ledger, so each test states only the change
+ * it depends on and never restates how the ledger is read and written.
+ */
+function perturbLedger(testFixture: Fixture, change: (ledger: ProcessLedger) => void): void {
+	const ledger = readLedger(testFixture)
+	change(ledger)
+	writeJson(ledgerPath(testFixture), ledger)
+}
+
+/**
+ * Ages the stored session receipt past the staleness bound and restores its
+ * exact private mode. `patch` carries whatever else one test needs to change.
+ */
+function makeStateStale(testFixture: Fixture, patch: Record<string, unknown> = {}): void {
+	writeJson(testFixture.sessionPath, {
+		...readJson(testFixture.sessionPath),
+		createdAtEpochMs: 1_799_999_980_000,
+		...patch,
+	})
+	chmodSync(testFixture.sessionPath, 0o600)
+}
+
+/** The one spawned process and whether the driver fixture still reports it alive. */
+function expectSoleProcessAlive(testFixture: Fixture, alive: boolean): void {
+	expect(readJson(ledgerPath(testFixture))).toMatchObject({ processes: [{ alive }] })
+}
+
+/** No owned browser process group was signalled. */
+function expectNoTerminate(testFixture: Fixture): void {
+	expect(actions(testFixture).filter(({ action }) => action === "terminate")).toEqual([])
+}
+
 function expectError(
 	result: Bun.ReadableSyncSubprocess,
 	exitCode: 1 | 2 | 20 | 21 | 22,
@@ -111,6 +165,16 @@ function expectError(
 	expect(result.exitCode).toBe(exitCode)
 	expect(result.stdout.toString()).toBe("")
 	expect(result.stderr.toString()).toBe(output(envelope))
+}
+
+/** The same refusal narrowed to the envelope fields one test names. */
+function expectRefusal(
+	result: Bun.ReadableSyncSubprocess,
+	exitCode: 1 | 2 | 20 | 21 | 22,
+	envelope: Record<string, unknown>,
+): void {
+	expect(result.exitCode).toBe(exitCode)
+	expect(JSON.parse(result.stderr.toString())).toMatchObject(envelope)
 }
 
 async function waitFor(path: string): Promise<void> {
@@ -375,7 +439,7 @@ test("start, status, and stop own one private Browser Session through literal pu
 	)
 	expect(existsSync(testFixture.sessionPath)).toBe(false)
 	expect(existsSync(testFixture.lockPath)).toBe(false)
-	expect(readJson(join(testFixture.fakeRoot, "processes.json"))).toEqual({
+	expect(readJson(ledgerPath(testFixture))).toEqual({
 		spawnCount: 1,
 		processes: [
 			{
@@ -463,7 +527,7 @@ test("a verified owner refuses a concurrent start without another process", () =
 		nextAction: "Run warm-browser status --run-id ID or warm-browser stop --run-id ID.",
 		message: "A verified Browser Session already owns the Agent Chrome Profile.",
 	})
-	expect(readJson(join(testFixture.fakeRoot, "processes.json"))).toMatchObject({ spawnCount: 1 })
+	expect(readJson(ledgerPath(testFixture))).toMatchObject({ spawnCount: 1 })
 	expect(actions(testFixture).filter((entry) => entry.action === "spawn")).toHaveLength(1)
 })
 
@@ -505,7 +569,7 @@ test("simultaneous starts deterministically leave one owner and one transient re
 		runId: "concurrent-first",
 		data: { postcondition: "running" },
 	})
-	expect(readJson(join(testFixture.fakeRoot, "processes.json"))).toMatchObject({ spawnCount: 1 })
+	expect(readJson(ledgerPath(testFixture))).toMatchObject({ spawnCount: 1 })
 	expect(statSync(testFixture.sessionPath).mode & 0o777).toBe(0o600)
 })
 
@@ -640,9 +704,7 @@ test.each(
 	})
 	expect(existsSync(testFixture.sessionPath)).toBe(false)
 	expect(existsSync(testFixture.lockPath)).toBe(false)
-	expect(readJson(join(testFixture.fakeRoot, "processes.json"))).toMatchObject({
-		processes: [{ alive: false }],
-	})
+	expectSoleProcessAlive(testFixture, false)
 	expect(actions(testFixture).map((entry) => entry.action)).toEqual([
 		"spawn",
 		"verify",
@@ -666,9 +728,7 @@ test("browser crash before CDP acknowledgement cleans the failed start", () => {
 	})
 	expect(existsSync(testFixture.sessionPath)).toBe(false)
 	expect(existsSync(testFixture.lockPath)).toBe(false)
-	expect(readJson(join(testFixture.fakeRoot, "processes.json"))).toMatchObject({
-		processes: [{ alive: false }],
-	})
+	expectSoleProcessAlive(testFixture, false)
 })
 
 test("spawn failure removes the ownership claim and returns the unexpected exit class", () => {
@@ -704,9 +764,7 @@ test("post-spawn identity-read failure cleans the adapter-owned process group be
 		nextAction: "Inspect private state and the owned process group before retrying.",
 		message: "Warm Browser start failed unexpectedly.",
 	})
-	expect(readJson(join(testFixture.fakeRoot, "processes.json"))).toMatchObject({
-		processes: [{ alive: false }],
-	})
+	expectSoleProcessAlive(testFixture, false)
 	expect(actions(testFixture).map((entry) => entry.action)).toEqual(["spawn", "terminate"])
 	expect(existsSync(testFixture.sessionPath)).toBe(false)
 	expect(existsSync(testFixture.lockPath)).toBe(false)
@@ -715,13 +773,9 @@ test("post-spawn identity-read failure cleans the adapter-owned process group be
 test("status recovers crashed-process state and reports its literal trigger and postcondition", () => {
 	const testFixture = fixture()
 	expect(run(testFixture, ["start", "--run-id", "crashed-start"]).exitCode).toBe(0)
-	const ledgerPath = join(testFixture.fakeRoot, "processes.json")
-	const processLedger = readJson(ledgerPath) as unknown as {
-		spawnCount: number
-		processes: Array<{ alive: boolean }>
-	}
-	processLedger.processes[0]!.alive = false
-	writeJson(ledgerPath, processLedger)
+	perturbLedger(testFixture, (ledger) => {
+		ledger.processes[0]!.alive = false
+	})
 
 	const status = run(testFixture, ["status", "--run-id", "crashed-status"])
 	expect(status.exitCode).toBe(0)
@@ -746,7 +800,7 @@ test("status recovers crashed-process state and reports its literal trigger and 
 	)
 	expect(existsSync(testFixture.sessionPath)).toBe(false)
 	expect(existsSync(testFixture.lockPath)).toBe(false)
-	expect(actions(testFixture).filter((entry) => entry.action === "terminate")).toEqual([])
+	expectNoTerminate(testFixture)
 })
 
 test("an expired state-less lock is preserved because its process receipt cannot be reconstructed", () => {
@@ -793,9 +847,7 @@ test("unverified post-spawn cleanup preserves durable launch intent and live pro
 		sessionId: "session-1",
 		launchMarker: "session-1",
 	})
-	expect(readJson(join(testFixture.fakeRoot, "processes.json"))).toMatchObject({
-		processes: [{ alive: true }],
-	})
+	expectSoleProcessAlive(testFixture, true)
 	expect(actions(testFixture).map((entry) => entry.action)).toEqual(["spawn"])
 })
 
@@ -815,9 +867,7 @@ test("an unexpected post-spawn failure reports rollback only after the owned gro
 	})
 	expect(existsSync(testFixture.sessionPath)).toBe(false)
 	expect(existsSync(testFixture.lockPath)).toBe(false)
-	expect(readJson(join(testFixture.fakeRoot, "processes.json"))).toMatchObject({
-		processes: [{ alive: false }],
-	})
+	expectSoleProcessAlive(testFixture, false)
 	expect(actions(testFixture).map((entry) => entry.action)).toEqual(["spawn", "terminate"])
 })
 
@@ -842,20 +892,14 @@ test("an unstoppable owned group after an unexpected failure never claims a roll
 		process: { pid: 4101, processGroupId: 4101 },
 	})
 	expect(existsSync(testFixture.lockPath)).toBe(true)
-	expect(readJson(join(testFixture.fakeRoot, "processes.json"))).toMatchObject({
-		processes: [{ alive: true }],
-	})
+	expectSoleProcessAlive(testFixture, true)
 	expect(actions(testFixture).map((entry) => entry.action)).toEqual(["spawn"])
 })
 
 test("status terminates only an exact stale starting owner before cleanup", () => {
 	const testFixture = fixture()
 	expect(run(testFixture, ["start", "--run-id", "stale-start"]).exitCode).toBe(0)
-	const state = readJson(testFixture.sessionPath)
-	state.phase = "starting"
-	state.createdAtEpochMs = 1_799_999_980_000
-	writeJson(testFixture.sessionPath, state)
-	chmodSync(testFixture.sessionPath, 0o600)
+	makeStateStale(testFixture, { phase: "starting" })
 
 	const status = run(testFixture, ["status", "--run-id", "stale-status"])
 	expect(status.exitCode).toBe(0)
@@ -879,9 +923,7 @@ test("status terminates only an exact stale starting owner before cleanup", () =
 		}),
 	)
 	expect(existsSync(testFixture.sessionPath)).toBe(false)
-	expect(readJson(join(testFixture.fakeRoot, "processes.json"))).toMatchObject({
-		processes: [{ alive: false }],
-	})
+	expectSoleProcessAlive(testFixture, false)
 	expect(actions(testFixture).at(-1)).toEqual({
 		action: "terminate",
 		pid: 4101,
@@ -892,13 +934,9 @@ test("status terminates only an exact stale starting owner before cleanup", () =
 test("start recovers a crashed owner before publishing one new running postcondition", () => {
 	const testFixture = fixture()
 	expect(run(testFixture, ["start", "--run-id", "first-start"]).exitCode).toBe(0)
-	const ledgerPath = join(testFixture.fakeRoot, "processes.json")
-	const processLedger = readJson(ledgerPath) as unknown as {
-		spawnCount: number
-		processes: Array<{ alive: boolean }>
-	}
-	processLedger.processes[0]!.alive = false
-	writeJson(ledgerPath, processLedger)
+	perturbLedger(testFixture, (ledger) => {
+		ledger.processes[0]!.alive = false
+	})
 
 	const restarted = run(testFixture, ["start", "--run-id", "recovery-start"])
 	expect(restarted.exitCode).toBe(0)
@@ -924,10 +962,7 @@ test("start recovers a crashed owner before publishing one new running postcondi
 			},
 		}),
 	)
-	const after = readJson(ledgerPath) as unknown as {
-		spawnCount: number
-		processes: Array<{ pid: number; alive: boolean }>
-	}
+	const after = readLedger(testFixture)
 	expect(after.spawnCount).toBe(2)
 	expect(after.processes).toMatchObject([
 		{ pid: 4101, alive: false },
@@ -939,13 +974,9 @@ test("start recovers a crashed owner before publishing one new running postcondi
 test("wrong live process identity is preserved for inspection and never signalled", () => {
 	const testFixture = fixture()
 	expect(run(testFixture, ["start", "--run-id", "wrong-start"]).exitCode).toBe(0)
-	const ledgerPath = join(testFixture.fakeRoot, "processes.json")
-	const processLedger = readJson(ledgerPath) as unknown as {
-		spawnCount: number
-		processes: Array<{ startedAtToken: string; alive: boolean }>
-	}
-	processLedger.processes[0]!.startedAtToken = "reused-pid-start"
-	writeJson(ledgerPath, processLedger)
+	perturbLedger(testFixture, (ledger) => {
+		ledger.processes[0]!.startedAtToken = "reused-pid-start"
+	})
 	const stateBefore = readFileSync(testFixture.sessionPath, "utf8")
 
 	const stopped = run(testFixture, ["stop", "--run-id", "wrong-stop"])
@@ -963,8 +994,8 @@ test("wrong live process identity is preserved for inspection and never signalle
 	})
 	expect(readFileSync(testFixture.sessionPath, "utf8")).toBe(stateBefore)
 	expect(existsSync(testFixture.lockPath)).toBe(true)
-	expect(processLedger.processes[0]!.alive).toBe(true)
-	expect(actions(testFixture).filter((entry) => entry.action === "terminate")).toEqual([])
+	expectSoleProcessAlive(testFixture, true)
+	expectNoTerminate(testFixture)
 })
 
 test("process-table uncertainty preserves the owned receipt and performs no terminate or spawn", () => {
@@ -1012,22 +1043,20 @@ test("profile process-table uncertainty refuses start before lock, spawn, or sig
 test("a running receipt whose exact launch marker disappears is preserved and never signalled", () => {
 	const testFixture = fixture()
 	expect(run(testFixture, ["start", "--run-id", "marker-prime"]).exitCode).toBe(0)
-	const ledgerPath = join(testFixture.fakeRoot, "processes.json")
-	const ledger = readJson(ledgerPath) as unknown as { processes: Array<{ commandLine: string }> }
-	ledger.processes[0]!.commandLine = ledger.processes[0]!.commandLine.replace(
-		" --agent-browser-launch-marker=session-1",
-		"",
-	)
-	writeJson(ledgerPath, ledger)
+	perturbLedger(testFixture, (ledger) => {
+		ledger.processes[0]!.commandLine = ledger.processes[0]!.commandLine.replace(
+			" --agent-browser-launch-marker=session-1",
+			"",
+		)
+	})
 	const stateBefore = readFileSync(testFixture.sessionPath, "utf8")
 	const result = run(testFixture, ["stop", "--run-id", "marker-stop"])
-	expect(JSON.parse(result.stderr.toString())).toMatchObject({
+	expectRefusal(result, 20, {
 		resultCode: "PROCESS_IDENTITY_UNVERIFIED",
 		transactionState: "unchanged",
 	})
-	expect(result.exitCode).toBe(20)
 	expect(readFileSync(testFixture.sessionPath, "utf8")).toBe(stateBefore)
-	expect(actions(testFixture).filter(({ action }) => action === "terminate")).toEqual([])
+	expectNoTerminate(testFixture)
 })
 
 test("SIGKILL after fake spawn leaves durable intent that recovers exactly one marked owner", async () => {
@@ -1041,7 +1070,7 @@ test("SIGKILL after fake spawn leaves durable intent that recovers exactly one m
 		stderr: "pipe",
 	})
 	await waitFor(testFixture.sessionPath)
-	await waitFor(join(testFixture.fakeRoot, "processes.json"))
+	await waitFor(ledgerPath(testFixture))
 	expect(readJson(testFixture.sessionPath)).toMatchObject({
 		phase: "launching",
 		sessionId: "session-1",
@@ -1050,10 +1079,7 @@ test("SIGKILL after fake spawn leaves durable intent that recovers exactly one m
 	driver.kill(9)
 	await driver.exited
 
-	const state = readJson(testFixture.sessionPath)
-	state.createdAtEpochMs = 1_799_999_980_000
-	writeJson(testFixture.sessionPath, state)
-	chmodSync(testFixture.sessionPath, 0o600)
+	makeStateStale(testFixture)
 	writePlan(testFixture, {})
 	const recovered = run(testFixture, ["status", "--run-id", "sigkill-recover"])
 	expect(recovered.exitCode).toBe(0)
@@ -1075,9 +1101,7 @@ test("SIGKILL after fake spawn leaves durable intent that recovers exactly one m
 	}))
 	expect(recovered.stderr.toString()).toBe("")
 	expect(existsSync(testFixture.lockPath)).toBe(false)
-	expect(readJson(join(testFixture.fakeRoot, "processes.json"))).toMatchObject({
-		processes: [{ alive: false }],
-	})
+	expectSoleProcessAlive(testFixture, false)
 	expect(actions(testFixture).map(({ action }) => action)).toEqual(["spawn", "terminate"])
 })
 
@@ -1087,14 +1111,10 @@ test("stale launch intent with confirmed absent marker cleans state without sign
 		postSpawnCleanupUnverified: true,
 	})
 	expect(run(testFixture, ["start", "--run-id", "absent-marker-start"]).exitCode).toBe(1)
-	const state = readJson(testFixture.sessionPath)
-	state.createdAtEpochMs = 1_799_999_980_000
-	writeJson(testFixture.sessionPath, state)
-	chmodSync(testFixture.sessionPath, 0o600)
-	const ledgerPath = join(testFixture.fakeRoot, "processes.json")
-	const processLedger = readJson(ledgerPath) as unknown as { processes: Array<{ alive: boolean }> }
-	processLedger.processes[0]!.alive = false
-	writeJson(ledgerPath, processLedger)
+	makeStateStale(testFixture)
+	perturbLedger(testFixture, (ledger) => {
+		ledger.processes[0]!.alive = false
+	})
 	writePlan(testFixture, {})
 	const result = run(testFixture, ["status", "--run-id", "absent-marker-status"])
 	expect(result.exitCode).toBe(0)
@@ -1103,7 +1123,7 @@ test("stale launch intent with confirmed absent marker cleans state without sign
 		transactionState: "recovered",
 		data: { trigger: "status", postcondition: "absent", stoppedOwnedProcess: false },
 	})
-	expect(actions(testFixture).filter(({ action }) => action === "terminate")).toEqual([])
+	expectNoTerminate(testFixture)
 	expect(existsSync(testFixture.lockPath)).toBe(false)
 })
 
@@ -1113,20 +1133,16 @@ test("stale launch marker query uncertainty preserves intent and performs no sig
 		postSpawnCleanupUnverified: true,
 	})
 	expect(run(testFixture, ["start", "--run-id", "launch-query-start"]).exitCode).toBe(1)
-	const state = readJson(testFixture.sessionPath)
-	state.createdAtEpochMs = 1_799_999_980_000
-	writeJson(testFixture.sessionPath, state)
-	chmodSync(testFixture.sessionPath, 0o600)
+	makeStateStale(testFixture)
 	writePlan(testFixture, { launchProcessInspectionUnverifiable: true })
 	const stateBefore = readFileSync(testFixture.sessionPath, "utf8")
 	const result = run(testFixture, ["status", "--run-id", "launch-query-status"])
-	expect(JSON.parse(result.stderr.toString())).toMatchObject({
+	expectRefusal(result, 20, {
 		resultCode: "PROCESS_INSPECTION_UNVERIFIED",
 		transactionState: "unchanged",
 	})
-	expect(result.exitCode).toBe(20)
 	expect(readFileSync(testFixture.sessionPath, "utf8")).toBe(stateBefore)
-	expect(actions(testFixture).filter(({ action }) => action === "terminate")).toEqual([])
+	expectNoTerminate(testFixture)
 })
 
 test("stale launch recovery re-scans the exact marker immediately before signalling", () => {
@@ -1136,19 +1152,15 @@ test("stale launch recovery re-scans the exact marker immediately before signall
 		launchProcessSecondQueryCount: 2,
 	})
 	expect(run(testFixture, ["start", "--run-id", "rescan-start"]).exitCode).toBe(1)
-	const state = readJson(testFixture.sessionPath)
-	state.createdAtEpochMs = 1_799_999_980_000
-	writeJson(testFixture.sessionPath, state)
-	chmodSync(testFixture.sessionPath, 0o600)
+	makeStateStale(testFixture)
 	const stateBefore = readFileSync(testFixture.sessionPath, "utf8")
 	const result = run(testFixture, ["status", "--run-id", "rescan-status"])
-	expect(JSON.parse(result.stderr.toString())).toMatchObject({
+	expectRefusal(result, 20, {
 		resultCode: "LAUNCH_PROCESS_AMBIGUOUS",
 		message: "The stale launch marker changed before cleanup.",
 	})
-	expect(result.exitCode).toBe(20)
 	expect(readFileSync(testFixture.sessionPath, "utf8")).toBe(stateBefore)
-	expect(actions(testFixture).filter(({ action }) => action === "terminate")).toEqual([])
+	expectNoTerminate(testFixture)
 })
 
 test("malformed stale launch intent is preserved as unsafe state without process inspection", () => {
@@ -1157,15 +1169,10 @@ test("malformed stale launch intent is preserved as unsafe state without process
 		postSpawnCleanupUnverified: true,
 	})
 	expect(run(testFixture, ["start", "--run-id", "malformed-start"]).exitCode).toBe(1)
-	const state = readJson(testFixture.sessionPath)
-	state.createdAtEpochMs = 1_799_999_980_000
-	state.launchMarker = "invalid marker with spaces"
-	writeJson(testFixture.sessionPath, state)
-	chmodSync(testFixture.sessionPath, 0o600)
+	makeStateStale(testFixture, { launchMarker: "invalid marker with spaces" })
 	const actionsBefore = actions(testFixture)
 	const result = run(testFixture, ["status", "--run-id", "malformed-status"])
-	expect(JSON.parse(result.stderr.toString())).toMatchObject({ resultCode: "STATE_UNSAFE" })
-	expect(result.exitCode).toBe(20)
+	expectRefusal(result, 20, { resultCode: "STATE_UNSAFE" })
 	expect(existsSync(testFixture.sessionPath)).toBe(true)
 	expect(actions(testFixture)).toEqual(actionsBefore)
 })
@@ -1178,28 +1185,21 @@ test.each(["ambiguous", "mismatched"] as const)(
 			postSpawnCleanupUnverified: true,
 		})
 		expect(run(testFixture, ["start", "--run-id", `${shape}-launch-start`]).exitCode).toBe(1)
-		const state = readJson(testFixture.sessionPath)
-		state.createdAtEpochMs = 1_799_999_980_000
-		writeJson(testFixture.sessionPath, state)
-		chmodSync(testFixture.sessionPath, 0o600)
+		makeStateStale(testFixture)
 		if (shape === "ambiguous") {
 			writePlan(testFixture, { launchProcessCountOverride: 2 })
 		} else {
-			const ledgerPath = join(testFixture.fakeRoot, "processes.json")
-			const processLedger = readJson(ledgerPath) as unknown as {
-				processes: Array<{ commandLine: string }>
-			}
-			processLedger.processes[0]!.commandLine = processLedger.processes[0]!.commandLine.replace(
-				testFixture.profileRoot,
-				`${testFixture.profileRoot}-wrong`,
-			)
-			writeJson(ledgerPath, processLedger)
+			perturbLedger(testFixture, (ledger) => {
+				ledger.processes[0]!.commandLine = ledger.processes[0]!.commandLine.replace(
+					testFixture.profileRoot,
+					`${testFixture.profileRoot}-wrong`,
+				)
+			})
 			writePlan(testFixture, {})
 		}
 		const stateBefore = readFileSync(testFixture.sessionPath, "utf8")
 		const result = run(testFixture, ["status", "--run-id", `${shape}-launch-status`])
-		expect(result.exitCode).toBe(20)
-		expect(JSON.parse(result.stderr.toString())).toMatchObject({
+		expectRefusal(result, 20, {
 			status: "error",
 			command: "status",
 			resultCode: shape === "ambiguous"
@@ -1208,27 +1208,25 @@ test.each(["ambiguous", "mismatched"] as const)(
 			transactionState: "unchanged",
 		})
 		expect(readFileSync(testFixture.sessionPath, "utf8")).toBe(stateBefore)
-		expect(actions(testFixture).filter(({ action }) => action === "terminate")).toEqual([])
+		expectNoTerminate(testFixture)
 	},
 )
 
 test("start reports recovered transaction when later occupied-port inspection refuses", () => {
 	const testFixture = fixture()
 	expect(run(testFixture, ["start", "--run-id", "recovered-port-prime"]).exitCode).toBe(0)
-	const ledgerPath = join(testFixture.fakeRoot, "processes.json")
-	const processLedger = readJson(ledgerPath) as unknown as { processes: Array<{ alive: boolean }> }
-	processLedger.processes[0]!.alive = false
-	writeJson(ledgerPath, processLedger)
+	perturbLedger(testFixture, (ledger) => {
+		ledger.processes[0]!.alive = false
+	})
 	writePlan(testFixture, { portStatus: "occupied" })
 	const result = run(testFixture, ["start", "--run-id", "recovered-port-start"])
-	expect(JSON.parse(result.stderr.toString())).toMatchObject({
+	expectRefusal(result, 20, {
 		status: "error",
 		command: "start",
 		resultCode: "PORT_OCCUPIED",
 		runId: "recovered-port-start",
 		transactionState: "recovered",
 	})
-	expect(result.exitCode).toBe(20)
 	expect(existsSync(testFixture.lockPath)).toBe(false)
 })
 
@@ -1251,10 +1249,8 @@ test("unverifiable running CDP identity preserves the exact owned process for in
 		message: "The stored CDP endpoint identity could not be verified.",
 	})
 	expect(readFileSync(testFixture.sessionPath, "utf8")).toBe(stateBefore)
-	expect(readJson(join(testFixture.fakeRoot, "processes.json"))).toMatchObject({
-		processes: [{ alive: true }],
-	})
-	expect(actions(testFixture).filter((entry) => entry.action === "terminate")).toEqual([])
+	expectSoleProcessAlive(testFixture, true)
+	expectNoTerminate(testFixture)
 })
 
 test("unsafe private state fails closed without browser effects", () => {
@@ -1283,8 +1279,7 @@ test.each([0o500, 0o1700] as const)(
 		expect(run(testFixture, ["status", "--run-id", "state-mode-prime"]).exitCode).toBe(0)
 		chmodSync(testFixture.sessionRoot, mode)
 		const result = run(testFixture, ["status", "--run-id", `state-mode-${mode}`])
-		expect(JSON.parse(result.stderr.toString())).toMatchObject({ resultCode: "STATE_UNSAFE" })
-		expect(result.exitCode).toBe(20)
+		expectRefusal(result, 20, { resultCode: "STATE_UNSAFE" })
 		expect(actions(testFixture)).toEqual([])
 	},
 )
@@ -1330,8 +1325,7 @@ test.each([0o500, 0o1700] as const)(
 		mkdirSync(testFixture.lockPath, { mode: 0o700 })
 		chmodSync(testFixture.lockPath, mode)
 		const result = run(testFixture, ["status", "--run-id", `lock-mode-${mode}`])
-		expect(JSON.parse(result.stderr.toString())).toMatchObject({ resultCode: "STATE_UNSAFE" })
-		expect(result.exitCode).toBe(20)
+		expectRefusal(result, 20, { resultCode: "STATE_UNSAFE" })
 		expect(statSync(testFixture.lockPath).mode & 0o7777).toBe(mode)
 		expect(actions(testFixture)).toEqual([])
 	},
@@ -1352,8 +1346,7 @@ test.each(["0400", "04600", "symlink"] as const)(
 		}
 		const actionsBefore = actions(testFixture)
 		const result = run(testFixture, ["status", "--run-id", `receipt-${shape}-status`])
-		expect(JSON.parse(result.stderr.toString())).toMatchObject({ resultCode: "STATE_UNSAFE" })
-		expect(result.exitCode).toBe(20)
+		expectRefusal(result, 20, { resultCode: "STATE_UNSAFE" })
 		expect(existsSync(testFixture.sessionPath)).toBe(true)
 		expect(actions(testFixture)).toEqual(actionsBefore)
 	},
@@ -1384,9 +1377,7 @@ test("a stop whose cleanup fails reports the stop it performed and keeps repaira
 	expect(readFileSync(join(tombstone, "session.json"), "utf8")).toBe(stateBefore)
 	expect(existsSync(testFixture.lockPath)).toBe(false)
 	expect(statSync(join(tombstone, "session.json")).mode & 0o7777).toBe(0o600)
-	expect(readJson(join(testFixture.fakeRoot, "processes.json"))).toMatchObject({
-		processes: [{ alive: false }],
-	})
+	expectSoleProcessAlive(testFixture, false)
 	expect(actions(testFixture).at(-1)).toEqual({
 		action: "terminate",
 		pid: 4101,
@@ -1413,11 +1404,7 @@ test("a stop whose cleanup fails reports the stop it performed and keeps repaira
 test("a stale starting cleanup whose state removal fails reports the stop it performed", () => {
 	const testFixture = fixture()
 	expect(run(testFixture, ["start", "--run-id", "stale-cleanup-start"]).exitCode).toBe(0)
-	const state = readJson(testFixture.sessionPath)
-	state.phase = "starting"
-	state.createdAtEpochMs = 1_799_999_980_000
-	writeJson(testFixture.sessionPath, state)
-	chmodSync(testFixture.sessionPath, 0o600)
+	makeStateStale(testFixture, { phase: "starting" })
 	writeFileSync(join(testFixture.lockPath, "unexpected-entry"), "preserve receipt\n", {
 		mode: 0o600,
 	})
@@ -1437,9 +1424,7 @@ test("a stale starting cleanup whose state removal fails reports the stop it per
 		message:
 			"Warm Browser stopped the owned browser process group but could not remove its private session state.",
 	})
-	expect(readJson(join(testFixture.fakeRoot, "processes.json"))).toMatchObject({
-		processes: [{ alive: false }],
-	})
+	expectSoleProcessAlive(testFixture, false)
 	expect(actions(testFixture).at(-1)).toEqual({
 		action: "terminate",
 		pid: 4101,
@@ -1460,13 +1445,9 @@ test.each(
 	(_name, command, runId) => {
 		const testFixture = fixture()
 		expect(run(testFixture, ["start", "--run-id", `${runId}-prime`]).exitCode).toBe(0)
-		const ledgerPath = join(testFixture.fakeRoot, "processes.json")
-		const processLedger = readJson(ledgerPath) as unknown as {
-			processes: Array<{ commandLine: string }>
-		}
-		processLedger.processes[0]!.commandLine =
-			`${processLedger.processes[0]!.commandLine} --load-extension=/tmp/unowned`
-		writeJson(ledgerPath, processLedger)
+		perturbLedger(testFixture, (ledger) => {
+			ledger.processes[0]!.commandLine += " --load-extension=/tmp/unowned"
+		})
 		const stateBefore = readFileSync(testFixture.sessionPath, "utf8")
 		const actionsBefore = actions(testFixture)
 
@@ -1487,25 +1468,17 @@ test.each(
 		expect(readFileSync(testFixture.sessionPath, "utf8")).toBe(stateBefore)
 		expect(existsSync(testFixture.lockPath)).toBe(true)
 		expect(actions(testFixture)).toEqual(actionsBefore)
-		expect(readJson(ledgerPath)).toMatchObject({ processes: [{ alive: true }] })
+		expectSoleProcessAlive(testFixture, true)
 	},
 )
 
 test("stale cleanup never signals a stale owner whose live argument list gained an argument", () => {
 	const testFixture = fixture()
 	expect(run(testFixture, ["start", "--run-id", "argv-stale-prime"]).exitCode).toBe(0)
-	const state = readJson(testFixture.sessionPath)
-	state.phase = "starting"
-	state.createdAtEpochMs = 1_799_999_980_000
-	writeJson(testFixture.sessionPath, state)
-	chmodSync(testFixture.sessionPath, 0o600)
-	const ledgerPath = join(testFixture.fakeRoot, "processes.json")
-	const processLedger = readJson(ledgerPath) as unknown as {
-		processes: Array<{ commandLine: string }>
-	}
-	processLedger.processes[0]!.commandLine =
-		`${processLedger.processes[0]!.commandLine} --load-extension=/tmp/unowned`
-	writeJson(ledgerPath, processLedger)
+	makeStateStale(testFixture, { phase: "starting" })
+	perturbLedger(testFixture, (ledger) => {
+		ledger.processes[0]!.commandLine += " --load-extension=/tmp/unowned"
+	})
 	const stateBefore = readFileSync(testFixture.sessionPath, "utf8")
 	const actionsBefore = actions(testFixture)
 
@@ -1525,15 +1498,14 @@ test("stale cleanup never signals a stale owner whose live argument list gained 
 	})
 	expect(readFileSync(testFixture.sessionPath, "utf8")).toBe(stateBefore)
 	expect(actions(testFixture)).toEqual(actionsBefore)
-	expect(readJson(ledgerPath)).toMatchObject({ processes: [{ alive: true }] })
+	expectSoleProcessAlive(testFixture, true)
 
 	// start refuses the same unproved ownership without launching a second group.
 	const started = run(testFixture, ["start", "--run-id", "argv-stale-start"])
-	expect(started.exitCode).toBe(20)
-	expect(JSON.parse(started.stderr.toString())).toMatchObject({
+	expectRefusal(started, 20, {
 		resultCode: "PROCESS_IDENTITY_UNVERIFIED",
 		transactionState: "unchanged",
 	})
-	expect(readJson(ledgerPath)).toMatchObject({ spawnCount: 1 })
+	expect(readJson(ledgerPath(testFixture))).toMatchObject({ spawnCount: 1 })
 	expect(actions(testFixture)).toEqual(actionsBefore)
 })

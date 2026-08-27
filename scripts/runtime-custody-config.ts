@@ -112,6 +112,46 @@ function validateRuntimeLock(lock: RuntimeLock): void {
 	}
 }
 
+/**
+ * Claims one generated name for a single logical skill. A name may be claimed
+ * once, so the second claimant is named alongside the first and the catalog is
+ * rejected before any launcher or bundle is rendered.
+ */
+function claimGeneratedName(
+	owners: Map<string, string>,
+	kind: "launcher" | "entry",
+	name: string,
+	skillId: string,
+): void {
+	const owner = owners.get(name)
+	if (owner !== undefined) {
+		throw new Error(`skill catalog ${kind} ${name} collides between ${owner} and ${skillId}`)
+	}
+	owners.set(name, skillId)
+}
+
+/** Every rule one catalog entry satisfies on its own, before any cross-entry rule. */
+function validateSkillEntry(skillId: string, skill: SkillCatalogEntry, lock: RuntimeLock): void {
+	if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(skillId)) {
+		throw new Error(`skill catalog id is invalid: ${skillId}`)
+	}
+	if (!/^runtime\/[a-z0-9]+(?:-[a-z0-9]+)*\.js$/.test(skill.entry)) {
+		throw new Error(`skill catalog entry is invalid for ${skillId}`)
+	}
+	if (!Object.hasOwn(lock.profiles, skill.runtimeProfile)) {
+		throw new Error(`skill catalog profile is unknown for ${skillId}`)
+	}
+	if (
+		skill.workspace !== undefined &&
+		!/^packages\/[a-z0-9]+(?:-[a-z0-9]+)*$/.test(skill.workspace)
+	) {
+		throw new Error(`skill catalog workspace is invalid for ${skillId}`)
+	}
+	if (skill.launcher !== undefined && !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(skill.launcher)) {
+		throw new Error(`skill catalog launcher is invalid for ${skillId}`)
+	}
+}
+
 function validateSkillCatalog(catalog: SkillCatalog, lock: RuntimeLock): void {
 	if (catalog.schemaVersion !== 1) throw new Error("skill catalog schemaVersion must be 1")
 	if (!isRecord(catalog.skills)) throw new Error("skill catalog skills must be an object")
@@ -119,39 +159,9 @@ function validateSkillCatalog(catalog: SkillCatalog, lock: RuntimeLock): void {
 	const launcherOwners = new Map<string, string>()
 	const entryOwners = new Map<string, string>()
 	for (const [skillId, skill] of Object.entries(catalog.skills)) {
-		if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(skillId)) {
-			throw new Error(`skill catalog id is invalid: ${skillId}`)
-		}
-		if (!/^runtime\/[a-z0-9]+(?:-[a-z0-9]+)*\.js$/.test(skill.entry)) {
-			throw new Error(`skill catalog entry is invalid for ${skillId}`)
-		}
-		if (!Object.hasOwn(lock.profiles, skill.runtimeProfile)) {
-			throw new Error(`skill catalog profile is unknown for ${skillId}`)
-		}
-		if (
-			skill.workspace !== undefined &&
-			!/^packages\/[a-z0-9]+(?:-[a-z0-9]+)*$/.test(skill.workspace)
-		) {
-			throw new Error(`skill catalog workspace is invalid for ${skillId}`)
-		}
-		if (skill.launcher !== undefined && !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(skill.launcher)) {
-			throw new Error(`skill catalog launcher is invalid for ${skillId}`)
-		}
-		const launcher = skill.launcher ?? skillId
-		const launcherOwner = launcherOwners.get(launcher)
-		if (launcherOwner !== undefined) {
-			throw new Error(
-				`skill catalog launcher ${launcher} collides between ${launcherOwner} and ${skillId}`,
-			)
-		}
-		launcherOwners.set(launcher, skillId)
-		const entryOwner = entryOwners.get(skill.entry)
-		if (entryOwner !== undefined) {
-			throw new Error(
-				`skill catalog entry ${skill.entry} collides between ${entryOwner} and ${skillId}`,
-			)
-		}
-		entryOwners.set(skill.entry, skillId)
+		validateSkillEntry(skillId, skill, lock)
+		claimGeneratedName(launcherOwners, "launcher", skill.launcher ?? skillId, skillId)
+		claimGeneratedName(entryOwners, "entry", skill.entry, skillId)
 	}
 }
 
