@@ -6,10 +6,14 @@ plugin launcher is `plugin/bin/warm-browser`; the package entry is `src/main.ts`
 
 ## Warm Browser lifecycle
 
-The callable issue-38 slice is `help`, `start`, `status`, and `stop`. `help` is a
-CLI meta-surface, not one of the nine accepted product commands. Every command
-accepts `--run-id <ID>`; `start` alone accepts one `--port <1024..65535>`
-override and otherwise uses loopback port `9242`.
+The callable slice is `help`, `start`, `status`, `open`, `snapshot`, `click`,
+`fill`, and `stop`. `help` is a CLI meta-surface, not one of the nine accepted
+product commands; `screenshot` and `login` are still not callable. Every command
+accepts `--run-id <ID>`, and each command declares the options it accepts beside
+its own name in the Command Vocabulary: `start` accepts one
+`--port <1024..65535>` override and otherwise uses loopback port `9242`, `open`
+accepts `--url URL` and `--adopt-page`, `click` accepts `--ref REFERENCE`, and
+`fill` accepts `--ref REFERENCE` and `--value TEXT`.
 
 On macOS, production fixes the existing profile path to
 `$HOME/.agent-warm-profile`, with inner profile `Default`. It does not honor the
@@ -73,16 +77,76 @@ non-empty `nextAction`, and `runId`. Exit classes are `0` success, `2` usage,
 `20` inspect/repair, `21` refusal, `22` transient, and `1` unexpected.
 
 The closed transaction vocabulary is `unchanged`, `started`, `stopped`,
-`recovered`, and `rolled_back`. The closed lifecycle Result Vocabulary is
-`HELP`, `SESSION_STARTED`, `SESSION_RUNNING`, `SESSION_ABSENT`,
-`SESSION_STOPPED`, `STALE_SESSION_RECOVERED`, `USAGE_ERROR`,
+`recovered`, `rolled_back`, and `acted`. A page command that changed the
+Controlled Page, or that cannot prove it did not, records `acted`. The closed
+Result Vocabulary is `HELP`, `SESSION_STARTED`, `SESSION_RUNNING`,
+`SESSION_ABSENT`, `SESSION_STOPPED`, `STALE_SESSION_RECOVERED`, `USAGE_ERROR`,
 `PLATFORM_UNSUPPORTED`, `STATE_UNSAFE`, `CHROME_UNAVAILABLE`,
 `PROFILE_UNSAFE`, `PROFILE_PROCESS_AMBIGUOUS`, `PROFILE_IN_USE`,
 `PROCESS_INSPECTION_UNVERIFIED`, `PROCESS_IDENTITY_UNVERIFIED`,
 `LAUNCH_PROCESS_AMBIGUOUS`, `CDP_IDENTITY_UNVERIFIED`,
 `CONTROLLED_PAGE_UNAVAILABLE`, `CONTROLLED_PAGE_AMBIGUOUS`,
-`SESSION_ALREADY_RUNNING`, `PORT_OCCUPIED`, `PORT_UNVERIFIABLE`,
-`START_IN_PROGRESS`, and `UNEXPECTED_FAILURE`.
+`CONTROLLED_PAGE_REPLACED`, `SESSION_ALREADY_RUNNING`, `PORT_OCCUPIED`,
+`PORT_UNVERIFIABLE`, `START_IN_PROGRESS`, `PAGE_OPENED`, `SNAPSHOT_TAKEN`,
+`ELEMENT_CLICKED`, `FIELD_FILLED`, `SNAPSHOT_ABSENT`,
+`SNAPSHOT_REFERENCE_INVALID`, `SNAPSHOT_REFERENCE_STALE`,
+`PAGE_IDENTITY_CHANGED`, `SELECTOR_UNSUPPORTED`, `CREDENTIAL_FIELD_REFUSED`,
+`NAVIGATION_TARGET_REFUSED`, `NAVIGATION_FAILED`, `PAGE_CONTROL_UNVERIFIED`,
+and `UNEXPECTED_FAILURE`.
+
+## Controlled Page operation
+
+`open`, `snapshot`, `click`, and `fill` act on the one Controlled Page of an
+already verified Browser Session and on nothing else. Without one they refuse
+with `SESSION_ABSENT`.
+
+`snapshot` reads the page's accessibility tree and its document and issues one
+Snapshot Generation of short-lived Snapshot References. A reference is
+`e<ordinal>@<generation>`, so it carries the generation that issued it and a
+reference from an earlier generation resolves against nothing. `click` and
+`fill` accept references only: a public selector flag is refused by name with
+`SELECTOR_UNSUPPORTED`, and a selector passed as a reference is not a reference.
+The published snapshot carries roles, names, and references, never selectors or
+node identities.
+
+Every `open` invalidates every earlier reference before it navigates, a fresh
+`snapshot` replaces the generation, an act that moves the page invalidates the
+references it used, and binding a replacement Controlled Page drops them too.
+Invalidation is durable and total: the generation stops existing, so no dead
+reference survives anywhere to be resolved later. A reference is also refused
+once it is older than its bound, once the live page identity differs from the
+one it was issued against, and once it names another Controlled Page.
+
+The Controlled Page is reached at an address Warm Browser computes,
+`ws://127.0.0.1:<port>/devtools/page/<target>`, never at the socket the endpoint
+advertises. A target identity Warm Browser could not address again is not a
+Controlled Page, so such an endpoint exposes one page fewer than it appears to.
+
+A page replacement is never adopted silently. Every command refuses with
+`CONTROLLED_PAGE_REPLACED` until one `open --url URL --adopt-page` binds the
+replacement and drops every reference with it.
+
+`fill` refuses a credential field twice: once from what the snapshot recorded,
+before anything is said to the page, and once from the live description taken
+immediately before typing. Both refusals name `login`, which is not callable in
+this slice. Warm Browser never types authentication material, and `--value`
+carries non-secret text only.
+
+## Deterministic Controlled Page proof
+
+`open`, `snapshot`, `click`, and `fill` are proved through the public process
+against a deterministic local accessibility fixture: one real loopback endpoint
+that speaks the CDP subset Warm Browser speaks, over a real WebSocket. The
+production entry opens the socket, sends the real requests, and interprets the
+real replies. Only the process table, the launch, the loopback listener, and the
+port probe stay substituted, because no browser is launched and none is
+inspected. An independent CDP target reader that shares no code with the Module
+reads the same endpoint and proves the process and Controlled Page Warm Browser
+selected.
+
+`tests/warm-browser.negative-controls.test.ts` runs those scenarios twice: once
+against the Module and once against a copy with exactly one invalidation or
+Controlled Page guard removed, recording that the owning proof no longer holds.
 
 ## Real Chrome compatibility proof
 

@@ -25,18 +25,27 @@ test("Agent Browser lifecycle source follows the repository discovery contract",
 		"packages/agent-browser/src/modules/warm-browser/README.md",
 		"packages/agent-browser/src/modules/warm-browser/adapter.ts",
 		"packages/agent-browser/src/modules/warm-browser/bounds.ts",
+		"packages/agent-browser/src/modules/warm-browser/cdp-channel.ts",
 		"packages/agent-browser/src/modules/warm-browser/contract.ts",
+		"packages/agent-browser/src/modules/warm-browser/controlled-page.ts",
+		"packages/agent-browser/src/modules/warm-browser/credential-fields.ts",
 		"packages/agent-browser/src/modules/warm-browser/host-effects.ts",
 		"packages/agent-browser/src/modules/warm-browser/listener-table.ts",
 		"packages/agent-browser/src/modules/warm-browser/ownership.ts",
 		"packages/agent-browser/src/modules/warm-browser/process-table.ts",
 		"packages/agent-browser/src/modules/warm-browser/production-adapter.ts",
+		"packages/agent-browser/src/modules/warm-browser/snapshot.ts",
 		"packages/agent-browser/src/modules/warm-browser/state.ts",
 		"packages/agent-browser/src/modules/warm-browser/warm-browser.ts",
+		"packages/agent-browser/tests/fixtures/cdp-page-fixture.ts",
 		"packages/agent-browser/tests/fixtures/cli-refusals.ts",
+		"packages/agent-browser/tests/fixtures/controlled-page-probe.ts",
 		"packages/agent-browser/tests/fixtures/host-effects-preload.ts",
+		"packages/agent-browser/tests/fixtures/independent-cdp-reader.ts",
 		"packages/agent-browser/tests/fixtures/production-cli-harness.ts",
 		"packages/agent-browser/tests/fixtures/warm-browser-driver.ts",
+		"packages/agent-browser/tests/warm-browser.negative-controls.test.ts",
+		"packages/agent-browser/tests/warm-browser.page-control.test.ts",
 		"packages/agent-browser/tests/warm-browser.production-launch.test.ts",
 		"packages/agent-browser/tests/warm-browser.production-process-table.test.ts",
 		"packages/agent-browser/tests/warm-browser.public-process.test.ts",
@@ -52,7 +61,7 @@ test("Agent Browser lifecycle source follows the repository discovery contract",
 	expect(skill).toMatch(/^---\nname: agent-browser\ndescription: "[^"]+"\n---\n/)
 	expect(skill).not.toContain("disable-model-invocation: true")
 	expect(skill).toContain("Read [`CONTEXT.md`](CONTEXT.md) before using this skill.")
-	expect(skill).toContain("Maturity: `lifecycle-slice`")
+	expect(skill).toContain("Maturity: `page-control-slice`")
 	expect(skill).toContain("<plugin-root>/bin/warm-browser")
 	expect(guidance).toContain("Agent Browser Source Guidance")
 	expect(glossary).toContain("**Agent Browser**")
@@ -99,7 +108,12 @@ test("Agent Browser has the approved lifecycle workspace and generated activatio
 	const warmBrowser = readFileSync(join(moduleRoot, "warm-browser", "README.md"), "utf8")
 	expect(warmBrowser).toContain("one of the two Agent Browser Modules, and the implemented one")
 	expect(warmBrowser).toContain("owns the Command Vocabulary and Result Vocabulary")
-	expect(warmBrowser).toContain("`start`, `status`, and `stop`")
+	expect(warmBrowser).toContain(
+		"`start`, `status`, `open`, `snapshot`, `click`,\n`fill`, and `stop`",
+	)
+	expect(warmBrowser).toContain("never through a\npublic selector")
+	expect(warmBrowser).toContain("refuses a credential field from the snapshot")
+	expect(warmBrowser).toContain("never at the\nsocket the endpoint advertises")
 	expect(warmBrowser).toContain("Snapshot Generation")
 	expect(warmBrowser).toContain("Screenshot lifecycle")
 	expect(warmBrowser).toContain("private session-owned PNG")
@@ -135,4 +149,9 @@ test("Agent Browser has the approved lifecycle workspace and generated activatio
 	expect(packageReadme).toContain(
 		"AGENT_BROWSER_CDP_FIXTURE_ACKNOWLEDGED=1 bun run prove:agent-browser-cdp -- --run-id <ID>",
 	)
+	expect(packageReadme).toContain("## Controlled Page operation")
+	expect(packageReadme).toContain("## Deterministic Controlled Page proof")
+	expect(packageReadme).toMatch(/`e<ordinal>@<generation>`/)
+	expect(packageReadme).toContain("CONTROLLED_PAGE_REPLACED")
+	expect(packageReadme).toContain("independent CDP target reader")
 })

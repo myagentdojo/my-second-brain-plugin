@@ -62,8 +62,10 @@ The intended public Command Vocabulary is `start`, `status`, `open`,
 
 ## Current maturity
 
-Maturity: `lifecycle-slice`. The generated payload activates Warm Browser
-`help`, `start`, `status`, and `stop`; the other accepted product commands are
-not callable. Profile Cutover, credential delivery, installation, and release
-remain separate tickets. Do not claim profile exclusivity or a real-profile
-launch until their owning proofs complete.
+Maturity: `page-control-slice`. The generated payload activates Warm Browser
+`help`, `start`, `status`, `open`, `snapshot`, `click`, `fill`, and `stop`;
+`screenshot` and `login` are not callable. `fill` refuses every credential field
+and names `login`, so credential entry has no path in this slice. Profile
+Cutover, credential delivery, installation, and release remain separate tickets.
+Do not claim profile exclusivity or a real-profile launch until their owning
+proofs complete.

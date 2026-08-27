@@ -2,16 +2,20 @@
 
 Warm Browser is one of the two Agent Browser Modules, and the implemented one.
 
-It owns the Command Vocabulary and Result Vocabulary. The first vertical slice
-implements the `help` meta-surface and the `start`, `status`, and `stop` product
-commands. The remaining accepted product commands are not callable yet.
-Browser Session, Controlled Page, Snapshot Generation, Snapshot Reference
+It owns the Command Vocabulary and Result Vocabulary, and each command declares
+the options it accepts beside its own name there. The implemented slice is the
+`help` meta-surface and the `start`, `status`, `open`, `snapshot`, `click`,
+`fill`, and `stop` product commands; `screenshot` and `login` are not callable
+yet. Browser Session, Controlled Page, Snapshot Generation, Snapshot Reference
 validity, and Screenshot lifecycle remain internal to this Module.
 
 The production Adapter is fixed: one value, no factory, no injected dependency.
 Tests inject the internal Adapter through a private test-only driver, or
 substitute the Module's private `host-effects` seam through a test preload; no
-environment variable selects a fake in production.
+environment variable selects a fake in production. The CDP transport is the one
+raw effect that is never substituted: the deterministic Controlled Page fixture
+is a real local endpoint, so replacing the transport would delete the protocol
+conversation under proof and leave an assertion about it in its place.
 The lifecycle contract fails closed on unsupported platforms, unsafe profile or
 state, ambiguous ownership, occupied or unverifiable ports, process mismatch,
 and CDP or Controlled Page identity failure. Ownership requires the whole
@@ -34,6 +38,21 @@ gone is stopped, a group still present after its bound is escalated once, and a
 group whose liveness cannot be observed is never escalated onto and never
 reported stopped. A proved stop whose durable cleanup fails reports the stop it
 performed and keeps the retained state repairable.
+
+One Controlled Page is operated through Snapshot References and never through a
+public selector. A reference names an element ordinal at a Snapshot Generation
+and carries that generation in its own text, so a reference issued against an
+earlier one resolves against nothing. Every `open`, every fresh `snapshot`, every
+act that moves the page, and every adoption of a replacement page invalidates the
+generation durably and completely, which is why no register of dead references
+exists to be consulted later. Every use re-proves the live page identity as well,
+so a reference that outlived the page it described is refused rather than
+followed. The page is reached at an address this Module computes, never at the
+socket the endpoint advertises, and a target identity it could not address again
+is not a Controlled Page at all. A replacement page is refused until one `open`
+is told to adopt it. `fill` refuses a credential field from the snapshot before
+saying anything to the page, and again from the live description immediately
+before typing; both refusals route to `login`.
 
 A Screenshot is a private session-owned PNG of the Controlled Page, distinct
 from the structured interaction snapshot. Warm Browser returns only its owned
