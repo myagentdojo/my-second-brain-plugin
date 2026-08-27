@@ -91,6 +91,48 @@ export function runProductionCli(
 	})
 }
 
+export interface AsyncCliResult {
+	readonly exitCode: number
+	readonly stdout: string
+	readonly stderr: string
+}
+
+/**
+ * Runs the production CLI as a real process without blocking this one.
+ *
+ * A test that owns a live loopback fixture has to keep answering that fixture
+ * while the CLI runs, so it can never wait on a synchronous child: the child
+ * would be dialling a server whose event loop this process is holding.
+ *
+ * `root` names the package the CLI is run from. It is the real package unless a
+ * negative control is running the same scenario against a mutated copy.
+ */
+export async function runProductionCliAsync(
+	probe: ProductionCliProbe,
+	arguments_: readonly string[],
+	root: string = packageRoot,
+): Promise<AsyncCliResult> {
+	const child = Bun.spawn({
+		cmd: [
+			process.execPath,
+			"--preload",
+			resolve(root, "tests/fixtures/host-effects-preload.ts"),
+			resolve(root, "src/main.ts"),
+			...arguments_,
+		],
+		cwd: root,
+		env: probe.environment,
+		stdout: "pipe",
+		stderr: "pipe",
+	})
+	const [exitCode, stdout, stderr] = await Promise.all([
+		child.exited,
+		new Response(child.stdout).text(),
+		new Response(child.stderr).text(),
+	])
+	return { exitCode, stdout, stderr }
+}
+
 export function hostEffects(probe: ProductionCliProbe): Array<Record<string, unknown>> {
 	const path = join(probe.fakeRoot, "actions.jsonl")
 	return existsSync(path)

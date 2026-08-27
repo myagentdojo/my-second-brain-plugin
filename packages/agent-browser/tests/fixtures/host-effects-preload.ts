@@ -4,6 +4,7 @@ import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 
+import { loopbackReadTimeoutMs } from "../../src/modules/warm-browser/bounds"
 import type { SignalOutcome } from "../../src/modules/warm-browser/host-effects"
 import type { ListenerReading } from "../../src/modules/warm-browser/listener-table"
 import type { ProcessTableReading } from "../../src/modules/warm-browser/process-table"
@@ -95,6 +96,13 @@ interface HostEffectsPlan {
 	readonly listenerOwner?: number | "absent" | "unverifiable" | "spawned"
 	/** Loopback JSON documents keyed by URL pathname. */
 	readonly loopbackJson?: Record<string, LoopbackDocument>
+	/**
+	 * Reads the loopback JSON document for real instead of serving a scripted
+	 * one. The deterministic Controlled Page fixture is a real local endpoint, so
+	 * the raw effect this seam owns is performed rather than replaced; every
+	 * interpretation of the reading still belongs to production code.
+	 */
+	readonly loopbackJsonPassthrough?: boolean
 }
 
 interface SpawnedLeader {
@@ -236,9 +244,14 @@ const fake: typeof import("../../src/modules/warm-browser/host-effects") = {
 	readLoopbackJson: async (url) => {
 		action({ action: "http", url })
 		loopbackReadsServed += 1
-		const held = plan().holdEndpointVerificationUntil
+		const current = plan()
+		const held = current.holdEndpointVerificationUntil
 		if (held !== undefined) await waitForBarrier(held)
-		const document = plan().loopbackJson?.[new URL(url).pathname]
+		if (current.loopbackJsonPassthrough === true) {
+			const response = await fetch(url, { signal: AbortSignal.timeout(loopbackReadTimeoutMs) })
+			return { ok: response.ok, body: await response.json() }
+		}
+		const document = current.loopbackJson?.[new URL(url).pathname]
 		if (document === undefined) throw new Error("the private host-effects fake serves no document")
 		return document
 	},
