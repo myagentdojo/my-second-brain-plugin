@@ -4,6 +4,8 @@ import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 
 import {
+	acceptedReferenceLifetimeMs,
+	ageSnapshotGeneration,
 	pageProbe,
 	readReceipt,
 	signInPage,
@@ -16,7 +18,6 @@ import {
 	removeProductionCliProbes,
 	runProductionCliAsync,
 } from "./fixtures/production-cli-harness"
-import { snapshotReferenceTimeoutMs } from "../src/modules/warm-browser/bounds"
 
 /**
  * Negative controls for the Snapshot Reference invalidation rules and the
@@ -111,14 +112,10 @@ test("removing the reference lifetime lets an expired reference act", async () =
 			root,
 		)
 		const snapshot = await takeSnapshot(probe, "control-expiry", root)
-		const receipt = readReceipt(probe)
-		writeReceipt(probe, {
-			...receipt,
-			snapshot: {
-				...(receipt.snapshot as Record<string, unknown>),
-				takenAtEpochMs: Date.now() - snapshotReferenceTimeoutMs - 5_000,
-			},
-		})
+		// The age is the one these tests accept, not the one the copy under
+		// mutation works to: an input taken from the guard being removed would
+		// move with it and could never expire.
+		ageSnapshotGeneration(probe, acceptedReferenceLifetimeMs + 1_000)
 		return reading(
 			await runProductionCliAsync(
 				probe,

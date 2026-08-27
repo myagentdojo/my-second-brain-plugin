@@ -69,6 +69,17 @@ export const signInPage: readonly FixtureElement[] = [
 	},
 ]
 
+/**
+ * The accepted Snapshot Reference lifetime, one minute, restated by hand and
+ * owned by the tests.
+ *
+ * Every expiry input is built from this value and never from the bound
+ * production works to. A production lifetime that moved would then disagree
+ * with these proofs instead of moving them along with it, which is the whole
+ * point of writing the accepted number down here.
+ */
+export const acceptedReferenceLifetimeMs = 60_000
+
 export interface PageProbe {
 	readonly fixture: CdpPageFixture
 	readonly probe: ProductionCliProbe
@@ -118,6 +129,22 @@ export function readReceipt(probe: ProductionCliProbe): Record<string, unknown> 
 export function writeReceipt(probe: ProductionCliProbe, receipt: Record<string, unknown>): void {
 	writeFileSync(probe.sessionPath, `${JSON.stringify(receipt, null, 2)}\n`, { mode: 0o600 })
 	chmodSync(probe.sessionPath, 0o600)
+}
+
+/**
+ * Rewrites the private receipt so its Snapshot Generation was taken `ageMs`
+ * ago. The age is always supplied by the caller from the test-owned lifetime,
+ * so no expiry input is ever computed from the production bound.
+ */
+export function ageSnapshotGeneration(probe: ProductionCliProbe, ageMs: number): void {
+	const receipt = readReceipt(probe)
+	writeReceipt(probe, {
+		...receipt,
+		snapshot: {
+			...(receipt.snapshot as Record<string, unknown>),
+			takenAtEpochMs: Date.now() - ageMs,
+		},
+	})
 }
 
 export interface SnapshotResult {

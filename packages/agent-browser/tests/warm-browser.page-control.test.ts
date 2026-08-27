@@ -2,6 +2,8 @@ import { afterEach, expect, test } from "bun:test"
 import { readFileSync, statSync } from "node:fs"
 
 import {
+	acceptedReferenceLifetimeMs,
+	ageSnapshotGeneration,
 	pageProbe,
 	readReceipt,
 	signInPage,
@@ -321,26 +323,44 @@ test("open invalidates every earlier reference before it navigates", async () =>
 	})
 })
 
-test("a reference older than its bound is stale even on the page that issued it", async () => {
-	const { probe } = await pageProbe({ url: "https://fixture.test/sign-in", elements: signInPage })
-	const snapshot = await takeSnapshot(probe, "expiry-snapshot")
-	const receipt = readReceipt(probe)
-	const generation = receipt.snapshot as Record<string, unknown>
-	writeReceipt(probe, {
-		...receipt,
-		snapshot: { ...generation, takenAtEpochMs: Date.now() - snapshotReferenceTimeoutMs - 5_000 },
-	})
-
-	const clicked = await runProductionCliAsync(probe, [
-		"click",
-		"--ref",
-		snapshot.elements[3]!.ref,
-		"--run-id",
-		"expired-click",
-	])
-
-	expectRefusal(clicked, 21, { command: "click", resultCode: "SNAPSHOT_REFERENCE_STALE" })
+test("production works to the Snapshot Reference lifetime these proofs accept", () => {
+	// The lifetime is pinned here, on its own, against the value restated by
+	// hand in the test fixtures. Every other proof states an age rather than a
+	// bound, so this is the single place a changed production lifetime is
+	// reported, and it is reported as a decision to review rather than absorbed.
+	expect(snapshotReferenceTimeoutMs).toBe(acceptedReferenceLifetimeMs)
 })
+
+test.each([
+	["half the accepted lifetime", acceptedReferenceLifetimeMs / 2, 0, "ELEMENT_CLICKED"],
+	["one second past it", acceptedReferenceLifetimeMs + 1_000, 21, "SNAPSHOT_REFERENCE_STALE"],
+] as const)(
+	"a reference aged %s is answered from the accepted lifetime alone",
+	async (_name, ageMs, exitCode, resultCode) => {
+		const { probe } = await pageProbe({ url: "https://fixture.test/sign-in", elements: signInPage })
+		const snapshot = await takeSnapshot(probe, "lifetime-snapshot")
+		// The age comes from the lifetime these tests accept, never from the bound
+		// production works to, so a production lifetime shorter than half a minute
+		// or longer than a minute fails one of these two rows.
+		ageSnapshotGeneration(probe, ageMs)
+
+		const clicked = await runProductionCliAsync(probe, [
+			"click",
+			"--ref",
+			snapshot.elements[3]!.ref,
+			"--run-id",
+			"lifetime-click",
+		])
+
+		if (exitCode === 0) {
+			expect(clicked.stderr).toBe("")
+			expect(clicked.exitCode).toBe(0)
+			expect(JSON.parse(clicked.stdout).resultCode).toBe(resultCode)
+			return
+		}
+		expectRefusal(clicked, exitCode, { command: "click", resultCode })
+	},
+)
 
 test("a reference issued against another Controlled Page is refused", async () => {
 	const { fixture, probe } = await pageProbe({
