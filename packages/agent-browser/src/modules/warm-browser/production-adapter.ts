@@ -8,8 +8,8 @@ import type {
 	BrowserProcessIdentity,
 	EndpointVerification,
 	ProcessListInspection,
-	WarmBrowserAdapter,
 } from "./contract"
+import type { WarmBrowserAdapter } from "./adapter"
 import {
 	connectLoopbackPort,
 	hostPlatform,

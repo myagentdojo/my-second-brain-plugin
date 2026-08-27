@@ -1,10 +1,4 @@
 // @bun
-// packages/agent-browser/src/modules/warm-browser/production-adapter.ts
-import { randomUUID } from "crypto";
-import { existsSync, lstatSync as lstatSync2 } from "fs";
-import { homedir } from "os";
-import { join } from "path";
-
 // packages/agent-browser/src/modules/warm-browser/contract.ts
 var schemaVersion = 1;
 var commandVocabulary = [
@@ -20,6 +14,12 @@ class SpawnCleanupUnverifiedError extends Error {
     this.name = "SpawnCleanupUnverifiedError";
   }
 }
+
+// packages/agent-browser/src/modules/warm-browser/production-adapter.ts
+import { randomUUID } from "crypto";
+import { existsSync, lstatSync as lstatSync2 } from "fs";
+import { homedir } from "os";
+import { join } from "path";
 
 // packages/agent-browser/src/modules/warm-browser/host-effects.ts
 import { spawn, spawnSync } from "child_process";
@@ -1079,7 +1079,8 @@ async function execute(parsed, adapter) {
     return status(parsed, paths, adapter);
   return stop(parsed, paths, adapter);
 }
-async function runWarmBrowserCli(arguments_, adapter) {
+async function runWarmBrowserCli(arguments_) {
+  const adapter = productionAdapter;
   let parsed;
   try {
     parsed = parseArguments(arguments_, adapter);
@@ -1113,7 +1114,7 @@ async function runWarmBrowserCli(arguments_, adapter) {
 }
 
 // packages/agent-browser/src/main.ts
-var outcome = await runWarmBrowserCli(process.argv.slice(2), productionAdapter);
+var outcome = await runWarmBrowserCli(process.argv.slice(2));
 if (outcome.stdout)
   process.stdout.write(outcome.stdout);
 if (outcome.stderr)

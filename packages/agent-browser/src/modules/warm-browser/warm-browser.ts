@@ -10,8 +10,9 @@ import {
 	SpawnCleanupUnverifiedError,
 	type SuccessEnvelope,
 	type TransactionState,
-	type WarmBrowserAdapter,
 } from "./contract"
+import type { WarmBrowserAdapter } from "./adapter"
+import { productionAdapter } from "./production-adapter"
 import {
 	acquireSessionLock,
 	type BrowserSessionState,
@@ -926,10 +927,13 @@ async function execute(parsed: ParsedCommand, adapter: WarmBrowserAdapter): Prom
 	return stop(parsed, paths, adapter)
 }
 
-export async function runWarmBrowserCli(
-	arguments_: readonly string[],
-	adapter: WarmBrowserAdapter,
-): Promise<CliOutcome> {
+/**
+ * The Warm Browser entry. It takes an argument list and nothing else: the fixed
+ * production Adapter is bound here, so no caller can inject one and no test
+ * parameter exists on the production interface.
+ */
+export async function runWarmBrowserCli(arguments_: readonly string[]): Promise<CliOutcome> {
+	const adapter: WarmBrowserAdapter = productionAdapter
 	let parsed: ParsedCommand | undefined
 	try {
 		parsed = parseArguments(arguments_, adapter)

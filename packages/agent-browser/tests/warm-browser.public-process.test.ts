@@ -4,6 +4,7 @@ import {
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
+	readdirSync,
 	readFileSync,
 	rmSync,
 	statSync,
@@ -14,12 +15,14 @@ import {
 import { homedir, tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 
+import * as contractModule from "../src/modules/warm-browser/contract"
 import { commandVocabulary } from "../src/modules/warm-browser/contract"
 import { productionAdapter } from "../src/modules/warm-browser/production-adapter"
+import { runWarmBrowserCli } from "../src/modules/warm-browser/warm-browser"
 
 const packageRoot = resolve(import.meta.dir, "..")
 const productionEntry = resolve(packageRoot, "src/main.ts")
-const fixtureEntry = resolve(import.meta.dir, "fixtures/warm-browser-driver.ts")
+const driverPreload = resolve(import.meta.dir, "fixtures/warm-browser-driver.ts")
 const temporaryRoots: string[] = []
 
 interface Fixture {
@@ -68,7 +71,7 @@ function fixture(plan: Record<string, unknown> = {}): Fixture {
 
 function run(testFixture: Fixture, arguments_: string[]): Bun.ReadableSyncSubprocess {
 	return Bun.spawnSync({
-		cmd: [process.execPath, fixtureEntry, ...arguments_],
+		cmd: [process.execPath, "--preload", driverPreload, productionEntry, ...arguments_],
 		cwd: packageRoot,
 		env: testFixture.environment,
 		stdout: "pipe",
@@ -257,13 +260,46 @@ test("production fixes the Agent Chrome Profile to HOME without predecessor over
 	expect(source).toContain("commandHasArgument(processIdentity.commandLine, marker)")
 })
 
-test("the production entry runs the fixed Adapter and no test-selected one", () => {
+test("the production entry passes the argument list and selects no Adapter", () => {
 	const entry = readFileSync(productionEntry, "utf8")
-	expect(entry).toContain(
-		'import { productionAdapter } from "./modules/warm-browser/production-adapter"',
-	)
-	expect(entry).toContain("runWarmBrowserCli(process.argv.slice(2), productionAdapter)")
+	expect(entry).toContain("runWarmBrowserCli(process.argv.slice(2))")
+	// The entry names no Adapter at all, so there is nothing for it to select.
+	expect(entry).not.toContain("Adapter")
 	expect(entry).not.toContain("process.env")
+})
+
+test("the public entry accepts an argument list and no injected Adapter", () => {
+	// One declared parameter: a caller has no second argument to pass.
+	expect(runWarmBrowserCli).toHaveLength(1)
+	const module = readFileSync(
+		resolve(packageRoot, "src/modules/warm-browser/warm-browser.ts"),
+		"utf8",
+	)
+	expect(module).toContain("export async function runWarmBrowserCli(arguments_: readonly string[])")
+	// The one Adapter is bound inside the Module, never handed in.
+	expect(module).toContain('import { productionAdapter } from "./production-adapter"')
+})
+
+test("the Warm Browser contract publishes no Adapter injection surface", () => {
+	// Independent oracle: the exact contract surface a caller may depend on.
+	const contractSource = readFileSync(
+		resolve(packageRoot, "src/modules/warm-browser/contract.ts"),
+		"utf8",
+	)
+	expect(contractSource).not.toContain("WarmBrowserAdapter")
+	expect(Object.keys(contractModule).toSorted()).toEqual([
+		"SpawnCleanupUnverifiedError",
+		"commandVocabulary",
+		"schemaVersion",
+	])
+	// The seam still exists, privately, and exactly one module declares it.
+	const moduleRoot = resolve(packageRoot, "src/modules/warm-browser")
+	const declaring = readdirSync(moduleRoot)
+		.filter((entry) => entry.endsWith(".ts"))
+		.filter((entry) =>
+			readFileSync(join(moduleRoot, entry), "utf8").includes("interface WarmBrowserAdapter")
+		)
+	expect(declaring).toEqual(["adapter.ts"])
 })
 
 test("usage failure is one literal stderr envelope with exit 2", () => {
@@ -536,7 +572,7 @@ test("simultaneous starts deterministically leave one owner and one transient re
 	temporaryRoots.push(releasePath)
 	const testFixture = fixture({ holdVerificationUntil: releasePath })
 	const first = Bun.spawn({
-		cmd: [process.execPath, fixtureEntry, "start", "--run-id", "concurrent-first"],
+		cmd: [process.execPath, "--preload", driverPreload, productionEntry, "start", "--run-id", "concurrent-first"],
 		cwd: packageRoot,
 		env: testFixture.environment,
 		stdout: "pipe",
@@ -1063,7 +1099,7 @@ test("SIGKILL after fake spawn leaves durable intent that recovers exactly one m
 	const barrier = join(tmpdir(), `warm-browser-never-release-${crypto.randomUUID()}`)
 	const testFixture = fixture({ holdSpawnReturnUntil: barrier })
 	const driver = Bun.spawn({
-		cmd: [process.execPath, fixtureEntry, "start", "--run-id", "sigkill-start"],
+		cmd: [process.execPath, "--preload", driverPreload, productionEntry, "start", "--run-id", "sigkill-start"],
 		cwd: packageRoot,
 		env: testFixture.environment,
 		stdout: "pipe",

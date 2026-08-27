@@ -1,13 +1,14 @@
+import { mock } from "bun:test"
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
+import { fileURLToPath } from "node:url"
 
+import type { WarmBrowserAdapter } from "../../src/modules/warm-browser/adapter"
 import { SpawnCleanupUnverifiedError } from "../../src/modules/warm-browser/contract"
 import type {
 	BrowserProcessIdentity,
 	EndpointVerification,
-	WarmBrowserAdapter,
 } from "../../src/modules/warm-browser/contract"
-import { runWarmBrowserCli } from "../../src/modules/warm-browser/warm-browser"
 
 interface FixturePlan {
 	readonly platform?: string
@@ -213,7 +214,14 @@ const adapter: WarmBrowserAdapter = {
 	},
 }
 
-const outcome = await runWarmBrowserCli(process.argv.slice(2), adapter)
-if (outcome.stdout) process.stdout.write(outcome.stdout)
-if (outcome.stderr) process.stderr.write(outcome.stderr)
-process.exitCode = outcome.exitCode
+/**
+ * Substitutes the Module's private Adapter seam and nothing else. Preloading
+ * this file leaves the production entry, argument parser, result vocabulary,
+ * and every lifecycle rule real; the production entry still binds the Adapter
+ * itself, so no injection surface exists for a caller to reach.
+ */
+const seam = fileURLToPath(
+	new URL("../../src/modules/warm-browser/production-adapter.ts", import.meta.url),
+)
+
+mock.module(seam, () => ({ productionAdapter: adapter }))
