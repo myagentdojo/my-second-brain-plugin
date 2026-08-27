@@ -230,20 +230,55 @@ test("help is one literal agent-native success envelope", () => {
 				retrySafe: true,
 				nextAction: "Run warm-browser start --run-id ID to create the Browser Session.",
 				data: {
-					usage: "warm-browser <help|start|status|stop> [--run-id ID] [--port NUMBER]",
+					usage:
+						"warm-browser <help|start|status|open|snapshot|click|fill|stop> [--run-id ID] [--port NUMBER] [--url URL] [--adopt-page] [--ref REFERENCE] [--value TEXT]",
 					commands: [
-						{ name: "help", sideEffects: "none" },
+						{ name: "help", sideEffects: "none", options: [] },
 						{
 							name: "start",
 							sideEffects:
 								"may stop a proved stale owned browser process group, then starts one owned browser process group",
+							options: [{ flag: "--port", value: "NUMBER", required: false }],
 						},
 						{
 							name: "status",
 							sideEffects:
 								"may stop a proved stale owned browser process group and remove its private state",
+							options: [],
 						},
-						{ name: "stop", sideEffects: "stops one verified owned browser process group" },
+						{
+							name: "open",
+							sideEffects:
+								"navigates the one Controlled Page and invalidates every earlier Snapshot Reference",
+							options: [
+								{ flag: "--url", value: "URL", required: true },
+								{ flag: "--adopt-page", value: null, required: false },
+							],
+						},
+						{
+							name: "snapshot",
+							sideEffects: "reads the Controlled Page and replaces every earlier Snapshot Reference",
+							options: [],
+						},
+						{
+							name: "click",
+							sideEffects: "dispatches one click on one referenced element of the Controlled Page",
+							options: [{ flag: "--ref", value: "REFERENCE", required: true }],
+						},
+						{
+							name: "fill",
+							sideEffects:
+								"types one non-secret value into one referenced field of the Controlled Page",
+							options: [
+								{ flag: "--ref", value: "REFERENCE", required: true },
+								{ flag: "--value", value: "TEXT", required: true },
+							],
+						},
+						{
+							name: "stop",
+							sideEffects: "stops one verified owned browser process group",
+							options: [],
+						},
 					],
 				},
 			})
@@ -263,6 +298,13 @@ test("help states every side effect each command can actually have", () => {
 			"may stop a proved stale owned browser process group, then starts one owned browser process group",
 		],
 		["status", "may stop a proved stale owned browser process group and remove its private state"],
+		[
+			"open",
+			"navigates the one Controlled Page and invalidates every earlier Snapshot Reference",
+		],
+		["snapshot", "reads the Controlled Page and replaces every earlier Snapshot Reference"],
+		["click", "dispatches one click on one referenced element of the Controlled Page"],
+		["fill", "types one non-secret value into one referenced field of the Controlled Page"],
 		["stop", "stops one verified owned browser process group"],
 	] as const
 	const result = Bun.spawnSync({
@@ -284,11 +326,26 @@ test("help states every side effect each command can actually have", () => {
 		const advertised = commands.find((command) => command.name === name)?.sideEffects ?? ""
 		expect(advertised, name).toContain("stop a proved stale owned browser process group")
 	}
+	// The three commands that invalidate Snapshot References say so, because a
+	// caller holding one has to know its reference did not survive the command.
+	for (const name of ["open", "snapshot"] as const) {
+		const advertised = commands.find((command) => command.name === name)?.sideEffects ?? ""
+		expect(advertised, name).toContain("Snapshot Reference")
+	}
 })
 
 test("help usage names every command from the single Command Vocabulary owner", () => {
 	// Independent oracle: the sealed Command Vocabulary, restated by hand.
-	const expectedNames = ["help", "start", "status", "stop"] as const
+	const expectedNames = [
+		"help",
+		"start",
+		"status",
+		"open",
+		"snapshot",
+		"click",
+		"fill",
+		"stop",
+	] as const
 	const result = Bun.spawnSync({
 		cmd: [process.execPath, productionEntry, "help", "--run-id", "usage-run"],
 		cwd: packageRoot,
@@ -297,7 +354,9 @@ test("help usage names every command from the single Command Vocabulary owner", 
 	})
 	const usage = (JSON.parse(result.stdout.toString()).data as { usage: string }).usage
 
-	expect(usage).toBe("warm-browser <help|start|status|stop> [--run-id ID] [--port NUMBER]")
+	expect(usage).toBe(
+		"warm-browser <help|start|status|open|snapshot|click|fill|stop> [--run-id ID] [--port NUMBER] [--url URL] [--adopt-page] [--ref REFERENCE] [--value TEXT]",
+	)
 	expect(usage.slice("warm-browser <".length, usage.indexOf(">")).split("|")).toEqual([
 		...expectedNames,
 	])
@@ -308,7 +367,7 @@ test("help usage names every command from the single Command Vocabulary owner", 
 		resolve(packageRoot, "src/modules/warm-browser/warm-browser.ts"),
 		"utf8",
 	)
-	expect(moduleSource).not.toContain("help|start|status|stop")
+	expect(moduleSource).not.toContain("help|start|status|open|snapshot|click|fill|stop")
 })
 
 test("production fixes the Agent Chrome Profile to HOME without predecessor overrides", () => {
@@ -353,6 +412,8 @@ test("the Warm Browser contract publishes no Adapter injection surface", () => {
 	expect(Object.keys(contractModule).toSorted()).toEqual([
 		"SpawnCleanupUnverifiedError",
 		"commandVocabulary",
+		"refusedSelectorFlags",
+		"runIdOption",
 		"schemaVersion",
 	])
 	// The seam still exists, privately, and exactly one module declares it.
@@ -367,7 +428,7 @@ test("the Warm Browser contract publishes no Adapter injection surface", () => {
 
 test("usage failure is one literal stderr envelope with exit 2", () => {
 	const testFixture = fixture()
-	const result = run(testFixture, ["open", "--run-id", "usage-run"])
+	const result = run(testFixture, ["browse", "--run-id", "usage-run"])
 	expectError(result, 2, {
 		schemaVersion: 1,
 		status: "error",

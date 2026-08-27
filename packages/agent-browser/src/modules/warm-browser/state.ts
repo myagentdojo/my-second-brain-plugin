@@ -14,8 +14,10 @@ import {
 } from "node:fs"
 import { dirname, join, resolve } from "node:path"
 
-import type { BrowserProcessIdentity, VerifiedEndpoint } from "./contract"
+import { snapshotElementLimit, snapshotTextLimit } from "./bounds"
+import type { BrowserProcessIdentity, ControlledPageElement, VerifiedEndpoint } from "./contract"
 import type { LaunchOwnership } from "./ownership"
+import type { SnapshotGeneration } from "./snapshot"
 
 interface BrowserSessionBase {
 	readonly schemaVersion: 1
@@ -47,6 +49,13 @@ export interface RunningBrowserSessionState extends BrowserSessionBase {
 	readonly phase: "running"
 	readonly process: BrowserProcessIdentity
 	readonly endpoint: BrowserSessionBase["endpoint"] & VerifiedEndpoint
+	/**
+	 * The one Snapshot Generation whose references are still live. Its absence
+	 * is what invalidation looks like on disk: a session that has taken no
+	 * snapshot and a session whose references were invalidated are the same
+	 * state, so no dead reference can survive anywhere to be resolved later.
+	 */
+	readonly snapshot?: SnapshotGeneration
 }
 
 export type BrowserSessionState =
@@ -201,6 +210,51 @@ function processShape(value: unknown): value is BrowserProcessIdentity {
 	)
 }
 
+function isBoundedText(value: unknown): value is string {
+	return typeof value === "string" && value.length <= snapshotTextLimit
+}
+
+function basisShape(value: unknown): boolean {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return false
+	const basis = value as Record<string, unknown>
+	return (
+		isNonEmptyString(basis.targetId) &&
+		isNonEmptyString(basis.frameId) &&
+		isNonEmptyString(basis.loaderId) &&
+		isNonEmptyString(basis.url)
+	)
+}
+
+function elementShape(value: unknown): value is ControlledPageElement {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return false
+	const element = value as Partial<ControlledPageElement>
+	return (
+		isProcessIdentifier(element.backendNodeId) &&
+		isBoundedText(element.role) &&
+		isBoundedText(element.name) &&
+		typeof element.credentialField === "boolean"
+	)
+}
+
+/**
+ * The Snapshot Generation a running receipt may carry. Every reference this
+ * session will honour is resolved from these bytes, so a generation outside its
+ * domain is unsafe state rather than a value to repair.
+ */
+function snapshotShape(value: unknown): value is SnapshotGeneration {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return false
+	const generation = value as Partial<SnapshotGeneration>
+	return (
+		isIdentifier(generation.generationId) &&
+		isEpochMs(generation.takenAtEpochMs) &&
+		basisShape(generation.basis) &&
+		typeof generation.truncated === "boolean" &&
+		Array.isArray(generation.elements) &&
+		generation.elements.length <= snapshotElementLimit &&
+		generation.elements.every(elementShape)
+	)
+}
+
 function launchShape(value: unknown): value is LaunchOwnership {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) return false
 	const launch = value as Partial<LaunchOwnership>
@@ -239,6 +293,10 @@ function stateShape(value: unknown): value is BrowserSessionState {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) return false
 	const state = value as Partial<BrowserSessionState>
 	if (!commonShape(state)) return false
+	// A Snapshot Generation belongs to a verified Controlled Page and to nothing
+	// else, so a receipt that carries one before the page exists did not come
+	// from this code.
+	if (state.phase !== "running" && "snapshot" in state) return false
 	if (state.phase === "launching") {
 		return !("process" in state) && endpointShape(state.endpoint, false)
 	}
@@ -249,9 +307,11 @@ function stateShape(value: unknown): value is BrowserSessionState {
 		)
 	}
 	if (state.phase === "running") {
+		const running = state as Partial<RunningBrowserSessionState>
 		return (
-			processShape((state as Partial<RunningBrowserSessionState>).process) &&
-			endpointShape(state.endpoint, true)
+			processShape(running.process) &&
+			endpointShape(state.endpoint, true) &&
+			(running.snapshot === undefined || snapshotShape(running.snapshot))
 		)
 	}
 	return false

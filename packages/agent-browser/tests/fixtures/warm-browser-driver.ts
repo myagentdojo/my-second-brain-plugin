@@ -99,6 +99,7 @@ async function waitFor(path: string): Promise<void> {
 const adapter: WarmBrowserAdapter = {
 	createRunId: () => "fixture-generated-run",
 	createSessionId: () => `session-${ledger().spawnCount + 1}`,
+	createSnapshotId: () => "snapshot-fixture",
 	nowEpochMs: () => plan().nowEpochMs ?? 1_800_000_000_000,
 	platform: () => plan().platform ?? "darwin",
 	chromeExecutable: () => "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",

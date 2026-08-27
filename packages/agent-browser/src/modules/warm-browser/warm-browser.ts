@@ -2,9 +2,15 @@ import {
 	type BrowserProcessIdentity,
 	type CliCommand,
 	type CliOutcome,
+	type CommandOption,
 	commandVocabulary,
+	type ControlledPageBasis,
+	type EndpointVerification,
 	type ErrorEnvelope,
+	type PageCommand,
+	refusedSelectorFlags,
 	type ResultCode,
+	runIdOption,
 	schemaVersion,
 	type SliceCommand,
 	SpawnCleanupUnverifiedError,
@@ -12,7 +18,14 @@ import {
 	type TransactionState,
 } from "./contract"
 import type { WarmBrowserAdapter } from "./adapter"
-import { startingTimeoutMs } from "./bounds"
+import { fillValueLimit, startingTimeoutMs } from "./bounds"
+import {
+	actOnControlledPage,
+	type ControlledPageAction,
+	openControlledPage,
+	readControlledPageSnapshot,
+	sameBasis,
+} from "./controlled-page"
 import {
 	chromeArgumentList,
 	isOwnedLaunch,
@@ -20,6 +33,7 @@ import {
 	launchOwnership,
 } from "./ownership"
 import { productionAdapter } from "./production-adapter"
+import { publishedElements, resolveSnapshotReference, type SnapshotGeneration } from "./snapshot"
 import {
 	acquireSessionLock,
 	type BrowserSessionState,
@@ -39,16 +53,34 @@ import {
 
 const defaultPort = 9242
 const runIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
+const controlCharacter = /\p{Cc}/u
 const commandNames = new Set<string>(commandVocabulary.map(({ name }) => name))
+const selectorFlags = new Set<string>(refusedSelectorFlags)
+
+/** One option rendered the way usage names it. */
+function renderOption(option: CommandOption): string {
+	return option.value === null ? `[${option.flag}]` : `[${option.flag} ${option.value}]`
+}
+
 /** Generated from the single Command Vocabulary owner; never restated. */
-const usageLine = `warm-browser <${
-	commandVocabulary.map(({ name }) => name).join("|")
-}> [--run-id ID] [--port NUMBER]`
+const usageLine = `warm-browser <${commandVocabulary.map(({ name }) => name).join("|")}> ${
+	[
+		runIdOption,
+		...commandVocabulary.flatMap(({ options }) => options as readonly CommandOption[]),
+	]
+		.filter((option, index, all) => all.findIndex((other) => other.flag === option.flag) === index)
+		.map(renderOption)
+		.join(" ")
+}`
 
 interface ParsedCommand {
 	readonly command: CliCommand
 	readonly runId: string
 	readonly port?: number
+	readonly url?: string
+	readonly reference?: string
+	readonly value?: string
+	readonly adoptPage: boolean
 }
 
 class WarmBrowserFailure extends Error {
@@ -123,6 +155,78 @@ function usage(runId: string, command: CliCommand | "unknown", message: string):
 	})
 }
 
+/**
+ * Refuses a public selector by name. A selector is not a mistyped argument: the
+ * interface has no selector at any command, and the answer is always the same
+ * one, so the caller is told that rather than being told its argument was
+ * unrecognised.
+ */
+function selectorRefusal(runId: string, command: CliCommand, flag: string): never {
+	raise({
+		command,
+		resultCode: "SELECTOR_UNSUPPORTED",
+		exitCode: 21,
+		runId,
+		retrySafe: false,
+		nextAction: "Run warm-browser snapshot --run-id ID and act through the references it issues.",
+		message: `Warm Browser acts through Snapshot References, not the ${flag} selector.`,
+	})
+}
+
+function safeUrl(value: string): URL | undefined {
+	try {
+		return new URL(value)
+	} catch {
+		return undefined
+	}
+}
+
+/**
+ * The one place an option's value is judged. Each rule belongs to the flag it
+ * governs, so a command that accepts a flag accepts exactly the same values for
+ * it as every other command that does.
+ */
+function optionValue(runId: string, command: CliCommand, flag: string, raw: string): string | number {
+	if (flag === "--run-id") {
+		if (!runIdPattern.test(raw)) usage(runId, command, "The --run-id value is missing or invalid.")
+		return raw
+	}
+	if (flag === "--port") {
+		if (!/^[0-9]+$/.test(raw)) usage(runId, command, "The --port value must be a decimal port number.")
+		const port = Number(raw)
+		if (!Number.isSafeInteger(port) || port < 1024 || port > 65_535) {
+			usage(runId, command, "The --port value must be between 1024 and 65535.")
+		}
+		return port
+	}
+	if (flag === "--url") {
+		const parsed = raw.length > 2_048 || controlCharacter.test(raw) ? undefined : safeUrl(raw)
+		if (parsed === undefined) usage(runId, command, "The --url value must be an absolute URL.")
+		if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+			raise({
+				command,
+				resultCode: "NAVIGATION_TARGET_REFUSED",
+				exitCode: 21,
+				runId,
+				retrySafe: false,
+				nextAction: "Run warm-browser open --url URL --run-id ID with an http or https address.",
+				message: "Warm Browser opens http and https pages only.",
+			})
+		}
+		return raw
+	}
+	if (flag === "--ref") {
+		if (raw === "" || raw.length > 160 || /\s/u.test(raw) || controlCharacter.test(raw)) {
+			usage(runId, command, "The --ref value is missing or invalid.")
+		}
+		return raw
+	}
+	if (raw === "" || raw.length > fillValueLimit || controlCharacter.test(raw)) {
+		usage(runId, command, "The --value text is missing or invalid.")
+	}
+	return raw
+}
+
 function parseArguments(arguments_: readonly string[], adapter: WarmBrowserAdapter): ParsedCommand {
 	const generatedRunId = candidateRunId(arguments_, adapter)
 	const first = arguments_[0]
@@ -132,42 +236,58 @@ function parseArguments(arguments_: readonly string[], adapter: WarmBrowserAdapt
 			: commandNames.has(first)
 			? (first as CliCommand)
 			: "unknown"
-	if (command === "unknown") usage(generatedRunId, command, "Unknown Warm Browser command.")
-	let runId = generatedRunId
-	let port: number | undefined
-	let runIdSeen = false
-	let portSeen = false
-	for (let index = first === undefined ? 0 : 1; index < arguments_.length; index += 1) {
-		const argument = arguments_[index]
-		if (argument === "--run-id") {
-			if (runIdSeen) usage(runId, command, "The --run-id flag may appear only once.")
-			const value = arguments_[index + 1]
-			if (value === undefined || !runIdPattern.test(value)) {
-				usage(runId, command, "The --run-id value is missing or invalid.")
-			}
-			runId = value
-			runIdSeen = true
-			index += 1
-			continue
+	if (command === "unknown") {
+		if (first !== undefined && selectorFlags.has(first)) {
+			selectorRefusal(generatedRunId, "help", first)
 		}
-		if (argument === "--port") {
-			if (command !== "start") usage(runId, command, "The --port flag is accepted only by start.")
-			if (portSeen) usage(runId, command, "The --port flag may appear only once.")
-			const value = arguments_[index + 1]
-			if (value === undefined || !/^[0-9]+$/.test(value)) {
-				usage(runId, command, "The --port value must be a decimal port number.")
-			}
-			port = Number(value)
-			if (!Number.isSafeInteger(port) || port < 1024 || port > 65_535) {
-				usage(runId, command, "The --port value must be between 1024 and 65535.")
-			}
-			portSeen = true
-			index += 1
-			continue
-		}
-		usage(runId, command, "Warm Browser received an unsupported argument.")
+		usage(generatedRunId, command, "Unknown Warm Browser command.")
 	}
-	return { command, runId, ...(port === undefined ? {} : { port }) }
+	// The options this command accepts, from the one vocabulary that declares
+	// them. A flag another command accepts is not accepted here.
+	const accepted = new Map<string, CommandOption>([
+		[runIdOption.flag, runIdOption],
+		...(commandVocabulary.find(({ name }) => name === command)!.options as readonly CommandOption[])
+			.map((option) => [option.flag, option] as const),
+	])
+	const seen = new Map<string, string | number | true>()
+	let runId = generatedRunId
+	for (let index = first === undefined ? 0 : 1; index < arguments_.length; index += 1) {
+		const argument = arguments_[index]!
+		if (selectorFlags.has(argument)) selectorRefusal(runId, command, argument)
+		const option = accepted.get(argument)
+		if (option === undefined) usage(runId, command, "Warm Browser received an unsupported argument.")
+		if (seen.has(option.flag)) {
+			usage(runId, command, `The ${option.flag} flag may appear only once.`)
+		}
+		if (option.value === null) {
+			seen.set(option.flag, true)
+			continue
+		}
+		const raw = arguments_[index + 1]
+		if (raw === undefined) usage(runId, command, `The ${option.flag} value is missing.`)
+		const value = optionValue(runId, command, option.flag, raw)
+		seen.set(option.flag, value)
+		if (option.flag === runIdOption.flag) runId = value as string
+		index += 1
+	}
+	for (const option of accepted.values()) {
+		if (option.required && !seen.has(option.flag)) {
+			usage(runId, command, `The ${option.flag} option is required by ${command}.`)
+		}
+	}
+	const port = seen.get("--port")
+	const url = seen.get("--url")
+	const reference = seen.get("--ref")
+	const value = seen.get("--value")
+	return {
+		command,
+		runId,
+		adoptPage: seen.get("--adopt-page") === true,
+		...(port === undefined ? {} : { port: port as number }),
+		...(url === undefined ? {} : { url: url as string }),
+		...(reference === undefined ? {} : { reference: reference as string }),
+		...(value === undefined ? {} : { value: value as string }),
+	}
 }
 
 function staticFailure(
@@ -251,6 +371,27 @@ function removeStateAfterStop(
 	}
 }
 
+/**
+ * The one owner of what an endpoint that did not verify means. A page that is
+ * missing and a page that is one of several are findings about the Controlled
+ * Page, not about the browser, and every command names them the same way
+ * because they all read this table. Only the subject differs: a start is
+ * describing the browser it just launched, and every later command is
+ * describing the endpoint its receipt already names.
+ */
+function endpointRefusal(
+	verification: Exclude<EndpointVerification["kind"], "verified" | "process_unverifiable">,
+	subject: "launched Chrome CDP" | "stored CDP endpoint",
+): readonly [ResultCode, string] {
+	if (verification === "controlled_page_unavailable") {
+		return ["CONTROLLED_PAGE_UNAVAILABLE", "The verified CDP endpoint exposes no Controlled Page."]
+	}
+	if (verification === "controlled_page_ambiguous") {
+		return ["CONTROLLED_PAGE_AMBIGUOUS", "The verified CDP endpoint exposes more than one page."]
+	}
+	return ["CDP_IDENTITY_UNVERIFIED", `The ${subject} identity could not be verified.`]
+}
+
 function canonicalProcess(value: BrowserProcessIdentity): BrowserProcessIdentity {
 	return {
 		pid: value.pid,
@@ -270,8 +411,33 @@ function canonicalProcess(value: BrowserProcessIdentity): BrowserProcessIdentity
  */
 type SessionInspection =
 	| { readonly kind: "absent" }
-	| { readonly kind: "running"; readonly state: RunningBrowserSessionState }
+	| {
+		readonly kind: "running"
+		readonly state: RunningBrowserSessionState
+		/** Whether this inspection bound a replacement page it was asked to adopt. */
+		readonly adoptedPage: boolean
+	}
 	| { readonly kind: "recovered"; readonly stoppedOwnedProcess: boolean }
+
+/**
+ * How one inspection answers a Controlled Page that is not the one the receipt
+ * names. Adoption is only ever asked for by a caller that said so on its own
+ * command line, so a page can never be replaced under a caller that did not.
+ */
+type PageReplacementPolicy = "refuse" | "adopt"
+
+/**
+ * Rebinds the Browser Session to a replacement Controlled Page and drops the
+ * Snapshot Generation with it. Every reference this session issued was issued
+ * against the page that is gone, so none of them may survive the rebinding.
+ */
+function adoptControlledPage(
+	state: RunningBrowserSessionState,
+	controlledPageTargetId: string,
+): RunningBrowserSessionState {
+	const { snapshot: _invalidated, ...rest } = state
+	return { ...rest, endpoint: { ...state.endpoint, controlledPageTargetId } }
+}
 
 /**
  * Removes a stale launch receipt only when its absence is proved twice over: no
@@ -406,6 +572,7 @@ async function inspectSession(
 	runId: string,
 	paths: StatePaths,
 	adapter: WarmBrowserAdapter,
+	pageReplacement: PageReplacementPolicy = "refuse",
 ): Promise<SessionInspection> {
 	const lockExists = validateSessionLock(paths)
 	const state = readSessionState(paths)
@@ -507,21 +674,34 @@ async function inspectSession(
 		process: first.process,
 	})
 	if (verification.kind === "process_unverifiable") inspectionFailure(command, runId)
-	if (
-		verification.kind !== "verified" ||
-		verification.endpoint.browserVersion !== state.endpoint.browserVersion ||
-		verification.endpoint.controlledPageTargetId !== state.endpoint.controlledPageTargetId
-	) {
-		staticFailure(
-			command,
-			runId,
-			"CDP_IDENTITY_UNVERIFIED",
-			20,
-			"The stored CDP endpoint identity could not be verified.",
-			"Inspect the Browser Session with its owned process still preserved.",
-		)
+	const preservedProcessAction = "Inspect the Browser Session with its owned process still preserved."
+	if (verification.kind !== "verified") {
+		const [resultCode, message] = endpointRefusal(verification.kind, "stored CDP endpoint")
+		staticFailure(command, runId, resultCode, 20, message, preservedProcessAction)
 	}
-	return { kind: "running", state }
+	if (verification.endpoint.browserVersion !== state.endpoint.browserVersion) {
+		const [resultCode, message] = endpointRefusal("browser_unverified", "stored CDP endpoint")
+		staticFailure(command, runId, resultCode, 20, message, preservedProcessAction)
+	}
+	// The verified browser still exposes exactly one page, and it is a different
+	// one. That is a page replacement, and it is never adopted silently: every
+	// reference this session issued belongs to the page that is gone.
+	if (verification.endpoint.controlledPageTargetId !== state.endpoint.controlledPageTargetId) {
+		if (pageReplacement === "refuse") {
+			staticFailure(
+				command,
+				runId,
+				"CONTROLLED_PAGE_REPLACED",
+				20,
+				"The Browser Session's Controlled Page was replaced by another page.",
+				"Run warm-browser open --url URL --adopt-page --run-id ID to bind the replacement Controlled Page.",
+			)
+		}
+		const adopted = adoptControlledPage(state, verification.endpoint.controlledPageTargetId)
+		writeSessionState(paths, adopted)
+		return { kind: "running", state: adopted, adoptedPage: true }
+	}
+	return { kind: "running", state, adoptedPage: false }
 }
 
 function sessionData(state: RunningBrowserSessionState, postcondition: "running" | "absent") {
@@ -706,20 +886,7 @@ async function start(
 			inspectionFailure("start", parsed.runId, priorTx)
 		}
 		if (verification.kind !== "verified") {
-			const mapped = verification.kind === "controlled_page_unavailable"
-				? ([
-					"CONTROLLED_PAGE_UNAVAILABLE",
-					"The verified CDP endpoint exposes no Controlled Page.",
-				] as const)
-				: verification.kind === "controlled_page_ambiguous"
-				? ([
-					"CONTROLLED_PAGE_AMBIGUOUS",
-					"The verified CDP endpoint exposes more than one page.",
-				] as const)
-				: ([
-					"CDP_IDENTITY_UNVERIFIED",
-					"The launched Chrome CDP identity could not be verified.",
-				] as const)
+			const mapped = endpointRefusal(verification.kind, "launched Chrome CDP")
 			if (!(await adapter.terminateProcessGroup(spawned, launching.launch))) {
 				staticFailure(
 					"start",
@@ -737,7 +904,7 @@ async function start(
 			staticFailure(
 				"start",
 				parsed.runId,
-				mapped[0] as ResultCode,
+				mapped[0],
 				20,
 				mapped[1],
 				"Inspect installed Chrome and the explicit CDP endpoint before retrying.",
@@ -896,6 +1063,374 @@ async function stop(
 	})
 }
 
+/**
+ * The Browser Session a page command is allowed to act through, and whether
+ * this command bound a replacement Controlled Page on its way in.
+ */
+interface ControlledSession {
+	readonly state: RunningBrowserSessionState
+	readonly adoptedPage: boolean
+}
+
+/**
+ * A required option is declared required by the one vocabulary the parser reads,
+ * so a command missing it never reaches execution. Reaching here means those two
+ * disagree, which is a defect rather than a caller mistake.
+ */
+function requiredArgument(value: string | undefined): string {
+	if (value === undefined) throw new Error("a required option reached execution unset")
+	return value
+}
+
+async function requireControlledPage(
+	parsed: ParsedCommand,
+	command: PageCommand,
+	paths: StatePaths,
+	adapter: WarmBrowserAdapter,
+): Promise<ControlledSession> {
+	const inspection = await inspectSession(
+		command,
+		parsed.runId,
+		paths,
+		adapter,
+		parsed.adoptPage ? "adopt" : "refuse",
+	)
+	if (inspection.kind === "running") {
+		return { state: inspection.state, adoptedPage: inspection.adoptedPage }
+	}
+	staticFailure(
+		command,
+		parsed.runId,
+		"SESSION_ABSENT",
+		21,
+		"No verified Browser Session owns a Controlled Page.",
+		"Run warm-browser start --run-id ID to create a Browser Session.",
+		false,
+		inspection.kind === "recovered" ? "recovered" : "unchanged",
+	)
+}
+
+/**
+ * Records what a page command left behind. A command that has already reached
+ * the Controlled Page never reports itself unchanged because its receipt could
+ * not be written; it names the state that needs repairing instead.
+ */
+function recordAfterAction(
+	command: PageCommand,
+	runId: string,
+	paths: StatePaths,
+	state: RunningBrowserSessionState,
+): void {
+	try {
+		writeSessionState(paths, state)
+	} catch {
+		staticFailure(
+			command,
+			runId,
+			"STATE_UNSAFE",
+			20,
+			"Warm Browser acted on the Controlled Page but could not record the Snapshot Generation it left behind.",
+			"Repair the private Warm Browser session state; the Controlled Page has already changed.",
+			false,
+			"acted",
+		)
+	}
+}
+
+/** The same Browser Session with no live Snapshot Generation. */
+function withoutSnapshot(state: RunningBrowserSessionState): RunningBrowserSessionState {
+	const { snapshot: _invalidated, ...rest } = state
+	return rest
+}
+
+/**
+ * Drops every reference this session issued. Invalidation is durable and it is
+ * total: there is no list of dead references to consult later, because the
+ * generation they name stops existing.
+ */
+function invalidateReferences(
+	command: PageCommand,
+	runId: string,
+	paths: StatePaths,
+	state: RunningBrowserSessionState,
+): RunningBrowserSessionState {
+	if (state.snapshot === undefined) return state
+	const cleared = withoutSnapshot(state)
+	recordAfterAction(command, runId, paths, cleared)
+	return cleared
+}
+
+function controlledPageData(basis: ControlledPageBasis): Record<string, unknown> {
+	return { targetId: basis.targetId, url: basis.url }
+}
+
+const freshSnapshotAction =
+	"Run warm-browser snapshot --run-id ID to issue fresh Snapshot References."
+
+function pageControlUnverified(
+	command: PageCommand,
+	runId: string,
+	message: string,
+	transactionState: TransactionState,
+): never {
+	staticFailure(
+		command,
+		runId,
+		"PAGE_CONTROL_UNVERIFIED",
+		20,
+		message,
+		"Inspect the Browser Session and its CDP endpoint before retrying.",
+		false,
+		transactionState,
+	)
+}
+
+function credentialRefusal(command: PageCommand, runId: string): never {
+	staticFailure(
+		command,
+		runId,
+		"CREDENTIAL_FIELD_REFUSED",
+		21,
+		"Warm Browser does not type credentials into the Controlled Page.",
+		"Use the Warm Browser login command for a credential field; it is not callable in this slice.",
+	)
+}
+
+async function open(
+	parsed: ParsedCommand,
+	paths: StatePaths,
+	adapter: WarmBrowserAdapter,
+): Promise<CliOutcome> {
+	const session = await requireControlledPage(parsed, "open", paths, adapter)
+	// Every open invalidates first. A navigation that the browser refuses, and
+	// one whose outcome cannot be verified, both leave a page nobody has re-read,
+	// so no reference issued before it may survive either outcome.
+	const state = invalidateReferences("open", parsed.runId, paths, session.state)
+	const navigation = await openControlledPage({
+		port: state.endpoint.port,
+		targetId: state.endpoint.controlledPageTargetId,
+		url: requiredArgument(parsed.url),
+	})
+	if (navigation.kind === "refused") {
+		staticFailure(
+			"open",
+			parsed.runId,
+			"NAVIGATION_FAILED",
+			20,
+			"The Controlled Page did not complete the requested navigation.",
+			"Run warm-browser snapshot --run-id ID to read where the Controlled Page actually is.",
+			false,
+			"acted",
+		)
+	}
+	if (navigation.kind === "unverified") {
+		pageControlUnverified(
+			"open",
+			parsed.runId,
+			"Warm Browser could not verify what its Controlled Page did with the navigation.",
+			"acted",
+		)
+	}
+	return success({
+		schemaVersion,
+		status: "ok",
+		command: "open",
+		resultCode: "PAGE_OPENED",
+		runId: parsed.runId,
+		transactionState: "acted",
+		retrySafe: false,
+		nextAction: freshSnapshotAction,
+		data: {
+			controlledPage: controlledPageData(navigation.basis),
+			adoptedPage: session.adoptedPage,
+			invalidatedReferences: true,
+			postcondition: "running",
+		},
+	})
+}
+
+async function snapshot(
+	parsed: ParsedCommand,
+	paths: StatePaths,
+	adapter: WarmBrowserAdapter,
+): Promise<CliOutcome> {
+	const session = await requireControlledPage(parsed, "snapshot", paths, adapter)
+	const state = session.state
+	const reading = await readControlledPageSnapshot({
+		port: state.endpoint.port,
+		targetId: state.endpoint.controlledPageTargetId,
+	})
+	if (reading.kind === "identity_changed") {
+		staticFailure(
+			"snapshot",
+			parsed.runId,
+			"PAGE_IDENTITY_CHANGED",
+			21,
+			"The Controlled Page moved while it was being read, so no Snapshot Reference was issued.",
+			freshSnapshotAction,
+		)
+	}
+	if (reading.kind === "unverified") {
+		pageControlUnverified(
+			"snapshot",
+			parsed.runId,
+			"Warm Browser could not read the Controlled Page.",
+			"unchanged",
+		)
+	}
+	const generation: SnapshotGeneration = {
+		generationId: adapter.createSnapshotId(),
+		takenAtEpochMs: adapter.nowEpochMs(),
+		basis: reading.basis,
+		truncated: reading.truncated,
+		elements: reading.elements,
+	}
+	recordAfterAction("snapshot", parsed.runId, paths, { ...state, snapshot: generation })
+	return success({
+		schemaVersion,
+		status: "ok",
+		command: "snapshot",
+		resultCode: "SNAPSHOT_TAKEN",
+		runId: parsed.runId,
+		transactionState: "acted",
+		retrySafe: true,
+		nextAction:
+			"Run warm-browser click --ref REFERENCE --run-id ID or warm-browser fill --ref REFERENCE --value TEXT --run-id ID.",
+		data: {
+			generationId: generation.generationId,
+			controlledPage: controlledPageData(generation.basis),
+			elementCount: generation.elements.length,
+			truncated: generation.truncated,
+			elements: publishedElements(generation),
+			postcondition: "running",
+		},
+	})
+}
+
+async function actOnPage(
+	parsed: ParsedCommand,
+	command: Extract<PageCommand, "click" | "fill">,
+	paths: StatePaths,
+	adapter: WarmBrowserAdapter,
+): Promise<CliOutcome> {
+	const session = await requireControlledPage(parsed, command, paths, adapter)
+	const state = session.state
+	const reference = requiredArgument(parsed.reference)
+	const resolution = resolveSnapshotReference({
+		reference,
+		generation: state.snapshot,
+		controlledPageTargetId: state.endpoint.controlledPageTargetId,
+		nowEpochMs: adapter.nowEpochMs(),
+	})
+	if (resolution.kind === "absent") {
+		staticFailure(
+			command,
+			parsed.runId,
+			"SNAPSHOT_ABSENT",
+			21,
+			"This Browser Session holds no Snapshot Generation.",
+			"Run warm-browser snapshot --run-id ID before acting on the Controlled Page.",
+		)
+	}
+	if (resolution.kind === "malformed") {
+		staticFailure(
+			command,
+			parsed.runId,
+			"SNAPSHOT_REFERENCE_INVALID",
+			21,
+			"Warm Browser acts through a Snapshot Reference, and this is not one.",
+			freshSnapshotAction,
+		)
+	}
+	if (resolution.kind === "unknown") {
+		staticFailure(
+			command,
+			parsed.runId,
+			"SNAPSHOT_REFERENCE_INVALID",
+			21,
+			"The Snapshot Reference names no element of the current Snapshot Generation.",
+			freshSnapshotAction,
+		)
+	}
+	if (resolution.kind === "stale") {
+		staticFailure(
+			command,
+			parsed.runId,
+			"SNAPSHOT_REFERENCE_STALE",
+			21,
+			"The Snapshot Reference belongs to another Snapshot Generation, another Controlled Page, or a generation that has expired.",
+			freshSnapshotAction,
+		)
+	}
+	// A resolved reference always came from the generation this session holds.
+	const generation = state.snapshot!
+	if (command === "fill" && resolution.element.credentialField) {
+		credentialRefusal(command, parsed.runId)
+	}
+	const action: ControlledPageAction = command === "click"
+		? { kind: "click" }
+		: { kind: "fill", value: requiredArgument(parsed.value) }
+	const outcome = await actOnControlledPage({
+		port: state.endpoint.port,
+		targetId: state.endpoint.controlledPageTargetId,
+		basis: generation.basis,
+		backendNodeId: resolution.element.backendNodeId,
+		action,
+	})
+	if (outcome.kind === "identity_changed") {
+		staticFailure(
+			command,
+			parsed.runId,
+			"PAGE_IDENTITY_CHANGED",
+			21,
+			"The Controlled Page is no longer the page this Snapshot Reference was issued against.",
+			freshSnapshotAction,
+		)
+	}
+	if (outcome.kind === "element_absent") {
+		staticFailure(
+			command,
+			parsed.runId,
+			"SNAPSHOT_REFERENCE_STALE",
+			21,
+			"The referenced element is no longer part of the Controlled Page.",
+			freshSnapshotAction,
+		)
+	}
+	if (outcome.kind === "credential_field") credentialRefusal(command, parsed.runId)
+	if (outcome.kind === "unverified") {
+		// The conversation stopped without an answer, so what reached the page is
+		// unknown. Unknown is never reported as unchanged, and the references that
+		// described the page before it are not kept.
+		invalidateReferences(command, parsed.runId, paths, state)
+		pageControlUnverified(
+			command,
+			parsed.runId,
+			"Warm Browser could not verify what its Controlled Page did with the action.",
+			"acted",
+		)
+	}
+	const invalidatedReferences = !sameBasis(outcome.basis, generation.basis)
+	if (invalidatedReferences) invalidateReferences(command, parsed.runId, paths, state)
+	return success({
+		schemaVersion,
+		status: "ok",
+		command,
+		resultCode: command === "click" ? "ELEMENT_CLICKED" : "FIELD_FILLED",
+		runId: parsed.runId,
+		transactionState: "acted",
+		retrySafe: false,
+		nextAction: freshSnapshotAction,
+		data: {
+			reference,
+			...(command === "fill" ? { valueLength: requiredArgument(parsed.value).length } : {}),
+			controlledPage: controlledPageData(outcome.basis),
+			invalidatedReferences,
+			postcondition: "running",
+		},
+	})
+}
+
 async function execute(parsed: ParsedCommand, adapter: WarmBrowserAdapter): Promise<CliOutcome> {
 	if (parsed.command === "help") {
 		return success({
@@ -909,7 +1444,15 @@ async function execute(parsed: ParsedCommand, adapter: WarmBrowserAdapter): Prom
 			nextAction: "Run warm-browser start --run-id ID to create the Browser Session.",
 			data: {
 				usage: usageLine,
-				commands: commandVocabulary.map(({ name, sideEffects }) => ({ name, sideEffects })),
+				commands: commandVocabulary.map(({ name, sideEffects, options }) => ({
+					name,
+					sideEffects,
+					options: (options as readonly CommandOption[]).map(({ flag, value, required }) => ({
+						flag,
+						value,
+						required,
+					})),
+				})),
 			},
 		})
 	}
@@ -945,6 +1488,11 @@ async function execute(parsed: ParsedCommand, adapter: WarmBrowserAdapter): Prom
 	}
 	if (parsed.command === "start") return start(parsed, paths, adapter)
 	if (parsed.command === "status") return status(parsed, paths, adapter)
+	if (parsed.command === "open") return open(parsed, paths, adapter)
+	if (parsed.command === "snapshot") return snapshot(parsed, paths, adapter)
+	if (parsed.command === "click" || parsed.command === "fill") {
+		return actOnPage(parsed, parsed.command, paths, adapter)
+	}
 	return stop(parsed, paths, adapter)
 }
 

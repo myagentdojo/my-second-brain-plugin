@@ -1,17 +1,47 @@
 // @bun
 // packages/agent-browser/src/modules/warm-browser/contract.ts
 var schemaVersion = 1;
+var runIdOption = { flag: "--run-id", value: "ID", required: false };
+var refusedSelectorFlags = ["--selector", "--css", "--xpath", "--text"];
 var commandVocabulary = [
-  { name: "help", sideEffects: "none" },
+  { name: "help", sideEffects: "none", options: [] },
   {
     name: "start",
-    sideEffects: "may stop a proved stale owned browser process group, then starts one owned browser process group"
+    sideEffects: "may stop a proved stale owned browser process group, then starts one owned browser process group",
+    options: [{ flag: "--port", value: "NUMBER", required: false }]
   },
   {
     name: "status",
-    sideEffects: "may stop a proved stale owned browser process group and remove its private state"
+    sideEffects: "may stop a proved stale owned browser process group and remove its private state",
+    options: []
   },
-  { name: "stop", sideEffects: "stops one verified owned browser process group" }
+  {
+    name: "open",
+    sideEffects: "navigates the one Controlled Page and invalidates every earlier Snapshot Reference",
+    options: [
+      { flag: "--url", value: "URL", required: true },
+      { flag: "--adopt-page", value: null, required: false }
+    ]
+  },
+  {
+    name: "snapshot",
+    sideEffects: "reads the Controlled Page and replaces every earlier Snapshot Reference",
+    options: []
+  },
+  {
+    name: "click",
+    sideEffects: "dispatches one click on one referenced element of the Controlled Page",
+    options: [{ flag: "--ref", value: "REFERENCE", required: true }]
+  },
+  {
+    name: "fill",
+    sideEffects: "types one non-secret value into one referenced field of the Controlled Page",
+    options: [
+      { flag: "--ref", value: "REFERENCE", required: true },
+      { flag: "--value", value: "TEXT", required: true }
+    ]
+  },
+  { name: "stop", sideEffects: "stops one verified owned browser process group", options: [] }
 ];
 
 class SpawnCleanupUnverifiedError extends Error {
@@ -34,6 +64,401 @@ var groupAbsencePauseMs = 50;
 var escalatedAbsenceAttempts = 20;
 var startBudgetMs = portProbeTimeoutMs + spawnConfirmationAttempts * spawnConfirmationPauseMs + endpointAttempts * (loopbackReadsPerAttempt * loopbackReadTimeoutMs + endpointPauseMs) + (groupAbsenceAttempts + escalatedAbsenceAttempts) * groupAbsencePauseMs;
 var startingTimeoutMs = startBudgetMs * 2;
+var pageConnectTimeoutMs = 2000;
+var pageCallTimeoutMs = 5000;
+var snapshotReferenceTimeoutMs = 60000;
+var snapshotElementLimit = 500;
+var snapshotTextLimit = 256;
+var fillValueLimit = 4096;
+
+// packages/agent-browser/src/modules/warm-browser/cdp-channel.ts
+var failedReply = { ok: false, result: undefined };
+async function openCdpChannel(webSocketUrl) {
+  let socket;
+  try {
+    socket = new WebSocket(webSocketUrl);
+  } catch {
+    return { kind: "unavailable" };
+  }
+  const pending = new Map;
+  let closed = false;
+  function releaseAll() {
+    closed = true;
+    for (const [id, call] of pending) {
+      clearTimeout(call.timer);
+      pending.delete(id);
+      call.settle(failedReply);
+    }
+  }
+  socket.addEventListener("message", (event) => {
+    let message;
+    try {
+      message = JSON.parse(String(event.data));
+    } catch {
+      return;
+    }
+    if (typeof message.id !== "number")
+      return;
+    const call = pending.get(message.id);
+    if (call === undefined)
+      return;
+    clearTimeout(call.timer);
+    pending.delete(message.id);
+    call.settle(message.error === undefined && message.result !== undefined ? { ok: true, result: message.result } : failedReply);
+  });
+  socket.addEventListener("close", releaseAll);
+  socket.addEventListener("error", releaseAll);
+  const opened = await new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(false), pageConnectTimeoutMs);
+    socket.addEventListener("open", () => {
+      clearTimeout(timer);
+      resolve(true);
+    });
+    socket.addEventListener("error", () => {
+      clearTimeout(timer);
+      resolve(false);
+    });
+    socket.addEventListener("close", () => {
+      clearTimeout(timer);
+      resolve(false);
+    });
+  });
+  if (!opened) {
+    try {
+      socket.close();
+    } catch {}
+    return { kind: "unavailable" };
+  }
+  let nextCallId = 0;
+  const channel = {
+    call: async (method, parameters) => {
+      if (closed)
+        return failedReply;
+      nextCallId += 1;
+      const id = nextCallId;
+      return await new Promise((resolve) => {
+        const timer = setTimeout(() => {
+          pending.delete(id);
+          resolve(failedReply);
+        }, pageCallTimeoutMs);
+        pending.set(id, { settle: resolve, timer });
+        try {
+          socket.send(JSON.stringify({ id, method, params: parameters }));
+        } catch {
+          clearTimeout(timer);
+          pending.delete(id);
+          resolve(failedReply);
+        }
+      });
+    },
+    close: () => {
+      releaseAll();
+      try {
+        socket.close();
+      } catch {}
+    }
+  };
+  return { kind: "open", channel };
+}
+
+// packages/agent-browser/src/modules/warm-browser/credential-fields.ts
+var credentialInputTypes = ["password"];
+var credentialAutocompleteTokens = [
+  "current-password",
+  "new-password",
+  "one-time-code"
+];
+var credentialIdentifierFragments = [
+  "password",
+  "passwd",
+  "passphrase",
+  "passcode",
+  "pwd",
+  "otp",
+  "totp",
+  "2fa",
+  "mfa",
+  "securitycode",
+  "verificationcode"
+];
+var identifierAttributes = ["name", "id", "autocomplete", "aria-label", "placeholder"];
+function normalise(value) {
+  return value.toLowerCase().replaceAll(/[^a-z0-9]/g, "");
+}
+function isCredentialField(description) {
+  const attributes = description.attributes;
+  const type = (attributes.type ?? "").trim().toLowerCase();
+  if (credentialInputTypes.includes(type))
+    return true;
+  const autocomplete = (attributes.autocomplete ?? "").trim().toLowerCase().split(/\s+/);
+  if (autocomplete.some((token) => credentialAutocompleteTokens.includes(token))) {
+    return true;
+  }
+  const identifier = identifierAttributes.map((attribute) => normalise(attributes[attribute] ?? "")).join(" ");
+  return credentialIdentifierFragments.some((fragment) => identifier.includes(fragment));
+}
+
+// packages/agent-browser/src/modules/warm-browser/controlled-page.ts
+var addressableTargetId = /^[A-Za-z0-9_-]{1,128}$/;
+function isAddressableTargetId(value) {
+  return typeof value === "string" && addressableTargetId.test(value);
+}
+var actionableRoles = [
+  "button",
+  "checkbox",
+  "combobox",
+  "link",
+  "listbox",
+  "menuitem",
+  "menuitemcheckbox",
+  "menuitemradio",
+  "option",
+  "radio",
+  "searchbox",
+  "slider",
+  "spinbutton",
+  "switch",
+  "tab",
+  "textarea",
+  "textbox"
+];
+function record(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : undefined;
+}
+function nonEmptyText(value) {
+  return typeof value === "string" && value !== "" ? value : undefined;
+}
+function readableText(value) {
+  if (typeof value !== "string")
+    return "";
+  return value.replaceAll(/\s+/gu, " ").trim().slice(0, snapshotTextLimit);
+}
+function readBasisReply(targetId, reply) {
+  const frame = record(record(record(reply)?.frameTree)?.frame);
+  const frameId = nonEmptyText(frame?.id);
+  const loaderId = nonEmptyText(frame?.loaderId);
+  const url = nonEmptyText(frame?.url);
+  return frameId === undefined || loaderId === undefined || url === undefined ? undefined : { targetId, frameId, loaderId, url };
+}
+function sameBasis(left, right) {
+  return left.targetId === right.targetId && left.frameId === right.frameId && left.loaderId === right.loaderId && left.url === right.url;
+}
+async function readBasis(channel, targetId) {
+  const reply = await channel.call("Page.getFrameTree", {});
+  return reply.ok ? readBasisReply(targetId, reply.result) : undefined;
+}
+function attributeMap(attributes) {
+  const flat = Array.isArray(attributes) ? attributes : [];
+  const map = {};
+  for (let index = 0;index + 1 < flat.length; index += 2) {
+    const name = flat[index];
+    const value = flat[index + 1];
+    if (typeof name === "string" && typeof value === "string")
+      map[name] = value;
+  }
+  return map;
+}
+function describedNode(node) {
+  const nodeName = nonEmptyText(node.nodeName);
+  return nodeName === undefined ? undefined : { nodeName, attributes: attributeMap(node.attributes) };
+}
+function documentDescriptions(reply) {
+  const root = record(record(reply)?.root);
+  if (root === undefined)
+    return;
+  const descriptions = new Map;
+  const queue = [root];
+  while (queue.length > 0) {
+    const node = queue.pop();
+    const backendNodeId = node.backendNodeId;
+    const description = describedNode(node);
+    if (typeof backendNodeId === "number" && description !== undefined) {
+      descriptions.set(backendNodeId, description);
+    }
+    for (const key of ["children", "shadowRoots", "pseudoElements"]) {
+      const children = node[key];
+      if (!Array.isArray(children))
+        continue;
+      for (const child of children) {
+        const childRecord = record(child);
+        if (childRecord !== undefined)
+          queue.push(childRecord);
+      }
+    }
+    const contentDocument = record(node.contentDocument);
+    if (contentDocument !== undefined)
+      queue.push(contentDocument);
+  }
+  return descriptions;
+}
+function accessibilityNodes(reply) {
+  const nodes = record(reply)?.nodes;
+  if (!Array.isArray(nodes))
+    return;
+  const readings = [];
+  for (const entry of nodes) {
+    const node = record(entry);
+    if (node === undefined)
+      return;
+    const backendNodeId = node.backendDOMNodeId;
+    if (typeof backendNodeId !== "number" || !Number.isSafeInteger(backendNodeId))
+      continue;
+    const properties = Array.isArray(node.properties) ? node.properties : [];
+    const focusable = properties.some((property) => {
+      const entryRecord = record(property);
+      return entryRecord?.name === "focusable" && record(entryRecord.value)?.value === true;
+    });
+    readings.push({
+      role: readableText(record(node.role)?.value),
+      name: readableText(record(node.name)?.value),
+      focusable,
+      ignored: node.ignored === true,
+      backendNodeId
+    });
+  }
+  return readings;
+}
+function interpretElements(nodes, descriptions) {
+  const elements = [];
+  let truncated = false;
+  for (const node of nodes) {
+    if (node.ignored)
+      continue;
+    const description = descriptions.get(node.backendNodeId);
+    const credentialField = description !== undefined && isCredentialField(description);
+    const actionable = node.focusable || actionableRoles.includes(node.role);
+    if (!actionable && !credentialField)
+      continue;
+    if (elements.length === snapshotElementLimit) {
+      truncated = true;
+      break;
+    }
+    elements.push({
+      backendNodeId: node.backendNodeId,
+      role: node.role,
+      name: node.name,
+      credentialField
+    });
+  }
+  return { elements, truncated };
+}
+async function withControlledPage(port, targetId, unverified, work) {
+  if (!isAddressableTargetId(targetId))
+    return unverified;
+  const connection = await openCdpChannel(`ws://127.0.0.1:${port}/devtools/page/${targetId}`);
+  if (connection.kind === "unavailable")
+    return unverified;
+  try {
+    return await work(connection.channel);
+  } catch {
+    return unverified;
+  } finally {
+    connection.channel.close();
+  }
+}
+async function openControlledPage(input) {
+  return await withControlledPage(input.port, input.targetId, { kind: "unverified" }, async (channel) => {
+    if (!(await channel.call("Page.enable", {})).ok)
+      return { kind: "unverified" };
+    const navigation = await channel.call("Page.navigate", { url: input.url });
+    if (!navigation.ok)
+      return { kind: "unverified" };
+    if (nonEmptyText(record(navigation.result)?.errorText) !== undefined) {
+      return { kind: "refused" };
+    }
+    const basis = await readBasis(channel, input.targetId);
+    return basis === undefined ? { kind: "unverified" } : { kind: "navigated", basis };
+  });
+}
+async function readControlledPageSnapshot(input) {
+  return await withControlledPage(input.port, input.targetId, { kind: "unverified" }, async (channel) => {
+    for (const method of ["Page.enable", "DOM.enable", "Accessibility.enable"]) {
+      if (!(await channel.call(method, {})).ok)
+        return { kind: "unverified" };
+    }
+    const before = await readBasis(channel, input.targetId);
+    if (before === undefined)
+      return { kind: "unverified" };
+    const document = await channel.call("DOM.getDocument", { depth: -1, pierce: false });
+    if (!document.ok)
+      return { kind: "unverified" };
+    const descriptions = documentDescriptions(document.result);
+    if (descriptions === undefined)
+      return { kind: "unverified" };
+    const tree = await channel.call("Accessibility.getFullAXTree", {});
+    if (!tree.ok)
+      return { kind: "unverified" };
+    const nodes = accessibilityNodes(tree.result);
+    if (nodes === undefined)
+      return { kind: "unverified" };
+    const after = await readBasis(channel, input.targetId);
+    if (after === undefined)
+      return { kind: "unverified" };
+    if (!sameBasis(before, after))
+      return { kind: "identity_changed" };
+    const { elements, truncated } = interpretElements(nodes, descriptions);
+    return { kind: "observed", basis: after, elements, truncated };
+  });
+}
+async function actOnControlledPage(input) {
+  return await withControlledPage(input.port, input.targetId, { kind: "unverified" }, async (channel) => {
+    for (const method of ["Page.enable", "DOM.enable"]) {
+      if (!(await channel.call(method, {})).ok)
+        return { kind: "unverified" };
+    }
+    const before = await readBasis(channel, input.targetId);
+    if (before === undefined)
+      return { kind: "unverified" };
+    if (!sameBasis(before, input.basis))
+      return { kind: "identity_changed" };
+    const described = await channel.call("DOM.describeNode", {
+      backendNodeId: input.backendNodeId
+    });
+    if (!described.ok)
+      return { kind: "element_absent" };
+    const description = describedNode(record(record(described.result)?.node) ?? {});
+    if (description === undefined)
+      return { kind: "element_absent" };
+    if (input.action.kind === "fill" && isCredentialField(description)) {
+      return { kind: "credential_field" };
+    }
+    if (input.action.kind === "click") {
+      const box = await channel.call("DOM.getBoxModel", { backendNodeId: input.backendNodeId });
+      if (!box.ok)
+        return { kind: "element_absent" };
+      const content = record(record(box.result)?.model)?.content;
+      if (!Array.isArray(content) || content.length < 8)
+        return { kind: "element_absent" };
+      const points = content.slice(0, 8);
+      if (!points.every((value) => typeof value === "number" && Number.isFinite(value))) {
+        return { kind: "element_absent" };
+      }
+      const x = (points[0] + points[2] + points[4] + points[6]) / 4;
+      const y = (points[1] + points[3] + points[5] + points[7]) / 4;
+      for (const type of ["mousePressed", "mouseReleased"]) {
+        const dispatched = await channel.call("Input.dispatchMouseEvent", {
+          type,
+          x,
+          y,
+          button: "left",
+          buttons: type === "mousePressed" ? 1 : 0,
+          clickCount: 1
+        });
+        if (!dispatched.ok)
+          return { kind: "unverified" };
+      }
+    } else {
+      if (!(await channel.call("DOM.focus", { backendNodeId: input.backendNodeId })).ok) {
+        return { kind: "element_absent" };
+      }
+      if (!(await channel.call("Input.insertText", { text: input.action.value })).ok) {
+        return { kind: "unverified" };
+      }
+    }
+    const after = await readBasis(channel, input.targetId);
+    return after === undefined ? { kind: "unverified" } : { kind: "acted", basis: after };
+  });
+}
 
 // packages/agent-browser/src/modules/warm-browser/ownership.ts
 function chromeArgumentList(input) {
@@ -327,7 +752,7 @@ async function readEndpoint(port, expected) {
       const targets = targetsReading.body;
       if (!targetsReading.ok || !Array.isArray(targets))
         return { kind: "browser_unverified" };
-      const pages = targets.filter((target) => target.type === "page" && typeof target.id === "string" && target.id.trim() !== "");
+      const pages = targets.filter((target) => target.type === "page" && isAddressableTargetId(target.id));
       if (pages.length === 0) {
         if (attempt === endpointAttempts - 1)
           return { kind: "controlled_page_unavailable" };
@@ -362,6 +787,7 @@ async function readEndpoint(port, expected) {
 var productionAdapter = {
   createRunId: () => `wb-${randomUUID()}`,
   createSessionId: () => `session-${randomUUID()}`,
+  createSnapshotId: () => `snapshot-${randomUUID()}`,
   nowEpochMs: () => Date.now(),
   platform: hostPlatform,
   chromeExecutable: () => installedChrome,
@@ -433,6 +859,38 @@ var productionAdapter = {
   }
 };
 
+// packages/agent-browser/src/modules/warm-browser/snapshot.ts
+var referencePattern = /^e([1-9][0-9]{0,3})@([A-Za-z0-9][A-Za-z0-9._:-]{0,127})$/;
+function snapshotReference(generationId, ordinal) {
+  return `e${ordinal}@${generationId}`;
+}
+function publishedElements(generation) {
+  return generation.elements.map((element, index) => ({
+    ref: snapshotReference(generation.generationId, index + 1),
+    role: element.role,
+    name: element.name,
+    credentialField: element.credentialField
+  }));
+}
+function resolveSnapshotReference(input) {
+  const match = referencePattern.exec(input.reference);
+  if (match === null)
+    return { kind: "malformed" };
+  const generation = input.generation;
+  if (generation === undefined)
+    return { kind: "absent" };
+  if (match[2] !== generation.generationId)
+    return { kind: "stale" };
+  const age = input.nowEpochMs - generation.takenAtEpochMs;
+  if (age < 0 || age > snapshotReferenceTimeoutMs)
+    return { kind: "stale" };
+  if (generation.basis.targetId !== input.controlledPageTargetId)
+    return { kind: "stale" };
+  const ordinal = Number(match[1]);
+  const element = generation.elements[ordinal - 1];
+  return element === undefined ? { kind: "unknown" } : { kind: "resolved", ordinal, element };
+}
+
 // packages/agent-browser/src/modules/warm-browser/state.ts
 import {
   chmodSync,
@@ -449,7 +907,6 @@ import {
   writeFileSync
 } from "fs";
 import { dirname, join as join2, resolve } from "path";
-
 class UnsafeStateError extends Error {
   constructor() {
     super("Warm Browser private state could not be proved safe");
@@ -540,6 +997,27 @@ function processShape(value) {
   const processIdentity = value;
   return isProcessIdentifier(processIdentity.pid) && isProcessIdentifier(processIdentity.processGroupId) && isNonEmptyString(processIdentity.startedAtToken) && isNonEmptyString(processIdentity.executable) && isNonEmptyString(processIdentity.commandLine);
 }
+function isBoundedText(value) {
+  return typeof value === "string" && value.length <= snapshotTextLimit;
+}
+function basisShape(value) {
+  if (typeof value !== "object" || value === null || Array.isArray(value))
+    return false;
+  const basis = value;
+  return isNonEmptyString(basis.targetId) && isNonEmptyString(basis.frameId) && isNonEmptyString(basis.loaderId) && isNonEmptyString(basis.url);
+}
+function elementShape(value) {
+  if (typeof value !== "object" || value === null || Array.isArray(value))
+    return false;
+  const element = value;
+  return isProcessIdentifier(element.backendNodeId) && isBoundedText(element.role) && isBoundedText(element.name) && typeof element.credentialField === "boolean";
+}
+function snapshotShape(value) {
+  if (typeof value !== "object" || value === null || Array.isArray(value))
+    return false;
+  const generation = value;
+  return isIdentifier(generation.generationId) && isEpochMs(generation.takenAtEpochMs) && basisShape(generation.basis) && typeof generation.truncated === "boolean" && Array.isArray(generation.elements) && generation.elements.length <= snapshotElementLimit && generation.elements.every(elementShape);
+}
 function launchShape(value) {
   if (typeof value !== "object" || value === null || Array.isArray(value))
     return false;
@@ -563,6 +1041,8 @@ function stateShape(value) {
   const state = value;
   if (!commonShape(state))
     return false;
+  if (state.phase !== "running" && "snapshot" in state)
+    return false;
   if (state.phase === "launching") {
     return !("process" in state) && endpointShape(state.endpoint, false);
   }
@@ -570,7 +1050,8 @@ function stateShape(value) {
     return processShape(state.process) && endpointShape(state.endpoint, false);
   }
   if (state.phase === "running") {
-    return processShape(state.process) && endpointShape(state.endpoint, true);
+    const running = state;
+    return processShape(running.process) && endpointShape(state.endpoint, true) && (running.snapshot === undefined || snapshotShape(running.snapshot));
   }
   return false;
 }
@@ -655,8 +1136,16 @@ function removeOwnedState(paths, sessionId) {
 // packages/agent-browser/src/modules/warm-browser/warm-browser.ts
 var defaultPort = 9242;
 var runIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+var controlCharacter = /\p{Cc}/u;
 var commandNames = new Set(commandVocabulary.map(({ name }) => name));
-var usageLine = `warm-browser <${commandVocabulary.map(({ name }) => name).join("|")}> [--run-id ID] [--port NUMBER]`;
+var selectorFlags = new Set(refusedSelectorFlags);
+function renderOption(option) {
+  return option.value === null ? `[${option.flag}]` : `[${option.flag} ${option.value}]`;
+}
+var usageLine = `warm-browser <${commandVocabulary.map(({ name }) => name).join("|")}> ${[
+  runIdOption,
+  ...commandVocabulary.flatMap(({ options }) => options)
+].filter((option, index, all) => all.findIndex((other) => other.flag === option.flag) === index).map(renderOption).join(" ")}`;
 
 class WarmBrowserFailure extends Error {
   command;
@@ -716,50 +1205,124 @@ function usage(runId, command, message) {
     message
   });
 }
+function selectorRefusal(runId, command, flag) {
+  raise({
+    command,
+    resultCode: "SELECTOR_UNSUPPORTED",
+    exitCode: 21,
+    runId,
+    retrySafe: false,
+    nextAction: "Run warm-browser snapshot --run-id ID and act through the references it issues.",
+    message: `Warm Browser acts through Snapshot References, not the ${flag} selector.`
+  });
+}
+function safeUrl(value) {
+  try {
+    return new URL(value);
+  } catch {
+    return;
+  }
+}
+function optionValue(runId, command, flag, raw) {
+  if (flag === "--run-id") {
+    if (!runIdPattern.test(raw))
+      usage(runId, command, "The --run-id value is missing or invalid.");
+    return raw;
+  }
+  if (flag === "--port") {
+    if (!/^[0-9]+$/.test(raw))
+      usage(runId, command, "The --port value must be a decimal port number.");
+    const port = Number(raw);
+    if (!Number.isSafeInteger(port) || port < 1024 || port > 65535) {
+      usage(runId, command, "The --port value must be between 1024 and 65535.");
+    }
+    return port;
+  }
+  if (flag === "--url") {
+    const parsed = raw.length > 2048 || controlCharacter.test(raw) ? undefined : safeUrl(raw);
+    if (parsed === undefined)
+      usage(runId, command, "The --url value must be an absolute URL.");
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      raise({
+        command,
+        resultCode: "NAVIGATION_TARGET_REFUSED",
+        exitCode: 21,
+        runId,
+        retrySafe: false,
+        nextAction: "Run warm-browser open --url URL --run-id ID with an http or https address.",
+        message: "Warm Browser opens http and https pages only."
+      });
+    }
+    return raw;
+  }
+  if (flag === "--ref") {
+    if (raw === "" || raw.length > 160 || /\s/u.test(raw) || controlCharacter.test(raw)) {
+      usage(runId, command, "The --ref value is missing or invalid.");
+    }
+    return raw;
+  }
+  if (raw === "" || raw.length > fillValueLimit || controlCharacter.test(raw)) {
+    usage(runId, command, "The --value text is missing or invalid.");
+  }
+  return raw;
+}
 function parseArguments(arguments_, adapter) {
   const generatedRunId = candidateRunId(arguments_, adapter);
   const first = arguments_[0];
   const command = first === undefined || first === "--help" || first === "-h" ? "help" : commandNames.has(first) ? first : "unknown";
-  if (command === "unknown")
+  if (command === "unknown") {
+    if (first !== undefined && selectorFlags.has(first)) {
+      selectorRefusal(generatedRunId, "help", first);
+    }
     usage(generatedRunId, command, "Unknown Warm Browser command.");
+  }
+  const accepted = new Map([
+    [runIdOption.flag, runIdOption],
+    ...commandVocabulary.find(({ name }) => name === command).options.map((option) => [option.flag, option])
+  ]);
+  const seen = new Map;
   let runId = generatedRunId;
-  let port;
-  let runIdSeen = false;
-  let portSeen = false;
   for (let index = first === undefined ? 0 : 1;index < arguments_.length; index += 1) {
     const argument = arguments_[index];
-    if (argument === "--run-id") {
-      if (runIdSeen)
-        usage(runId, command, "The --run-id flag may appear only once.");
-      const value = arguments_[index + 1];
-      if (value === undefined || !runIdPattern.test(value)) {
-        usage(runId, command, "The --run-id value is missing or invalid.");
-      }
-      runId = value;
-      runIdSeen = true;
-      index += 1;
+    if (selectorFlags.has(argument))
+      selectorRefusal(runId, command, argument);
+    const option = accepted.get(argument);
+    if (option === undefined)
+      usage(runId, command, "Warm Browser received an unsupported argument.");
+    if (seen.has(option.flag)) {
+      usage(runId, command, `The ${option.flag} flag may appear only once.`);
+    }
+    if (option.value === null) {
+      seen.set(option.flag, true);
       continue;
     }
-    if (argument === "--port") {
-      if (command !== "start")
-        usage(runId, command, "The --port flag is accepted only by start.");
-      if (portSeen)
-        usage(runId, command, "The --port flag may appear only once.");
-      const value = arguments_[index + 1];
-      if (value === undefined || !/^[0-9]+$/.test(value)) {
-        usage(runId, command, "The --port value must be a decimal port number.");
-      }
-      port = Number(value);
-      if (!Number.isSafeInteger(port) || port < 1024 || port > 65535) {
-        usage(runId, command, "The --port value must be between 1024 and 65535.");
-      }
-      portSeen = true;
-      index += 1;
-      continue;
-    }
-    usage(runId, command, "Warm Browser received an unsupported argument.");
+    const raw = arguments_[index + 1];
+    if (raw === undefined)
+      usage(runId, command, `The ${option.flag} value is missing.`);
+    const value2 = optionValue(runId, command, option.flag, raw);
+    seen.set(option.flag, value2);
+    if (option.flag === runIdOption.flag)
+      runId = value2;
+    index += 1;
   }
-  return { command, runId, ...port === undefined ? {} : { port } };
+  for (const option of accepted.values()) {
+    if (option.required && !seen.has(option.flag)) {
+      usage(runId, command, `The ${option.flag} option is required by ${command}.`);
+    }
+  }
+  const port = seen.get("--port");
+  const url = seen.get("--url");
+  const reference = seen.get("--ref");
+  const value = seen.get("--value");
+  return {
+    command,
+    runId,
+    adoptPage: seen.get("--adopt-page") === true,
+    ...port === undefined ? {} : { port },
+    ...url === undefined ? {} : { url },
+    ...reference === undefined ? {} : { reference },
+    ...value === undefined ? {} : { value }
+  };
 }
 function staticFailure(command, runId, resultCode, exitCode, message, nextAction, retrySafe = false, transactionState = "unchanged") {
   raise({ command, resultCode, exitCode, runId, retrySafe, nextAction, message, transactionState });
@@ -780,6 +1343,15 @@ function removeStateAfterStop(command, runId, paths, sessionId) {
     staticFailure(command, runId, "STATE_UNSAFE", 20, "Warm Browser stopped the owned browser process group but could not remove its private session state.", "Repair the retained private Warm Browser session state; the owned browser process group is already stopped.", false, "stopped");
   }
 }
+function endpointRefusal(verification, subject) {
+  if (verification === "controlled_page_unavailable") {
+    return ["CONTROLLED_PAGE_UNAVAILABLE", "The verified CDP endpoint exposes no Controlled Page."];
+  }
+  if (verification === "controlled_page_ambiguous") {
+    return ["CONTROLLED_PAGE_AMBIGUOUS", "The verified CDP endpoint exposes more than one page."];
+  }
+  return ["CDP_IDENTITY_UNVERIFIED", `The ${subject} identity could not be verified.`];
+}
 function canonicalProcess(value) {
   return {
     pid: value.pid,
@@ -788,6 +1360,10 @@ function canonicalProcess(value) {
     executable: value.executable,
     commandLine: value.commandLine
   };
+}
+function adoptControlledPage(state, controlledPageTargetId) {
+  const { snapshot: _invalidated, ...rest } = state;
+  return { ...rest, endpoint: { ...state.endpoint, controlledPageTargetId } };
 }
 function recoverAbsentLaunch(command, runId, paths, state, adapter) {
   const owners = adapter.findProfileProcesses(state.profileRoot);
@@ -844,7 +1420,7 @@ function proveReceiptContract(command, runId, state, adapter) {
     identityFailure(command, runId);
   }
 }
-async function inspectSession(command, runId, paths, adapter) {
+async function inspectSession(command, runId, paths, adapter, pageReplacement = "refuse") {
   const lockExists = validateSessionLock(paths);
   const state = readSessionState(paths);
   if (state !== undefined)
@@ -901,10 +1477,24 @@ async function inspectSession(command, runId, paths, adapter) {
   });
   if (verification.kind === "process_unverifiable")
     inspectionFailure(command, runId);
-  if (verification.kind !== "verified" || verification.endpoint.browserVersion !== state.endpoint.browserVersion || verification.endpoint.controlledPageTargetId !== state.endpoint.controlledPageTargetId) {
-    staticFailure(command, runId, "CDP_IDENTITY_UNVERIFIED", 20, "The stored CDP endpoint identity could not be verified.", "Inspect the Browser Session with its owned process still preserved.");
+  const preservedProcessAction = "Inspect the Browser Session with its owned process still preserved.";
+  if (verification.kind !== "verified") {
+    const [resultCode, message] = endpointRefusal(verification.kind, "stored CDP endpoint");
+    staticFailure(command, runId, resultCode, 20, message, preservedProcessAction);
   }
-  return { kind: "running", state };
+  if (verification.endpoint.browserVersion !== state.endpoint.browserVersion) {
+    const [resultCode, message] = endpointRefusal("browser_unverified", "stored CDP endpoint");
+    staticFailure(command, runId, resultCode, 20, message, preservedProcessAction);
+  }
+  if (verification.endpoint.controlledPageTargetId !== state.endpoint.controlledPageTargetId) {
+    if (pageReplacement === "refuse") {
+      staticFailure(command, runId, "CONTROLLED_PAGE_REPLACED", 20, "The Browser Session's Controlled Page was replaced by another page.", "Run warm-browser open --url URL --adopt-page --run-id ID to bind the replacement Controlled Page.");
+    }
+    const adopted = adoptControlledPage(state, verification.endpoint.controlledPageTargetId);
+    writeSessionState(paths, adopted);
+    return { kind: "running", state: adopted, adoptedPage: true };
+  }
+  return { kind: "running", state, adoptedPage: false };
 }
 function sessionData(state, postcondition) {
   return {
@@ -1008,16 +1598,7 @@ async function start(parsed, paths, adapter) {
       inspectionFailure("start", parsed.runId, priorTx);
     }
     if (verification.kind !== "verified") {
-      const mapped = verification.kind === "controlled_page_unavailable" ? [
-        "CONTROLLED_PAGE_UNAVAILABLE",
-        "The verified CDP endpoint exposes no Controlled Page."
-      ] : verification.kind === "controlled_page_ambiguous" ? [
-        "CONTROLLED_PAGE_AMBIGUOUS",
-        "The verified CDP endpoint exposes more than one page."
-      ] : [
-        "CDP_IDENTITY_UNVERIFIED",
-        "The launched Chrome CDP identity could not be verified."
-      ];
+      const mapped = endpointRefusal(verification.kind, "launched Chrome CDP");
       if (!await adapter.terminateProcessGroup(spawned, launching.launch)) {
         staticFailure("start", parsed.runId, "UNEXPECTED_FAILURE", 1, "Warm Browser could not roll back its unverified browser process group.", "Inspect the owned process group and private state before retrying.");
       }
@@ -1147,6 +1728,184 @@ async function stop(parsed, paths, adapter) {
     }
   });
 }
+function requiredArgument(value) {
+  if (value === undefined)
+    throw new Error("a required option reached execution unset");
+  return value;
+}
+async function requireControlledPage(parsed, command, paths, adapter) {
+  const inspection = await inspectSession(command, parsed.runId, paths, adapter, parsed.adoptPage ? "adopt" : "refuse");
+  if (inspection.kind === "running") {
+    return { state: inspection.state, adoptedPage: inspection.adoptedPage };
+  }
+  staticFailure(command, parsed.runId, "SESSION_ABSENT", 21, "No verified Browser Session owns a Controlled Page.", "Run warm-browser start --run-id ID to create a Browser Session.", false, inspection.kind === "recovered" ? "recovered" : "unchanged");
+}
+function recordAfterAction(command, runId, paths, state) {
+  try {
+    writeSessionState(paths, state);
+  } catch {
+    staticFailure(command, runId, "STATE_UNSAFE", 20, "Warm Browser acted on the Controlled Page but could not record the Snapshot Generation it left behind.", "Repair the private Warm Browser session state; the Controlled Page has already changed.", false, "acted");
+  }
+}
+function withoutSnapshot(state) {
+  const { snapshot: _invalidated, ...rest } = state;
+  return rest;
+}
+function invalidateReferences(command, runId, paths, state) {
+  if (state.snapshot === undefined)
+    return state;
+  const cleared = withoutSnapshot(state);
+  recordAfterAction(command, runId, paths, cleared);
+  return cleared;
+}
+function controlledPageData(basis) {
+  return { targetId: basis.targetId, url: basis.url };
+}
+var freshSnapshotAction = "Run warm-browser snapshot --run-id ID to issue fresh Snapshot References.";
+function pageControlUnverified(command, runId, message, transactionState) {
+  staticFailure(command, runId, "PAGE_CONTROL_UNVERIFIED", 20, message, "Inspect the Browser Session and its CDP endpoint before retrying.", false, transactionState);
+}
+function credentialRefusal(command, runId) {
+  staticFailure(command, runId, "CREDENTIAL_FIELD_REFUSED", 21, "Warm Browser does not type credentials into the Controlled Page.", "Use the Warm Browser login command for a credential field; it is not callable in this slice.");
+}
+async function open(parsed, paths, adapter) {
+  const session = await requireControlledPage(parsed, "open", paths, adapter);
+  const state = invalidateReferences("open", parsed.runId, paths, session.state);
+  const navigation = await openControlledPage({
+    port: state.endpoint.port,
+    targetId: state.endpoint.controlledPageTargetId,
+    url: requiredArgument(parsed.url)
+  });
+  if (navigation.kind === "refused") {
+    staticFailure("open", parsed.runId, "NAVIGATION_FAILED", 20, "The Controlled Page did not complete the requested navigation.", "Run warm-browser snapshot --run-id ID to read where the Controlled Page actually is.", false, "acted");
+  }
+  if (navigation.kind === "unverified") {
+    pageControlUnverified("open", parsed.runId, "Warm Browser could not verify what its Controlled Page did with the navigation.", "acted");
+  }
+  return success({
+    schemaVersion,
+    status: "ok",
+    command: "open",
+    resultCode: "PAGE_OPENED",
+    runId: parsed.runId,
+    transactionState: "acted",
+    retrySafe: false,
+    nextAction: freshSnapshotAction,
+    data: {
+      controlledPage: controlledPageData(navigation.basis),
+      adoptedPage: session.adoptedPage,
+      invalidatedReferences: true,
+      postcondition: "running"
+    }
+  });
+}
+async function snapshot(parsed, paths, adapter) {
+  const session = await requireControlledPage(parsed, "snapshot", paths, adapter);
+  const state = session.state;
+  const reading = await readControlledPageSnapshot({
+    port: state.endpoint.port,
+    targetId: state.endpoint.controlledPageTargetId
+  });
+  if (reading.kind === "identity_changed") {
+    staticFailure("snapshot", parsed.runId, "PAGE_IDENTITY_CHANGED", 21, "The Controlled Page moved while it was being read, so no Snapshot Reference was issued.", freshSnapshotAction);
+  }
+  if (reading.kind === "unverified") {
+    pageControlUnverified("snapshot", parsed.runId, "Warm Browser could not read the Controlled Page.", "unchanged");
+  }
+  const generation = {
+    generationId: adapter.createSnapshotId(),
+    takenAtEpochMs: adapter.nowEpochMs(),
+    basis: reading.basis,
+    truncated: reading.truncated,
+    elements: reading.elements
+  };
+  recordAfterAction("snapshot", parsed.runId, paths, { ...state, snapshot: generation });
+  return success({
+    schemaVersion,
+    status: "ok",
+    command: "snapshot",
+    resultCode: "SNAPSHOT_TAKEN",
+    runId: parsed.runId,
+    transactionState: "acted",
+    retrySafe: true,
+    nextAction: "Run warm-browser click --ref REFERENCE --run-id ID or warm-browser fill --ref REFERENCE --value TEXT --run-id ID.",
+    data: {
+      generationId: generation.generationId,
+      controlledPage: controlledPageData(generation.basis),
+      elementCount: generation.elements.length,
+      truncated: generation.truncated,
+      elements: publishedElements(generation),
+      postcondition: "running"
+    }
+  });
+}
+async function actOnPage(parsed, command, paths, adapter) {
+  const session = await requireControlledPage(parsed, command, paths, adapter);
+  const state = session.state;
+  const reference = requiredArgument(parsed.reference);
+  const resolution = resolveSnapshotReference({
+    reference,
+    generation: state.snapshot,
+    controlledPageTargetId: state.endpoint.controlledPageTargetId,
+    nowEpochMs: adapter.nowEpochMs()
+  });
+  if (resolution.kind === "absent") {
+    staticFailure(command, parsed.runId, "SNAPSHOT_ABSENT", 21, "This Browser Session holds no Snapshot Generation.", "Run warm-browser snapshot --run-id ID before acting on the Controlled Page.");
+  }
+  if (resolution.kind === "malformed") {
+    staticFailure(command, parsed.runId, "SNAPSHOT_REFERENCE_INVALID", 21, "Warm Browser acts through a Snapshot Reference, and this is not one.", freshSnapshotAction);
+  }
+  if (resolution.kind === "unknown") {
+    staticFailure(command, parsed.runId, "SNAPSHOT_REFERENCE_INVALID", 21, "The Snapshot Reference names no element of the current Snapshot Generation.", freshSnapshotAction);
+  }
+  if (resolution.kind === "stale") {
+    staticFailure(command, parsed.runId, "SNAPSHOT_REFERENCE_STALE", 21, "The Snapshot Reference belongs to another Snapshot Generation, another Controlled Page, or a generation that has expired.", freshSnapshotAction);
+  }
+  const generation = state.snapshot;
+  if (command === "fill" && resolution.element.credentialField) {
+    credentialRefusal(command, parsed.runId);
+  }
+  const action = command === "click" ? { kind: "click" } : { kind: "fill", value: requiredArgument(parsed.value) };
+  const outcome = await actOnControlledPage({
+    port: state.endpoint.port,
+    targetId: state.endpoint.controlledPageTargetId,
+    basis: generation.basis,
+    backendNodeId: resolution.element.backendNodeId,
+    action
+  });
+  if (outcome.kind === "identity_changed") {
+    staticFailure(command, parsed.runId, "PAGE_IDENTITY_CHANGED", 21, "The Controlled Page is no longer the page this Snapshot Reference was issued against.", freshSnapshotAction);
+  }
+  if (outcome.kind === "element_absent") {
+    staticFailure(command, parsed.runId, "SNAPSHOT_REFERENCE_STALE", 21, "The referenced element is no longer part of the Controlled Page.", freshSnapshotAction);
+  }
+  if (outcome.kind === "credential_field")
+    credentialRefusal(command, parsed.runId);
+  if (outcome.kind === "unverified") {
+    invalidateReferences(command, parsed.runId, paths, state);
+    pageControlUnverified(command, parsed.runId, "Warm Browser could not verify what its Controlled Page did with the action.", "acted");
+  }
+  const invalidatedReferences = !sameBasis(outcome.basis, generation.basis);
+  if (invalidatedReferences)
+    invalidateReferences(command, parsed.runId, paths, state);
+  return success({
+    schemaVersion,
+    status: "ok",
+    command,
+    resultCode: command === "click" ? "ELEMENT_CLICKED" : "FIELD_FILLED",
+    runId: parsed.runId,
+    transactionState: "acted",
+    retrySafe: false,
+    nextAction: freshSnapshotAction,
+    data: {
+      reference,
+      ...command === "fill" ? { valueLength: requiredArgument(parsed.value).length } : {},
+      controlledPage: controlledPageData(outcome.basis),
+      invalidatedReferences,
+      postcondition: "running"
+    }
+  });
+}
 async function execute(parsed, adapter) {
   if (parsed.command === "help") {
     return success({
@@ -1160,7 +1919,15 @@ async function execute(parsed, adapter) {
       nextAction: "Run warm-browser start --run-id ID to create the Browser Session.",
       data: {
         usage: usageLine,
-        commands: commandVocabulary.map(({ name, sideEffects }) => ({ name, sideEffects }))
+        commands: commandVocabulary.map(({ name, sideEffects, options }) => ({
+          name,
+          sideEffects,
+          options: options.map(({ flag, value, required }) => ({
+            flag,
+            value,
+            required
+          }))
+        }))
       }
     });
   }
@@ -1189,6 +1956,13 @@ async function execute(parsed, adapter) {
     return start(parsed, paths, adapter);
   if (parsed.command === "status")
     return status(parsed, paths, adapter);
+  if (parsed.command === "open")
+    return open(parsed, paths, adapter);
+  if (parsed.command === "snapshot")
+    return snapshot(parsed, paths, adapter);
+  if (parsed.command === "click" || parsed.command === "fill") {
+    return actOnPage(parsed, parsed.command, paths, adapter);
+  }
   return stop(parsed, paths, adapter);
 }
 async function runWarmBrowserCli(arguments_) {

@@ -1,0 +1,855 @@
+import { afterEach, expect, test } from "bun:test"
+import { readFileSync, statSync } from "node:fs"
+
+import {
+	pageProbe,
+	readReceipt,
+	signInPage,
+	stopControlledPageFixtures,
+	takeSnapshot,
+	writeReceipt,
+} from "./fixtures/controlled-page-probe"
+import { readCdpEndpointIndependently } from "./fixtures/independent-cdp-reader"
+import {
+	expectError,
+	expectRefusal,
+	hostEffects,
+	productionCliProbe,
+	removeProductionCliProbes,
+	runProductionCliAsync,
+	systemRows,
+	verifiedReading,
+} from "./fixtures/production-cli-harness"
+import { snapshotReferenceTimeoutMs } from "../src/modules/warm-browser/bounds"
+
+afterEach(() => {
+	stopControlledPageFixtures()
+	removeProductionCliProbes()
+})
+
+test("open navigates the one Controlled Page and invalidates every earlier reference", async () => {
+	const { fixture, probe } = await pageProbe({ url: "https://fixture.test/start" })
+
+	const opened = await runProductionCliAsync(probe, [
+		"open",
+		"--url",
+		"https://fixture.test/next",
+		"--run-id",
+		"open-run",
+	])
+
+	expect(opened.stderr).toBe("")
+	expect(opened.exitCode).toBe(0)
+	// Independent oracle: the whole envelope, restated by hand.
+	expect(JSON.parse(opened.stdout)).toEqual({
+		schemaVersion: 1,
+		status: "ok",
+		command: "open",
+		resultCode: "PAGE_OPENED",
+		runId: "open-run",
+		transactionState: "acted",
+		retrySafe: false,
+		nextAction: "Run warm-browser snapshot --run-id ID to issue fresh Snapshot References.",
+		data: {
+			controlledPage: { targetId: "page-1", url: "https://fixture.test/next" },
+			adoptedPage: false,
+			invalidatedReferences: true,
+			postcondition: "running",
+		},
+	})
+	// The navigation really happened on the fixture, over the derived socket.
+	expect(fixture.pageUrl()).toBe("https://fixture.test/next")
+	expect(fixture.attachedTargets()).toEqual(["/devtools/page/page-1"])
+	expect(fixture.cdpMethods()).toContain("Page.navigate")
+})
+
+test("snapshot issues references bound to the Controlled Page and its generation", async () => {
+	const { fixture, probe } = await pageProbe({
+		url: "https://fixture.test/sign-in",
+		elements: signInPage,
+	})
+
+	const result = await runProductionCliAsync(probe, ["snapshot", "--run-id", "snapshot-run"])
+
+	expect(result.stderr).toBe("")
+	expect(result.exitCode).toBe(0)
+	// The generation identity is minted by the production Adapter, so it is read
+	// back out of the private receipt rather than restated here.
+	const generationId = (readReceipt(probe).snapshot as { generationId: string }).generationId
+	expect(generationId).toMatch(/^snapshot-[0-9a-f-]{36}$/)
+	// Independent oracle: the whole envelope, restated by hand.
+	expect(JSON.parse(result.stdout)).toEqual({
+		schemaVersion: 1,
+		status: "ok",
+		command: "snapshot",
+		resultCode: "SNAPSHOT_TAKEN",
+		runId: "snapshot-run",
+		transactionState: "acted",
+		retrySafe: true,
+		nextAction:
+			"Run warm-browser click --ref REFERENCE --run-id ID or warm-browser fill --ref REFERENCE --value TEXT --run-id ID.",
+		data: {
+			generationId,
+			controlledPage: { targetId: "page-1", url: "https://fixture.test/sign-in" },
+			elementCount: 4,
+			truncated: false,
+			elements: [
+				{ ref: `e1@${generationId}`, role: "link", name: "Docs", credentialField: false },
+				{ ref: `e2@${generationId}`, role: "textbox", name: "Email", credentialField: false },
+				{ ref: `e3@${generationId}`, role: "textbox", name: "Password", credentialField: true },
+				{ ref: `e4@${generationId}`, role: "button", name: "Sign in", credentialField: false },
+			],
+			postcondition: "running",
+		},
+	})
+	// No selector of any kind reaches the caller.
+	expect(result.stdout).not.toContain("backendNodeId")
+	expect(result.stdout).not.toContain("href")
+	expect(fixture.cdpMethods()).toEqual([
+		"Page.enable",
+		"DOM.enable",
+		"Accessibility.enable",
+		"Page.getFrameTree",
+		"DOM.getDocument",
+		"Accessibility.getFullAXTree",
+		"Page.getFrameTree",
+	])
+	expect(statSync(probe.sessionPath).mode & 0o7777).toBe(0o600)
+})
+
+test("click acts on one referenced element of the Controlled Page", async () => {
+	const { fixture, probe } = await pageProbe({
+		url: "https://fixture.test/sign-in",
+		elements: signInPage,
+	})
+	const snapshot = await takeSnapshot(probe, "click-snapshot")
+
+	const clicked = await runProductionCliAsync(probe, [
+		"click",
+		"--ref",
+		snapshot.elements[3]!.ref,
+		"--run-id",
+		"click-run",
+	])
+
+	expect(clicked.stderr).toBe("")
+	expect(clicked.exitCode).toBe(0)
+	expect(JSON.parse(clicked.stdout)).toEqual({
+		schemaVersion: 1,
+		status: "ok",
+		command: "click",
+		resultCode: "ELEMENT_CLICKED",
+		runId: "click-run",
+		transactionState: "acted",
+		retrySafe: false,
+		nextAction: "Run warm-browser snapshot --run-id ID to issue fresh Snapshot References.",
+		data: {
+			reference: `e4@${snapshot.generationId}`,
+			controlledPage: { targetId: "page-1", url: "https://fixture.test/sign-in" },
+			invalidatedReferences: false,
+			postcondition: "running",
+		},
+	})
+	// Independent oracle: the centre of the button box declared by the fixture.
+	expect(fixture.clicks()).toEqual([{ x: 55, y: 156 }])
+	// The references survive a click that left the page where it was.
+	expect((readReceipt(probe).snapshot as { generationId: string }).generationId).toBe(
+		snapshot.generationId,
+	)
+})
+
+test("fill types one non-secret value that never leaves the Controlled Page", async () => {
+	const { fixture, probe } = await pageProbe({
+		url: "https://fixture.test/sign-in",
+		elements: signInPage,
+	})
+	const snapshot = await takeSnapshot(probe, "fill-snapshot")
+
+	const filled = await runProductionCliAsync(probe, [
+		"fill",
+		"--ref",
+		snapshot.elements[1]!.ref,
+		"--value",
+		"person@example.test",
+		"--run-id",
+		"fill-run",
+	])
+
+	expect(filled.stderr).toBe("")
+	expect(filled.exitCode).toBe(0)
+	expect(JSON.parse(filled.stdout)).toEqual({
+		schemaVersion: 1,
+		status: "ok",
+		command: "fill",
+		resultCode: "FIELD_FILLED",
+		runId: "fill-run",
+		transactionState: "acted",
+		retrySafe: false,
+		nextAction: "Run warm-browser snapshot --run-id ID to issue fresh Snapshot References.",
+		data: {
+			reference: `e2@${snapshot.generationId}`,
+			valueLength: 19,
+			controlledPage: { targetId: "page-1", url: "https://fixture.test/sign-in" },
+			invalidatedReferences: false,
+			postcondition: "running",
+		},
+	})
+	// The value reached exactly the selected field, and only that field.
+	expect(fixture.focusedNodes()).toEqual([12])
+	expect(fixture.insertedText()).toEqual(["person@example.test"])
+	// It is nowhere a caller or a later reader could find it.
+	expect(filled.stdout).not.toContain("person@example.test")
+	expect(readFileSync(probe.sessionPath, "utf8")).not.toContain("person@example.test")
+})
+
+test("an independent CDP target reader proves the process and Controlled Page selected", async () => {
+	const { fixture, probe } = await pageProbe({
+		url: "https://fixture.test/sign-in",
+		elements: signInPage,
+	})
+	await takeSnapshot(probe, "independent-snapshot")
+
+	// Read the endpoint again, with a reader that shares no code with the Module.
+	const independent = await readCdpEndpointIndependently(fixture.port)
+	const status = await runProductionCliAsync(probe, ["status", "--run-id", "independent-status"])
+	const data = JSON.parse(status.stdout).data as {
+		processId: number
+		endpoint: { host: string; port: number }
+		controlledPage: { targetId: string }
+	}
+
+	// Independent oracle: the endpoint exposes exactly one page, and this is it.
+	expect(independent.pageTargets.map(({ id }) => id)).toEqual(["page-1"])
+	expect(independent.browser).toBe("Chrome/151.0.7922.174")
+	expect(independent.browserWebSocketHost).toBe("127.0.0.1")
+	expect(independent.browserWebSocketPort).toBe(fixture.port)
+	// What Warm Browser reported is what the endpoint independently shows.
+	expect(data.controlledPage.targetId).toBe(independent.pageTargets[0]!.id)
+	expect(data.endpoint).toEqual({ host: "127.0.0.1", port: fixture.port })
+	// The launched process identity this session owns, and the listener that
+	// answered for it, are the ones the harness recorded for the launch.
+	expect(data.processId).toBe(4242)
+	const listenerPorts = hostEffects(probe)
+		.filter(({ action }) => action === "listener")
+		.map(({ port }) => port)
+	expect(listenerPorts.length).toBeGreaterThan(0)
+	expect([...new Set(listenerPorts)]).toEqual([fixture.port])
+	// Warm Browser reached exactly that page and no other target.
+	expect(fixture.attachedTargets()).toEqual(["/devtools/page/page-1"])
+	expect(readReceipt(probe)).toMatchObject({
+		endpoint: {
+			port: fixture.port,
+			browserVersion: independent.browser,
+			controlledPageTargetId: independent.pageTargets[0]!.id,
+		},
+	})
+})
+
+test("the Controlled Page socket is the one Warm Browser derives, not the one declared", async () => {
+	const { fixture, probe } = await pageProbe({
+		url: "https://fixture.test/sign-in",
+		elements: signInPage,
+		declaredPagePath: "/devtools/page/DECOY",
+	})
+
+	await takeSnapshot(probe, "derived-socket-snapshot")
+
+	// The endpoint advertises another socket; the reader below shows exactly what
+	// it advertised, and Warm Browser dialled its own address regardless.
+	const independent = await readCdpEndpointIndependently(fixture.port)
+	expect(independent.pageTargets[0]!.webSocketDebuggerUrl).toBe(
+		`ws://127.0.0.1:${fixture.port}/devtools/page/DECOY`,
+	)
+	expect(fixture.attachedTargets()).toEqual(["/devtools/page/page-1"])
+})
+
+test("a fresh Snapshot Generation invalidates every earlier reference", async () => {
+	const { probe } = await pageProbe({ url: "https://fixture.test/sign-in", elements: signInPage })
+	const first = await takeSnapshot(probe, "stale-first")
+	const second = await takeSnapshot(probe, "stale-second")
+	expect(second.generationId).not.toBe(first.generationId)
+
+	const clicked = await runProductionCliAsync(probe, [
+		"click",
+		"--ref",
+		first.elements[3]!.ref,
+		"--run-id",
+		"stale-click",
+	])
+
+	expectError(clicked, 21, {
+		schemaVersion: 1,
+		status: "error",
+		command: "click",
+		resultCode: "SNAPSHOT_REFERENCE_STALE",
+		runId: "stale-click",
+		transactionState: "unchanged",
+		retrySafe: false,
+		nextAction: "Run warm-browser snapshot --run-id ID to issue fresh Snapshot References.",
+		message:
+			"The Snapshot Reference belongs to another Snapshot Generation, another Controlled Page, or a generation that has expired.",
+	})
+})
+
+test("open invalidates every earlier reference before it navigates", async () => {
+	const { probe } = await pageProbe({ url: "https://fixture.test/sign-in", elements: signInPage })
+	const snapshot = await takeSnapshot(probe, "open-invalidates-snapshot")
+
+	const opened = await runProductionCliAsync(probe, [
+		"open",
+		"--url",
+		"https://fixture.test/next",
+		"--run-id",
+		"open-invalidates",
+	])
+	expect(opened.exitCode).toBe(0)
+	expect(JSON.parse(opened.stdout).data).toMatchObject({ invalidatedReferences: true })
+	expect(readReceipt(probe).snapshot).toBeUndefined()
+
+	const clicked = await runProductionCliAsync(probe, [
+		"click",
+		"--ref",
+		snapshot.elements[3]!.ref,
+		"--run-id",
+		"open-invalidated-click",
+	])
+	expectRefusal(clicked, 21, {
+		command: "click",
+		resultCode: "SNAPSHOT_ABSENT",
+		message: "This Browser Session holds no Snapshot Generation.",
+		nextAction: "Run warm-browser snapshot --run-id ID before acting on the Controlled Page.",
+	})
+})
+
+test("a reference older than its bound is stale even on the page that issued it", async () => {
+	const { probe } = await pageProbe({ url: "https://fixture.test/sign-in", elements: signInPage })
+	const snapshot = await takeSnapshot(probe, "expiry-snapshot")
+	const receipt = readReceipt(probe)
+	const generation = receipt.snapshot as Record<string, unknown>
+	writeReceipt(probe, {
+		...receipt,
+		snapshot: { ...generation, takenAtEpochMs: Date.now() - snapshotReferenceTimeoutMs - 5_000 },
+	})
+
+	const clicked = await runProductionCliAsync(probe, [
+		"click",
+		"--ref",
+		snapshot.elements[3]!.ref,
+		"--run-id",
+		"expired-click",
+	])
+
+	expectRefusal(clicked, 21, { command: "click", resultCode: "SNAPSHOT_REFERENCE_STALE" })
+})
+
+test("a reference issued against another Controlled Page is refused", async () => {
+	const { fixture, probe } = await pageProbe({
+		url: "https://fixture.test/sign-in",
+		elements: signInPage,
+	})
+	const snapshot = await takeSnapshot(probe, "wrong-page-snapshot")
+	const receipt = readReceipt(probe)
+	const generation = receipt.snapshot as Record<string, unknown>
+	const basis = generation.basis as Record<string, unknown>
+	writeReceipt(probe, {
+		...receipt,
+		snapshot: { ...generation, basis: { ...basis, targetId: "page-elsewhere" } },
+	})
+	const attachedBefore = fixture.attachedTargets().length
+
+	const clicked = await runProductionCliAsync(probe, [
+		"click",
+		"--ref",
+		snapshot.elements[3]!.ref,
+		"--run-id",
+		"wrong-page-click",
+	])
+
+	expectRefusal(clicked, 21, { command: "click", resultCode: "SNAPSHOT_REFERENCE_STALE" })
+	// Nothing was said to the Controlled Page on that reference's behalf.
+	expect(fixture.attachedTargets().length).toBe(attachedBefore)
+	expect(fixture.clicks()).toEqual([])
+})
+
+test("a page that moves between the snapshot and the act refuses the act", async () => {
+	const { fixture, probe } = await pageProbe({
+		url: "https://fixture.test/sign-in",
+		elements: signInPage,
+	})
+	const snapshot = await takeSnapshot(probe, "race-snapshot")
+	fixture.navigate("https://fixture.test/elsewhere")
+
+	const clicked = await runProductionCliAsync(probe, [
+		"click",
+		"--ref",
+		snapshot.elements[3]!.ref,
+		"--run-id",
+		"race-click",
+	])
+
+	expectError(clicked, 21, {
+		schemaVersion: 1,
+		status: "error",
+		command: "click",
+		resultCode: "PAGE_IDENTITY_CHANGED",
+		runId: "race-click",
+		transactionState: "unchanged",
+		retrySafe: false,
+		nextAction: "Run warm-browser snapshot --run-id ID to issue fresh Snapshot References.",
+		message: "The Controlled Page is no longer the page this Snapshot Reference was issued against.",
+	})
+	expect(fixture.clicks()).toEqual([])
+})
+
+test("a page that moves while it is being read issues no reference at all", async () => {
+	const { probe } = await pageProbe({
+		url: "https://fixture.test/sign-in",
+		elements: signInPage,
+		driftDuringSnapshot: true,
+	})
+
+	const result = await runProductionCliAsync(probe, ["snapshot", "--run-id", "drift-snapshot"])
+
+	expectRefusal(result, 21, {
+		command: "snapshot",
+		resultCode: "PAGE_IDENTITY_CHANGED",
+		message: "The Controlled Page moved while it was being read, so no Snapshot Reference was issued.",
+	})
+	expect(readReceipt(probe).snapshot).toBeUndefined()
+})
+
+test("a click that navigates the Controlled Page invalidates the references it used", async () => {
+	const { probe } = await pageProbe({
+		url: "https://fixture.test/sign-in",
+		elements: [
+			...signInPage,
+			{
+				backendNodeId: 16,
+				role: "link",
+				name: "Leave",
+				nodeName: "A",
+				box: [10, 200, 60, 20],
+				navigatesTo: "https://fixture.test/left",
+			},
+		],
+	})
+	const snapshot = await takeSnapshot(probe, "navigating-click-snapshot")
+
+	const clicked = await runProductionCliAsync(probe, [
+		"click",
+		"--ref",
+		snapshot.elements[4]!.ref,
+		"--run-id",
+		"navigating-click",
+	])
+
+	expect(clicked.exitCode).toBe(0)
+	expect(JSON.parse(clicked.stdout).data).toEqual({
+		reference: `e5@${snapshot.generationId}`,
+		controlledPage: { targetId: "page-1", url: "https://fixture.test/left" },
+		invalidatedReferences: true,
+		postcondition: "running",
+	})
+	expect(readReceipt(probe).snapshot).toBeUndefined()
+})
+
+test("a replaced Controlled Page is refused until an open explicitly adopts it", async () => {
+	const { fixture, probe } = await pageProbe({
+		url: "https://fixture.test/sign-in",
+		elements: signInPage,
+	})
+	const snapshot = await takeSnapshot(probe, "replacement-snapshot")
+	fixture.replacePage("page-2")
+
+	const refused = await runProductionCliAsync(probe, ["snapshot", "--run-id", "replaced-snapshot"])
+	expectError(refused, 20, {
+		schemaVersion: 1,
+		status: "error",
+		command: "snapshot",
+		resultCode: "CONTROLLED_PAGE_REPLACED",
+		runId: "replaced-snapshot",
+		transactionState: "unchanged",
+		retrySafe: false,
+		nextAction:
+			"Run warm-browser open --url URL --adopt-page --run-id ID to bind the replacement Controlled Page.",
+		message: "The Browser Session's Controlled Page was replaced by another page.",
+	})
+	// The receipt still names the page it was bound to, and the references it
+	// issued are still recorded against it.
+	expect(readReceipt(probe)).toMatchObject({
+		endpoint: { controlledPageTargetId: "page-1" },
+		snapshot: { generationId: snapshot.generationId },
+	})
+
+	const adopted = await runProductionCliAsync(probe, [
+		"open",
+		"--url",
+		"https://fixture.test/after-replacement",
+		"--adopt-page",
+		"--run-id",
+		"adopt-run",
+	])
+	expect(adopted.stderr).toBe("")
+	expect(JSON.parse(adopted.stdout).data).toEqual({
+		controlledPage: { targetId: "page-2", url: "https://fixture.test/after-replacement" },
+		adoptedPage: true,
+		invalidatedReferences: true,
+		postcondition: "running",
+	})
+	expect(readReceipt(probe)).toMatchObject({ endpoint: { controlledPageTargetId: "page-2" } })
+	expect(readReceipt(probe).snapshot).toBeUndefined()
+
+	const clicked = await runProductionCliAsync(probe, [
+		"click",
+		"--ref",
+		snapshot.elements[3]!.ref,
+		"--run-id",
+		"adopted-click",
+	])
+	expectRefusal(clicked, 21, { command: "click", resultCode: "SNAPSHOT_ABSENT" })
+})
+
+test("more than one page is never one Controlled Page", async () => {
+	const { fixture, probe } = await pageProbe({
+		url: "https://fixture.test/sign-in",
+		elements: signInPage,
+	})
+	fixture.setTargets([
+		{ id: "page-1", type: "page" },
+		{ id: "page-2", type: "page" },
+	])
+
+	const result = await runProductionCliAsync(probe, ["snapshot", "--run-id", "ambiguous-page"])
+
+	expectError(result, 20, {
+		schemaVersion: 1,
+		status: "error",
+		command: "snapshot",
+		resultCode: "CONTROLLED_PAGE_AMBIGUOUS",
+		runId: "ambiguous-page",
+		transactionState: "unchanged",
+		retrySafe: false,
+		nextAction: "Inspect the Browser Session with its owned process still preserved.",
+		message: "The verified CDP endpoint exposes more than one page.",
+	})
+	expect(fixture.attachedTargets()).toEqual([])
+})
+
+test("no page at all is never one Controlled Page", async () => {
+	const { fixture, probe } = await pageProbe({
+		url: "https://fixture.test/sign-in",
+		elements: signInPage,
+	})
+	fixture.setTargets([{ id: "worker-1", type: "service_worker" }])
+
+	const result = await runProductionCliAsync(probe, ["snapshot", "--run-id", "absent-page"])
+
+	expectRefusal(result, 20, {
+		command: "snapshot",
+		resultCode: "CONTROLLED_PAGE_UNAVAILABLE",
+		message: "The verified CDP endpoint exposes no Controlled Page.",
+	})
+	expect(fixture.attachedTargets()).toEqual([])
+}, 30_000)
+
+test("fill refuses a credential field before it says anything to the page", async () => {
+	const { fixture, probe } = await pageProbe({
+		url: "https://fixture.test/sign-in",
+		elements: signInPage,
+	})
+	const snapshot = await takeSnapshot(probe, "credential-snapshot")
+	const attachedBefore = fixture.attachedTargets().length
+
+	const filled = await runProductionCliAsync(probe, [
+		"fill",
+		"--ref",
+		snapshot.elements[2]!.ref,
+		"--value",
+		"not-a-real-secret",
+		"--run-id",
+		"credential-fill",
+	])
+
+	expectError(filled, 21, {
+		schemaVersion: 1,
+		status: "error",
+		command: "fill",
+		resultCode: "CREDENTIAL_FIELD_REFUSED",
+		runId: "credential-fill",
+		transactionState: "unchanged",
+		retrySafe: false,
+		nextAction:
+			"Use the Warm Browser login command for a credential field; it is not callable in this slice.",
+		message: "Warm Browser does not type credentials into the Controlled Page.",
+	})
+	// Nothing was typed, nothing was focused, and no conversation was opened.
+	expect(fixture.insertedText()).toEqual([])
+	expect(fixture.focusedNodes()).toEqual([])
+	expect(fixture.attachedTargets().length).toBe(attachedBefore)
+	expect(filled.stderr).not.toContain("not-a-real-secret")
+})
+
+test("fill refuses a field that became a credential field after the snapshot", async () => {
+	const { fixture, probe } = await pageProbe({
+		url: "https://fixture.test/sign-in",
+		elements: [
+			{
+				backendNodeId: 21,
+				role: "textbox",
+				name: "Code",
+				nodeName: "INPUT",
+				attributes: { type: "text", name: "code" },
+				box: [10, 10, 100, 20],
+				becomesCredentialField: true,
+			},
+		],
+	})
+	const snapshot = await takeSnapshot(probe, "flip-snapshot")
+	expect(snapshot.data).toMatchObject({
+		elements: [{ ref: `e1@${snapshot.generationId}`, credentialField: false }],
+	})
+
+	const filled = await runProductionCliAsync(probe, [
+		"fill",
+		"--ref",
+		snapshot.elements[0]!.ref,
+		"--value",
+		"123456",
+		"--run-id",
+		"flip-fill",
+	])
+
+	expectRefusal(filled, 21, { command: "fill", resultCode: "CREDENTIAL_FIELD_REFUSED" })
+	expect(fixture.insertedText()).toEqual([])
+})
+
+test.each(["--selector", "--css", "--xpath", "--text"] as const)(
+	"the %s public selector is refused by name on every command",
+	async (flag) => {
+		const { probe } = await pageProbe({ url: "https://fixture.test/sign-in", elements: signInPage })
+
+		const result = await runProductionCliAsync(probe, [
+			"click",
+			flag,
+			"#sign-in",
+			"--run-id",
+			"selector-run",
+		])
+
+		expectError(result, 21, {
+			schemaVersion: 1,
+			status: "error",
+			command: "click",
+			resultCode: "SELECTOR_UNSUPPORTED",
+			runId: "selector-run",
+			transactionState: "unchanged",
+			retrySafe: false,
+			nextAction: "Run warm-browser snapshot --run-id ID and act through the references it issues.",
+			message: `Warm Browser acts through Snapshot References, not the ${flag} selector.`,
+		})
+	},
+)
+
+test("a selector given as a reference is not a Snapshot Reference", async () => {
+	const { probe } = await pageProbe({ url: "https://fixture.test/sign-in", elements: signInPage })
+	await takeSnapshot(probe, "selector-ref-snapshot")
+
+	const result = await runProductionCliAsync(probe, [
+		"click",
+		"--ref",
+		"#sign-in",
+		"--run-id",
+		"selector-ref",
+	])
+
+	expectRefusal(result, 21, {
+		command: "click",
+		resultCode: "SNAPSHOT_REFERENCE_INVALID",
+		message: "Warm Browser acts through a Snapshot Reference, and this is not one.",
+	})
+})
+
+test("a reference naming no element of the current generation is refused", async () => {
+	const { probe } = await pageProbe({ url: "https://fixture.test/sign-in", elements: signInPage })
+	const snapshot = await takeSnapshot(probe, "unknown-ref-snapshot")
+
+	const result = await runProductionCliAsync(probe, [
+		"click",
+		"--ref",
+		`e9@${snapshot.generationId}`,
+		"--run-id",
+		"unknown-ref",
+	])
+
+	expectRefusal(result, 21, {
+		command: "click",
+		resultCode: "SNAPSHOT_REFERENCE_INVALID",
+		message: "The Snapshot Reference names no element of the current Snapshot Generation.",
+	})
+})
+
+test("an element that has left the Controlled Page is refused as a stale reference", async () => {
+	const { fixture, probe } = await pageProbe({
+		url: "https://fixture.test/sign-in",
+		elements: [
+			{
+				backendNodeId: 31,
+				role: "button",
+				name: "Ghost",
+				nodeName: "BUTTON",
+			},
+		],
+	})
+	const snapshot = await takeSnapshot(probe, "ghost-snapshot")
+
+	const result = await runProductionCliAsync(probe, [
+		"click",
+		"--ref",
+		snapshot.elements[0]!.ref,
+		"--run-id",
+		"ghost-click",
+	])
+
+	expectRefusal(result, 21, {
+		command: "click",
+		resultCode: "SNAPSHOT_REFERENCE_STALE",
+		message: "The referenced element is no longer part of the Controlled Page.",
+	})
+	expect(fixture.clicks()).toEqual([])
+})
+
+test("a navigation the browser refuses is reported as a navigation that did not happen", async () => {
+	const { probe } = await pageProbe({
+		url: "https://fixture.test/sign-in",
+		elements: signInPage,
+		refuseNavigationTo: "https://fixture.test/missing",
+	})
+
+	const result = await runProductionCliAsync(probe, [
+		"open",
+		"--url",
+		"https://fixture.test/missing",
+		"--run-id",
+		"refused-navigation",
+	])
+
+	expectError(result, 20, {
+		schemaVersion: 1,
+		status: "error",
+		command: "open",
+		resultCode: "NAVIGATION_FAILED",
+		runId: "refused-navigation",
+		transactionState: "acted",
+		retrySafe: false,
+		nextAction: "Run warm-browser snapshot --run-id ID to read where the Controlled Page actually is.",
+		message: "The Controlled Page did not complete the requested navigation.",
+	})
+})
+
+test("a CDP conversation that cannot be completed never reads as a snapshot", async () => {
+	const { probe } = await pageProbe({
+		url: "https://fixture.test/sign-in",
+		elements: signInPage,
+		failMethods: ["Accessibility.getFullAXTree"],
+	})
+
+	const result = await runProductionCliAsync(probe, ["snapshot", "--run-id", "unverified-snapshot"])
+
+	expectError(result, 20, {
+		schemaVersion: 1,
+		status: "error",
+		command: "snapshot",
+		resultCode: "PAGE_CONTROL_UNVERIFIED",
+		runId: "unverified-snapshot",
+		transactionState: "unchanged",
+		retrySafe: false,
+		nextAction: "Inspect the Browser Session and its CDP endpoint before retrying.",
+		message: "Warm Browser could not read the Controlled Page.",
+	})
+	expect(readReceipt(probe).snapshot).toBeUndefined()
+})
+
+test.each(["open", "snapshot", "click", "fill"] as const)(
+	"%s refuses when no Browser Session owns a Controlled Page",
+	async (command) => {
+		const probe = productionCliProbe({ processTable: verifiedReading(systemRows) })
+		const options: Record<string, readonly string[]> = {
+			open: ["--url", "https://fixture.test/next"],
+			snapshot: [],
+			click: ["--ref", "e1@snapshot-absent"],
+			fill: ["--ref", "e1@snapshot-absent", "--value", "text"],
+		}
+
+		const result = await runProductionCliAsync(probe, [
+			command,
+			...options[command]!,
+			"--run-id",
+			`absent-${command}`,
+		])
+
+		expectError(result, 21, {
+			schemaVersion: 1,
+			status: "error",
+			command,
+			resultCode: "SESSION_ABSENT",
+			runId: `absent-${command}`,
+			transactionState: "unchanged",
+			retrySafe: false,
+			nextAction: "Run warm-browser start --run-id ID to create a Browser Session.",
+			message: "No verified Browser Session owns a Controlled Page.",
+		})
+	},
+)
+
+test("a page address outside http and https is refused before any effect", async () => {
+	const { fixture, probe } = await pageProbe({
+		url: "https://fixture.test/sign-in",
+		elements: signInPage,
+	})
+	const attachedBefore = fixture.attachedTargets().length
+
+	const result = await runProductionCliAsync(probe, [
+		"open",
+		"--url",
+		"javascript:void(0)",
+		"--run-id",
+		"scheme-run",
+	])
+
+	expectError(result, 21, {
+		schemaVersion: 1,
+		status: "error",
+		command: "open",
+		resultCode: "NAVIGATION_TARGET_REFUSED",
+		runId: "scheme-run",
+		transactionState: "unchanged",
+		retrySafe: false,
+		nextAction: "Run warm-browser open --url URL --run-id ID with an http or https address.",
+		message: "Warm Browser opens http and https pages only.",
+	})
+	expect(fixture.attachedTargets().length).toBe(attachedBefore)
+	expect(fixture.pageUrl()).toBe("https://fixture.test/sign-in")
+})
+
+test.each([
+	["open", ["open"], "The --url option is required by open."],
+	["click", ["click"], "The --ref option is required by click."],
+	["fill", ["fill", "--ref", "e1@snapshot-x"], "The --value option is required by fill."],
+	["snapshot", ["snapshot", "--port", "9333"], "Warm Browser received an unsupported argument."],
+] as const)("%s states the argument contract it was given wrong", async (_name, argv, message) => {
+	const probe = productionCliProbe({ processTable: verifiedReading(systemRows) })
+
+	const result = await runProductionCliAsync(probe, [...argv, "--run-id", "argument-run"])
+
+	expectError(result, 2, {
+		schemaVersion: 1,
+		status: "error",
+		command: argv[0],
+		resultCode: "USAGE_ERROR",
+		runId: "argument-run",
+		transactionState: "unchanged",
+		retrySafe: false,
+		nextAction: "Run warm-browser help --run-id ID and correct the command arguments.",
+		message,
+	})
+})

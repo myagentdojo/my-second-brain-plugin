@@ -18,6 +18,7 @@ import type { LaunchOwnership } from "./ownership"
 export interface WarmBrowserAdapter {
 	createRunId(): string
 	createSessionId(): string
+	createSnapshotId(): string
 	nowEpochMs(): number
 	platform(): string
 	chromeExecutable(): string

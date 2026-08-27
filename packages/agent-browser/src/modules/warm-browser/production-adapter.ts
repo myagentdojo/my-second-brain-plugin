@@ -20,6 +20,7 @@ import {
 	signalProcessGroup,
 	startDetachedProcess,
 } from "./host-effects"
+import { isAddressableTargetId } from "./controlled-page"
 import { observeLoopbackListener } from "./listener-table"
 import {
 	endpointAttempts,
@@ -182,11 +183,12 @@ async function readEndpoint(
 			const targetsReading = await readLoopbackJson(`http://127.0.0.1:${port}/json/list`)
 			const targets = targetsReading.body as Array<{ id?: unknown; type?: unknown }>
 			if (!targetsReading.ok || !Array.isArray(targets)) return { kind: "browser_unverified" }
-			// A blank identity is no identity: it cannot be compared, stored, or
-			// used to reach the page again, so such a target is not a Controlled
-			// Page and the endpoint exposes one fewer than it appears to.
+			// An identity this Module could not address again is no identity: it
+			// cannot be compared, stored, or turned back into the one page this
+			// session controls, so such a target is not a Controlled Page and the
+			// endpoint exposes one fewer than it appears to.
 			const pages = targets.filter((target) =>
-				target.type === "page" && typeof target.id === "string" && target.id.trim() !== ""
+				target.type === "page" && isAddressableTargetId(target.id)
 			)
 			if (pages.length === 0) {
 				if (attempt === endpointAttempts - 1) return { kind: "controlled_page_unavailable" }
@@ -233,6 +235,7 @@ async function readEndpoint(
 export const productionAdapter: WarmBrowserAdapter = {
 	createRunId: () => `wb-${randomUUID()}`,
 	createSessionId: () => `session-${randomUUID()}`,
+	createSnapshotId: () => `snapshot-${randomUUID()}`,
 	nowEpochMs: () => Date.now(),
 	platform: hostPlatform,
 	chromeExecutable: () => installedChrome,
