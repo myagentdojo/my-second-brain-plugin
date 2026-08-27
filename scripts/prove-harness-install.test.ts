@@ -366,6 +366,7 @@ test("automated install evidence binds bytes without claiming native activation"
 			nativeDelegation: "not-proved",
 			nativeQualification: { status: "not-proved", receipt: null },
 			portableSkillsWithoutHooks: [
+				"agent-browser",
 				"capability-tour",
 				"decision-view",
 				"dev-mode",
