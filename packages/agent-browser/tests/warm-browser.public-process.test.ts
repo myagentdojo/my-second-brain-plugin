@@ -225,8 +225,16 @@ test("help is one literal agent-native success envelope", () => {
 					usage: "warm-browser <help|start|status|stop> [--run-id ID] [--port NUMBER]",
 					commands: [
 						{ name: "help", sideEffects: "none" },
-						{ name: "start", sideEffects: "starts one owned browser process group" },
-						{ name: "status", sideEffects: "may remove proved stale private state" },
+						{
+							name: "start",
+							sideEffects:
+								"may stop a proved stale owned browser process group, then starts one owned browser process group",
+						},
+						{
+							name: "status",
+							sideEffects:
+								"may stop a proved stale owned browser process group and remove its private state",
+						},
 						{ name: "stop", sideEffects: "stops one verified owned browser process group" },
 					],
 				},
@@ -234,6 +242,40 @@ test("help is one literal agent-native success envelope", () => {
 		}\n`,
 	)
 	expect(result.stderr.toString()).toBe("")
+})
+
+test("help states every side effect each command can actually have", () => {
+	// Independent oracle: the side effects restated by hand. Nothing here is
+	// derived from the production vocabulary, so a vocabulary that stopped
+	// naming an effect it has would disagree with this list rather than match it.
+	const expectedSideEffects = [
+		["help", "none"],
+		[
+			"start",
+			"may stop a proved stale owned browser process group, then starts one owned browser process group",
+		],
+		["status", "may stop a proved stale owned browser process group and remove its private state"],
+		["stop", "stops one verified owned browser process group"],
+	] as const
+	const result = Bun.spawnSync({
+		cmd: [process.execPath, productionEntry, "help", "--run-id", "effects-run"],
+		cwd: packageRoot,
+		stdout: "pipe",
+		stderr: "pipe",
+	})
+	const commands = (JSON.parse(result.stdout.toString()).data as {
+		commands: Array<{ name: string; sideEffects: string }>
+	}).commands
+
+	expect(commands.map(({ name, sideEffects }) => [name, sideEffects])).toEqual(
+		expectedSideEffects.map((entry) => [...entry]),
+	)
+	// The two commands that can signal say so, because both can recover a stale
+	// session and that recovery stops an owned process group.
+	for (const name of ["start", "status"] as const) {
+		const advertised = commands.find((command) => command.name === name)?.sideEffects ?? ""
+		expect(advertised, name).toContain("stop a proved stale owned browser process group")
+	}
 })
 
 test("help usage names every command from the single Command Vocabulary owner", () => {

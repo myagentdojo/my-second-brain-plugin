@@ -2,8 +2,15 @@ export const schemaVersion = 1 as const
 
 export const commandVocabulary = [
 	{ name: "help", sideEffects: "none" },
-	{ name: "start", sideEffects: "starts one owned browser process group" },
-	{ name: "status", sideEffects: "may remove proved stale private state" },
+	{
+		name: "start",
+		sideEffects:
+			"may stop a proved stale owned browser process group, then starts one owned browser process group",
+	},
+	{
+		name: "status",
+		sideEffects: "may stop a proved stale owned browser process group and remove its private state",
+	},
 	{ name: "stop", sideEffects: "stops one verified owned browser process group" },
 ] as const
 
