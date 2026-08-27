@@ -442,9 +442,15 @@ const changedOwnerAfterSignal = [
 		() => `${systemRows}${processRow("4242", "4242", "/usr/bin/login -pf someone")}`,
 	],
 	[
-		"the same identity under a foreign process group",
-		(profileRoot: string) =>
-			`${systemRows}${processRow("4242", "4243", chromeCommand(profileRoot))}`,
+		"the process group holding an unrelated process",
+		() => `${systemRows}${processRow("4310", "4242", "/usr/bin/login -pf someone")}`,
+	],
+	[
+		"the leader gone but a child of its group still running",
+		() =>
+			`${systemRows}${
+				processRow("4310", "4242", `${installedChrome} --type=renderer --enable-crashpad`)
+			}`,
 	],
 	[
 		"the same identity with one argument gained",
@@ -487,6 +493,33 @@ test.each(changedOwnerAfterSignal)(
 		expect(signalEffects(probe).filter(({ signal }) => signal === "SIGKILL")).toEqual([])
 	},
 )
+
+test("an emptied process group is a proved stop even when its identity moved on", () => {
+	const probe = productionCliProbe()
+	seedSessionState(probe, launchingState(probe))
+	writeHostEffectsPlan(probe, {
+		processTable: ownedRowReading(probe),
+		signalOutcomes: { SIGTERM: "delivered", "0": "denied" },
+		// Nothing remains in the signalled group: the identity that led it now
+		// belongs to an unrelated group, so this group really is gone.
+		processTableAfterSignal: verifiedReading(
+			`${systemRows}${processRow("4242", "4243", "/usr/bin/login -pf someone")}`,
+		),
+	})
+
+	const result = runProductionCli(probe, ["status", "--run-id", "group-emptied"])
+
+	expect(result.exitCode).toBe(0)
+	expect(result.stderr.toString()).toBe("")
+	expect(JSON.parse(result.stdout.toString())).toMatchObject({
+		resultCode: "STALE_SESSION_RECOVERED",
+		transactionState: "recovered",
+		data: { trigger: "status", postcondition: "absent", stoppedOwnedProcess: true },
+	})
+	expect(existsSync(probe.lockPath)).toBe(false)
+	// Proved by observation, so the group was never escalated on.
+	expect(signalEffects(probe).filter(({ signal }) => signal === "SIGKILL")).toEqual([])
+})
 
 test("an unchanged exact owner is escalated once and then proved absent", () => {
 	const probe = productionCliProbe()

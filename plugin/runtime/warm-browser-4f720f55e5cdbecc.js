@@ -262,9 +262,10 @@ async function terminateProcessGroupWithEscalation(expected, ownership) {
   const table = processTable();
   if (table.kind === "unverifiable")
     return false;
-  const observed = table.processes.find((processIdentity) => processIdentity.pid === expected.pid);
-  if (observed === undefined)
+  const remaining = table.processes.filter((processIdentity) => processIdentity.processGroupId === processGroupId);
+  if (remaining.length === 0)
     return true;
+  const observed = remaining.find((processIdentity) => processIdentity.pid === expected.pid);
   if (!ownsProcess(expected, observed, ownership))
     return false;
   const escalated = signalProcessGroup(processGroupId, "SIGKILL");

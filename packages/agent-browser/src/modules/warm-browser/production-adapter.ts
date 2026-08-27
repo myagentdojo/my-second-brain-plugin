@@ -111,10 +111,18 @@ async function terminateProcessGroupWithEscalation(
 	// never taken on an identity that is merely still numerically present.
 	const table = processTable()
 	if (table.kind === "unverifiable") return false
-	const observed = table.processes.find(
-		(processIdentity) => processIdentity.pid === expected.pid,
+	// A stop answers for the whole process group, not just its leader. Chrome
+	// leaves its children in that group, so a leader missing from the table
+	// proves only that the leader is gone: absence is proved when no member of
+	// the group remains, and nothing less. Answering true on the leader alone
+	// would strand surviving children and remove the receipt naming them.
+	const remaining = table.processes.filter(
+		(processIdentity) => processIdentity.processGroupId === processGroupId,
 	)
-	if (observed === undefined) return true
+	if (remaining.length === 0) return true
+	// Members remain. Escalating needs the leader still provably ours; if the
+	// leader has gone, ownership of what survives can no longer be proved.
+	const observed = remaining.find((processIdentity) => processIdentity.pid === expected.pid)
 	if (!ownsProcess(expected, observed, ownership)) return false
 	const escalated = signalProcessGroup(processGroupId, "SIGKILL")
 	if (escalated === "absent") return true
