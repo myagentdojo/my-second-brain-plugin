@@ -379,8 +379,19 @@ test("status and stop are idempotent when the Browser Session is absent", () => 
 test("start, status, and stop own one private Browser Session through literal public results", () => {
 	const testFixture = fixture()
 	const executable = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-	const commandLine =
-		`${executable} --user-data-dir=${testFixture.profileRoot} --profile-directory=Default --remote-debugging-address=127.0.0.1 --remote-debugging-port=9242 --agent-browser-launch-marker=session-1`
+	// Independent oracle: the whole production launch, restated by hand.
+	const commandLine = [
+		executable,
+		`--user-data-dir=${testFixture.profileRoot}`,
+		"--profile-directory=Default",
+		"--remote-debugging-address=127.0.0.1",
+		"--remote-debugging-port=9242",
+		"--agent-browser-launch-marker=session-1",
+		"--password-store=basic",
+		"--use-mock-keychain",
+		"--no-first-run",
+		"--no-default-browser-check",
+	].join(" ")
 
 	const started = run(testFixture, ["start", "--run-id", "start-run"])
 	expect(started.exitCode).toBe(0)
@@ -417,6 +428,7 @@ test("start, status, and stop own one private Browser Session through literal pu
 		launchMarker: "session-1",
 		createdAtEpochMs: 1_800_000_000_000,
 		profileRoot: testFixture.profileRoot,
+		launch: { executable, commandLine },
 		process: {
 			pid: 4101,
 			processGroupId: 4101,

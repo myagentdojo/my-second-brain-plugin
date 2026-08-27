@@ -22,34 +22,15 @@ import {
 } from "./host-effects"
 import { observeLoopbackListener } from "./listener-table"
 import { observeProcessTable } from "./process-table"
+import {
+	commandHasArgument,
+	isOwnedLaunch,
+	isSameProcess,
+	type LaunchOwnership,
+	ownsProcess,
+} from "./ownership"
 
 const installedChrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-
-/**
- * The single owner of the launched Chrome argument list, including every
- * security-sensitive argument. Each argument appears exactly once.
- */
-function chromeArgumentList(input: {
-	readonly profileRoot: string
-	readonly port: number
-	readonly launchMarker: string
-}): readonly string[] {
-	return [
-		`--user-data-dir=${input.profileRoot}`,
-		"--profile-directory=Default",
-		"--remote-debugging-address=127.0.0.1",
-		`--remote-debugging-port=${input.port}`,
-		`--agent-browser-launch-marker=${input.launchMarker}`,
-		"--password-store=basic",
-		"--use-mock-keychain",
-		"--no-first-run",
-		"--no-default-browser-check",
-	]
-}
-
-function commandHasArgument(commandLine: string, argument: string): boolean {
-	return ` ${commandLine} `.includes(` ${argument} `)
-}
 
 function privateOwnedDirectory(path: string): boolean {
 	if (!existsSync(path)) return false
@@ -59,44 +40,6 @@ function privateOwnedDirectory(path: string): boolean {
 		!metadata.isSymbolicLink() &&
 		(typeof process.getuid !== "function" || metadata.uid === process.getuid()) &&
 		(metadata.mode & 0o077) === 0
-	)
-}
-
-function sameProcess(
-	expected: BrowserProcessIdentity,
-	observed: BrowserProcessIdentity | undefined,
-): boolean {
-	return (
-		observed !== undefined &&
-		observed.pid === expected.pid &&
-		observed.processGroupId === expected.processGroupId &&
-		observed.startedAtToken === expected.startedAtToken &&
-		observed.executable === expected.executable &&
-		observed.commandLine === expected.commandLine
-	)
-}
-
-/**
- * Proves one observed row is the exact process this launch created, before that
- * row has ever been signalled.
- *
- * A process identity alone proves nothing: the identity may have been reused by
- * an unrelated process between the launch and the reading. The row must lead its
- * own process group, run the installed executable at a whole-token boundary, and
- * carry the launched argument list byte for byte, marker included. The start
- * token is restated so a future observation that stopped parsing one could not
- * silently hand back an identity that later ownership checks cannot compare.
- */
-function isLaunchedProcess(
-	observed: BrowserProcessIdentity,
-	launched: { readonly pid: number; readonly executable: string; readonly commandLine: string },
-): boolean {
-	return (
-		observed.pid === launched.pid &&
-		observed.processGroupId === launched.pid &&
-		observed.executable === launched.executable &&
-		observed.commandLine === launched.commandLine &&
-		observed.startedAtToken !== ""
 	)
 }
 
@@ -151,7 +94,11 @@ async function awaitProcessGroupAbsence(
  * escalated once, and an unverifiable observation ends the attempt without
  * signalling further.
  */
-async function terminateProcessGroupWithEscalation(processGroupId: number): Promise<boolean> {
+async function terminateProcessGroupWithEscalation(
+	expected: BrowserProcessIdentity,
+	ownership: LaunchOwnership,
+): Promise<boolean> {
+	const processGroupId = expected.processGroupId
 	const requested = signalProcessGroup(processGroupId, "SIGTERM")
 	if (requested === "absent") return true
 	if (requested !== "delivered") return false
@@ -171,7 +118,7 @@ async function readEndpoint(
 		const table = processTable()
 		if (table.kind === "unverifiable") return { kind: "process_unverifiable" }
 		const observed = table.processes.find((processIdentity) => processIdentity.pid === expected.pid)
-		if (!sameProcess(expected, observed)) return { kind: "browser_unverified" }
+		if (!isSameProcess(expected, observed)) return { kind: "browser_unverified" }
 		const owner = loopbackListenerOwner(port)
 		if (owner === "unverifiable" || (owner !== "absent" && owner !== expected.pid)) {
 			return { kind: "listener_unverified" }
@@ -274,13 +221,8 @@ export const productionAdapter: WarmBrowserAdapter = {
 		}
 	},
 	inspectPort: connectLoopbackPort,
-	spawnChrome: async ({ executable, profileRoot, port, launchMarker }) => {
-		const argumentList = chromeArgumentList({ profileRoot, port, launchMarker })
-		const launched = {
-			pid: await startDetachedProcess(executable, argumentList),
-			executable,
-			commandLine: [executable, ...argumentList].join(" "),
-		}
+	spawnChrome: async ({ executable, argumentList, ownership }) => {
+		const launchedPid = await startDetachedProcess(executable, argumentList)
 		for (let attempt = 0; attempt < 20; attempt += 1) {
 			const table = processTable()
 			// An unverifiable table cannot say what this process identity now
@@ -288,13 +230,13 @@ export const productionAdapter: WarmBrowserAdapter = {
 			// for the marker-matched cleanup path, which can prove ownership.
 			if (table.kind === "unverifiable") throw new SpawnCleanupUnverifiedError()
 			const observed = table.processes.find(
-				(processIdentity) => processIdentity.pid === launched.pid,
+				(processIdentity) => processIdentity.pid === launchedPid,
 			)
 			if (observed !== undefined) {
 				// The identity is live. Either this row proves it is the exact
 				// process this launch created, or the identity has been reused and
 				// signalling it would reach a process Warm Browser does not own.
-				if (!isLaunchedProcess(observed, launched)) throw new SpawnCleanupUnverifiedError()
+				if (!isOwnedLaunch(observed, ownership)) throw new SpawnCleanupUnverifiedError()
 				return observed
 			}
 			await pause(25)
@@ -315,14 +257,14 @@ export const productionAdapter: WarmBrowserAdapter = {
 		const table = processTable()
 		if (table.kind === "unverifiable") return { kind: "process_unverifiable" }
 		const observed = table.processes.find((processIdentity) => processIdentity.pid === expected.pid)
-		if (!sameProcess(expected, observed)) return { kind: "browser_unverified" }
+		if (!isSameProcess(expected, observed)) return { kind: "browser_unverified" }
 		return readEndpoint(port, expected)
 	},
-	terminateProcessGroup: async (expected) => {
+	terminateProcessGroup: async (expected, ownership) => {
 		const table = processTable()
 		if (table.kind === "unverifiable") return false
 		const observed = table.processes.find((processIdentity) => processIdentity.pid === expected.pid)
-		if (!sameProcess(expected, observed) || expected.processGroupId !== expected.pid) return false
-		return terminateProcessGroupWithEscalation(expected.processGroupId)
+		if (!ownsProcess(expected, observed, ownership)) return false
+		return terminateProcessGroupWithEscalation(expected, ownership)
 	},
 }

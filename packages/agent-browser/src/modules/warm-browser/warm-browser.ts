@@ -12,6 +12,12 @@ import {
 	type TransactionState,
 } from "./contract"
 import type { WarmBrowserAdapter } from "./adapter"
+import {
+	chromeArgumentList,
+	isOwnedLaunch,
+	isSameProcess,
+	launchOwnership,
+} from "./ownership"
 import { productionAdapter } from "./production-adapter"
 import {
 	acquireSessionLock,
@@ -245,50 +251,6 @@ function removeStateAfterStop(
 	}
 }
 
-function hasLaunchContract(
-	observed: BrowserProcessIdentity,
-	executable: string,
-	profileRoot: string,
-	port: number,
-	marker: string,
-): boolean {
-	const hasArgument = (argument: string): boolean =>
-		` ${observed.commandLine} `.includes(` ${argument} `)
-	return (
-		observed.processGroupId === observed.pid &&
-		observed.executable === executable &&
-		(observed.commandLine === executable ||
-			observed.commandLine.startsWith(`${executable} `)) &&
-		(hasArgument(`--user-data-dir=${profileRoot}`) ||
-			hasArgument(`--user-data-dir="${profileRoot}"`)) &&
-		hasArgument("--remote-debugging-address=127.0.0.1") &&
-		hasArgument(`--remote-debugging-port=${port}`) &&
-		hasArgument(`--agent-browser-launch-marker=${marker}`)
-	)
-}
-
-/**
- * Proves the observed process is the exact saved one. The whole command line
- * must match the saved expectation, so an unrecognised argument on a reused
- * process id is never judged owned, never signalled, and never cleaned up.
- */
-function identityMatches(
-	expected: BrowserProcessIdentity,
-	observed: BrowserProcessIdentity,
-	profileRoot: string,
-	port: number,
-	marker: string,
-): boolean {
-	return (
-		observed.pid === expected.pid &&
-		observed.processGroupId === expected.processGroupId &&
-		observed.startedAtToken === expected.startedAtToken &&
-		observed.executable === expected.executable &&
-		observed.commandLine === expected.commandLine &&
-		hasLaunchContract(observed, expected.executable, profileRoot, port, marker)
-	)
-}
-
 function canonicalProcess(value: BrowserProcessIdentity): BrowserProcessIdentity {
 	return {
 		pid: value.pid,
@@ -329,15 +291,7 @@ async function recoverLaunching(
 		)
 	}
 	const candidate = first.processes[0]!
-	if (
-		!hasLaunchContract(
-			candidate,
-			adapter.chromeExecutable(),
-			state.profileRoot,
-			state.endpoint.port,
-			state.launchMarker,
-		)
-	) identityFailure(command, runId)
+	if (!isOwnedLaunch(candidate, state.launch)) identityFailure(command, runId)
 	const second = adapter.findLaunchProcesses(state.launchMarker)
 	if (second.kind === "unverifiable") inspectionFailure(command, runId)
 	if (second.processes.length === 0) {
@@ -346,13 +300,8 @@ async function recoverLaunching(
 	}
 	if (
 		second.processes.length !== 1 ||
-		!identityMatches(
-			candidate,
-			second.processes[0]!,
-			state.profileRoot,
-			state.endpoint.port,
-			state.launchMarker,
-		)
+		!isSameProcess(candidate, second.processes[0]!) ||
+		!isOwnedLaunch(second.processes[0]!, state.launch)
 	) {
 		staticFailure(
 			command,
@@ -363,7 +312,7 @@ async function recoverLaunching(
 			"Inspect the marker-matched processes and private state; Warm Browser did not signal them.",
 		)
 	}
-	if (!(await adapter.terminateProcessGroup(second.processes[0]!))) {
+	if (!(await adapter.terminateProcessGroup(second.processes[0]!, state.launch))) {
 		staticFailure(
 			command,
 			runId,
@@ -438,13 +387,8 @@ async function inspectSession(
 		return { kind: "recovered", stoppedOwnedProcess: false }
 	}
 	if (
-		!identityMatches(
-			state.process,
-			first.process,
-			state.profileRoot,
-			state.endpoint.port,
-			state.launchMarker,
-		)
+		!isSameProcess(state.process, first.process) ||
+		!isOwnedLaunch(first.process, state.launch)
 	) identityFailure(command, runId)
 	if (state.phase === "starting") {
 		if (adapter.nowEpochMs() - state.createdAtEpochMs <= startingTimeoutMs) {
@@ -465,15 +409,10 @@ async function inspectSession(
 			return { kind: "recovered", stoppedOwnedProcess: false }
 		}
 		if (
-			!identityMatches(
-				state.process,
-				second.process,
-				state.profileRoot,
-				state.endpoint.port,
-				state.launchMarker,
-			)
+			!isSameProcess(state.process, second.process) ||
+			!isOwnedLaunch(second.process, state.launch)
 		) identityFailure(command, runId)
-		if (!(await adapter.terminateProcessGroup(second.process))) {
+		if (!(await adapter.terminateProcessGroup(second.process, state.launch))) {
 			staticFailure(
 				command,
 				runId,
@@ -647,9 +586,18 @@ async function start(
 	}
 
 	const sessionId = adapter.createSessionId()
+	// The launch binds what it will be able to prove about itself before it
+	// creates anything, so stale recovery compares bytes rather than guessing
+	// which arguments mattered.
+	const argumentList = chromeArgumentList({
+		profileRoot,
+		port,
+		launchMarker: sessionId,
+	})
 	const launching: Extract<BrowserSessionState, { phase: "launching" }> = {
 		schemaVersion: 1,
 		phase: "launching",
+		launch: launchOwnership({ executable, profileRoot, port, launchMarker: sessionId }),
 		sessionId,
 		startRunId: parsed.runId,
 		launchMarker: sessionId,
@@ -664,9 +612,8 @@ async function start(
 		intentWritten = true
 		spawned = await adapter.spawnChrome({
 			executable,
-			profileRoot,
-			port,
-			launchMarker: launching.launchMarker,
+			argumentList,
+			ownership: launching.launch,
 		})
 		const starting: Extract<BrowserSessionState, { phase: "starting" }> = {
 			...launching,
@@ -697,7 +644,7 @@ async function start(
 					"CDP_IDENTITY_UNVERIFIED",
 					"The launched Chrome CDP identity could not be verified.",
 				] as const)
-			if (!(await adapter.terminateProcessGroup(spawned))) {
+			if (!(await adapter.terminateProcessGroup(spawned, launching.launch))) {
 				staticFailure(
 					"start",
 					parsed.runId,
@@ -741,7 +688,7 @@ async function start(
 			launchCleanupUnverified(parsed.runId, priorTx)
 		}
 		if (spawned !== undefined) {
-			if (!(await adapter.terminateProcessGroup(spawned))) {
+			if (!(await adapter.terminateProcessGroup(spawned, launching.launch))) {
 				launchCleanupUnverified(parsed.runId, priorTx)
 			}
 			removeOwnedState(paths, sessionId)
@@ -839,15 +786,10 @@ async function stop(
 		return recoveredStop(parsed, false)
 	}
 	if (
-		!identityMatches(
-			state.process,
-			observed.process,
-			state.profileRoot,
-			state.endpoint.port,
-			state.launchMarker,
-		)
+		!isSameProcess(state.process, observed.process) ||
+		!isOwnedLaunch(observed.process, state.launch)
 	) identityFailure("stop", parsed.runId)
-	if (!(await adapter.terminateProcessGroup(observed.process))) {
+	if (!(await adapter.terminateProcessGroup(observed.process, state.launch))) {
 		staticFailure(
 			"stop",
 			parsed.runId,

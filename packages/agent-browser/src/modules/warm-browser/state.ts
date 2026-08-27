@@ -15,6 +15,7 @@ import {
 import { dirname, join, resolve } from "node:path"
 
 import type { BrowserProcessIdentity, VerifiedEndpoint } from "./contract"
+import type { LaunchOwnership } from "./ownership"
 
 interface BrowserSessionBase {
 	readonly schemaVersion: 1
@@ -23,6 +24,8 @@ interface BrowserSessionBase {
 	readonly launchMarker: string
 	readonly createdAtEpochMs: number
 	readonly profileRoot: string
+	/** What this launch must be able to prove about itself before any signal. */
+	readonly launch: LaunchOwnership
 	readonly endpoint: {
 		readonly host: "127.0.0.1"
 		readonly port: number
@@ -149,6 +152,12 @@ function processShape(value: unknown): value is BrowserProcessIdentity {
 	)
 }
 
+function launchShape(value: unknown): value is LaunchOwnership {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return false
+	const launch = value as Partial<LaunchOwnership>
+	return typeof launch.executable === "string" && typeof launch.commandLine === "string"
+}
+
 function stateShape(value: unknown): value is BrowserSessionState {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) return false
 	const state = value as Partial<BrowserSessionState>
@@ -162,6 +171,7 @@ function stateShape(value: unknown): value is BrowserSessionState {
 		/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(state.launchMarker) &&
 		Number.isSafeInteger(state.createdAtEpochMs) &&
 		typeof state.profileRoot === "string" &&
+		launchShape(state.launch) &&
 		endpoint !== undefined &&
 		endpoint.host === "127.0.0.1" &&
 		Number.isSafeInteger(endpoint.port) &&

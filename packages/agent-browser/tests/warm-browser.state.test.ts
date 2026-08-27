@@ -44,6 +44,7 @@ function ownedState(sessionId: string) {
 		launchMarker: sessionId,
 		createdAtEpochMs: 1_800_000_000_000,
 		profileRoot: join(base, ".agent-warm-profile"),
+		launch: { executable: "/fixture/chrome", commandLine: "/fixture/chrome --fixture" },
 		endpoint: { host: "127.0.0.1", port: 9242 },
 	}
 	writeSessionState(paths, state)
@@ -73,6 +74,7 @@ test("detached cleanup blocks a concurrent owner until old state is gone, then p
 		launchMarker: "new-session",
 		createdAtEpochMs: 1_800_000_000_001,
 		profileRoot: join(paths.root, "profile"),
+		launch: { executable: "/fixture/chrome", commandLine: "/fixture/chrome --fixture" },
 		endpoint: { host: "127.0.0.1", port: 9242 },
 	}
 	writeSessionState(paths, newState)

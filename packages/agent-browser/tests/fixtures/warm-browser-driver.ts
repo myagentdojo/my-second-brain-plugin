@@ -143,19 +143,29 @@ const adapter: WarmBrowserAdapter = {
 		}
 	},
 	inspectPort: async () => plan().portStatus ?? "free",
-	spawnChrome: async ({ executable, profileRoot, port, launchMarker }) => {
+	spawnChrome: async ({ argumentList, ownership }) => {
 		if (plan().spawnThrows) throw new Error("fixture spawn failure")
 		const current = ledger()
 		current.spawnCount += 1
-		const spawned = fakeProcess(
-			4_100 + current.spawnCount,
-			executable,
-			profileRoot,
-			port,
-			launchMarker,
-		)
+		// The launched process carries exactly what the Module bound durably, so
+		// the fixture cannot fabricate a command line production would not launch.
+		const pid = 4_100 + current.spawnCount
+		const spawned: LedgerProcess = {
+			pid,
+			processGroupId: pid,
+			startedAtToken: `fixture-start-${pid}`,
+			executable: ownership.executable,
+			commandLine: ownership.commandLine,
+			alive: true,
+		}
 		current.processes.push(spawned)
 		writeLedger(current)
+		// The recorded port is read back out of the argument list the Module
+		// actually launched with, never restated by the fixture.
+		const portArgument = "--remote-debugging-port="
+		const port = Number(
+			argumentList.find((value) => value.startsWith(portArgument))?.slice(portArgument.length),
+		)
 		action({ action: "spawn", pid: spawned.pid, processGroupId: spawned.processGroupId, port })
 		if (plan().holdSpawnReturnUntil) await waitFor(plan().holdSpawnReturnUntil!)
 		if (plan().postSpawnIdentityReadFailure) {

@@ -94,6 +94,21 @@ function expectLaunchMarkerRetainedUnsignalled(probe: ProductionCliProbe, runId:
 		launchMarker: receipt.sessionId,
 		createdAtEpochMs: receipt.createdAtEpochMs,
 		profileRoot: probe.profileRoot,
+		launch: {
+			executable: installedChrome,
+			commandLine: [
+				installedChrome,
+				`--user-data-dir=${probe.profileRoot}`,
+				"--profile-directory=Default",
+				"--remote-debugging-address=127.0.0.1",
+				"--remote-debugging-port=9242",
+				`--agent-browser-launch-marker=${receipt.sessionId as string}`,
+				"--password-store=basic",
+				"--use-mock-keychain",
+				"--no-first-run",
+				"--no-default-browser-check",
+			].join(" "),
+		},
 		endpoint: { host: "127.0.0.1", port: 9242 },
 	})
 	expect(statSync(probe.sessionPath).mode & 0o7777).toBe(0o600)

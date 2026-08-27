@@ -4,6 +4,7 @@ import type {
 	ProcessInspection,
 	ProcessListInspection,
 } from "./contract"
+import type { LaunchOwnership } from "./ownership"
 
 /**
  * The Module's private implementation seam.
@@ -28,9 +29,8 @@ export interface WarmBrowserAdapter {
 	inspectPort(port: number): Promise<"free" | "occupied" | "unverifiable">
 	spawnChrome(input: {
 		readonly executable: string
-		readonly profileRoot: string
-		readonly port: number
-		readonly launchMarker: string
+		readonly argumentList: readonly string[]
+		readonly ownership: LaunchOwnership
 	}): Promise<BrowserProcessIdentity>
 	inspectProcess(pid: number): ProcessInspection
 	verifyEndpoint(input: {
@@ -38,5 +38,8 @@ export interface WarmBrowserAdapter {
 		readonly port: number
 		readonly process: BrowserProcessIdentity
 	}): Promise<EndpointVerification>
-	terminateProcessGroup(process: BrowserProcessIdentity): Promise<boolean>
+	terminateProcessGroup(
+		process: BrowserProcessIdentity,
+		ownership: LaunchOwnership,
+	): Promise<boolean>
 }

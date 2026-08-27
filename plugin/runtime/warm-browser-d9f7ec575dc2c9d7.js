@@ -15,6 +15,40 @@ class SpawnCleanupUnverifiedError extends Error {
   }
 }
 
+// packages/agent-browser/src/modules/warm-browser/ownership.ts
+function chromeArgumentList(input) {
+  return [
+    `--user-data-dir=${input.profileRoot}`,
+    "--profile-directory=Default",
+    "--remote-debugging-address=127.0.0.1",
+    `--remote-debugging-port=${input.port}`,
+    `--agent-browser-launch-marker=${input.launchMarker}`,
+    "--password-store=basic",
+    "--use-mock-keychain",
+    "--no-first-run",
+    "--no-default-browser-check"
+  ];
+}
+function launchOwnership(input) {
+  const argumentList = chromeArgumentList(input);
+  return {
+    executable: input.executable,
+    commandLine: [input.executable, ...argumentList].join(" ")
+  };
+}
+function commandHasArgument(commandLine, argument) {
+  return ` ${commandLine} `.includes(` ${argument} `);
+}
+function isOwnedLaunch(observed, ownership) {
+  return observed.processGroupId === observed.pid && observed.executable === ownership.executable && observed.commandLine === ownership.commandLine && observed.startedAtToken !== "";
+}
+function isSameProcess(expected, observed) {
+  return observed !== undefined && observed.pid === expected.pid && observed.processGroupId === expected.processGroupId && observed.startedAtToken === expected.startedAtToken && observed.executable === expected.executable && observed.commandLine === expected.commandLine;
+}
+function ownsProcess(expected, observed, ownership) {
+  return isSameProcess(expected, observed) && isOwnedLaunch(observed, ownership);
+}
+
 // packages/agent-browser/src/modules/warm-browser/production-adapter.ts
 import { randomUUID } from "crypto";
 import { existsSync, lstatSync as lstatSync2 } from "fs";
@@ -185,33 +219,11 @@ function observeProcessTable(reading, knownExecutable) {
 
 // packages/agent-browser/src/modules/warm-browser/production-adapter.ts
 var installedChrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
-function chromeArgumentList(input) {
-  return [
-    `--user-data-dir=${input.profileRoot}`,
-    "--profile-directory=Default",
-    "--remote-debugging-address=127.0.0.1",
-    `--remote-debugging-port=${input.port}`,
-    `--agent-browser-launch-marker=${input.launchMarker}`,
-    "--password-store=basic",
-    "--use-mock-keychain",
-    "--no-first-run",
-    "--no-default-browser-check"
-  ];
-}
-function commandHasArgument(commandLine, argument) {
-  return ` ${commandLine} `.includes(` ${argument} `);
-}
 function privateOwnedDirectory(path) {
   if (!existsSync(path))
     return false;
   const metadata = lstatSync2(path);
   return metadata.isDirectory() && !metadata.isSymbolicLink() && (typeof process.getuid !== "function" || metadata.uid === process.getuid()) && (metadata.mode & 63) === 0;
-}
-function sameProcess(expected, observed) {
-  return observed !== undefined && observed.pid === expected.pid && observed.processGroupId === expected.processGroupId && observed.startedAtToken === expected.startedAtToken && observed.executable === expected.executable && observed.commandLine === expected.commandLine;
-}
-function isLaunchedProcess(observed, launched) {
-  return observed.pid === launched.pid && observed.processGroupId === launched.pid && observed.executable === launched.executable && observed.commandLine === launched.commandLine && observed.startedAtToken !== "";
 }
 function processTable() {
   return observeProcessTable(readProcessTable(), installedChrome);
@@ -237,7 +249,8 @@ async function awaitProcessGroupAbsence(processGroupId, attempts) {
   }
   return "present";
 }
-async function terminateProcessGroupWithEscalation(processGroupId) {
+async function terminateProcessGroupWithEscalation(expected, ownership) {
+  const processGroupId = expected.processGroupId;
   const requested = signalProcessGroup(processGroupId, "SIGTERM");
   if (requested === "absent")
     return true;
@@ -259,7 +272,7 @@ async function readEndpoint(port, expected) {
     if (table.kind === "unverifiable")
       return { kind: "process_unverifiable" };
     const observed = table.processes.find((processIdentity) => processIdentity.pid === expected.pid);
-    if (!sameProcess(expected, observed))
+    if (!isSameProcess(expected, observed))
       return { kind: "browser_unverified" };
     const owner = loopbackListenerOwner(port);
     if (owner === "unverifiable" || owner !== "absent" && owner !== expected.pid) {
@@ -340,20 +353,15 @@ var productionAdapter = {
     };
   },
   inspectPort: connectLoopbackPort,
-  spawnChrome: async ({ executable, profileRoot, port, launchMarker }) => {
-    const argumentList = chromeArgumentList({ profileRoot, port, launchMarker });
-    const launched = {
-      pid: await startDetachedProcess(executable, argumentList),
-      executable,
-      commandLine: [executable, ...argumentList].join(" ")
-    };
+  spawnChrome: async ({ executable, argumentList, ownership }) => {
+    const launchedPid = await startDetachedProcess(executable, argumentList);
     for (let attempt = 0;attempt < 20; attempt += 1) {
       const table = processTable();
       if (table.kind === "unverifiable")
         throw new SpawnCleanupUnverifiedError;
-      const observed = table.processes.find((processIdentity) => processIdentity.pid === launched.pid);
+      const observed = table.processes.find((processIdentity) => processIdentity.pid === launchedPid);
       if (observed !== undefined) {
-        if (!isLaunchedProcess(observed, launched))
+        if (!isOwnedLaunch(observed, ownership))
           throw new SpawnCleanupUnverifiedError;
         return observed;
       }
@@ -373,18 +381,18 @@ var productionAdapter = {
     if (table.kind === "unverifiable")
       return { kind: "process_unverifiable" };
     const observed = table.processes.find((processIdentity) => processIdentity.pid === expected.pid);
-    if (!sameProcess(expected, observed))
+    if (!isSameProcess(expected, observed))
       return { kind: "browser_unverified" };
     return readEndpoint(port, expected);
   },
-  terminateProcessGroup: async (expected) => {
+  terminateProcessGroup: async (expected, ownership) => {
     const table = processTable();
     if (table.kind === "unverifiable")
       return false;
     const observed = table.processes.find((processIdentity) => processIdentity.pid === expected.pid);
-    if (!sameProcess(expected, observed) || expected.processGroupId !== expected.pid)
+    if (!ownsProcess(expected, observed, ownership))
       return false;
-    return terminateProcessGroupWithEscalation(expected.processGroupId);
+    return terminateProcessGroupWithEscalation(expected, ownership);
   }
 };
 
@@ -473,12 +481,18 @@ function processShape(value) {
   const processIdentity = value;
   return Number.isSafeInteger(processIdentity.pid) && Number.isSafeInteger(processIdentity.processGroupId) && typeof processIdentity.startedAtToken === "string" && typeof processIdentity.executable === "string" && typeof processIdentity.commandLine === "string";
 }
+function launchShape(value) {
+  if (typeof value !== "object" || value === null || Array.isArray(value))
+    return false;
+  const launch = value;
+  return typeof launch.executable === "string" && typeof launch.commandLine === "string";
+}
 function stateShape(value) {
   if (typeof value !== "object" || value === null || Array.isArray(value))
     return false;
   const state = value;
   const endpoint = state.endpoint;
-  const common = state.schemaVersion === 1 && (state.phase === "launching" || state.phase === "starting" || state.phase === "running") && typeof state.sessionId === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(state.sessionId) && typeof state.startRunId === "string" && typeof state.launchMarker === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(state.launchMarker) && Number.isSafeInteger(state.createdAtEpochMs) && typeof state.profileRoot === "string" && endpoint !== undefined && endpoint.host === "127.0.0.1" && Number.isSafeInteger(endpoint.port) && (endpoint.browserVersion === undefined || typeof endpoint.browserVersion === "string") && (endpoint.controlledPageTargetId === undefined || typeof endpoint.controlledPageTargetId === "string");
+  const common = state.schemaVersion === 1 && (state.phase === "launching" || state.phase === "starting" || state.phase === "running") && typeof state.sessionId === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(state.sessionId) && typeof state.startRunId === "string" && typeof state.launchMarker === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(state.launchMarker) && Number.isSafeInteger(state.createdAtEpochMs) && typeof state.profileRoot === "string" && launchShape(state.launch) && endpoint !== undefined && endpoint.host === "127.0.0.1" && Number.isSafeInteger(endpoint.port) && (endpoint.browserVersion === undefined || typeof endpoint.browserVersion === "string") && (endpoint.controlledPageTargetId === undefined || typeof endpoint.controlledPageTargetId === "string");
   if (!common)
     return false;
   if (state.phase === "launching")
@@ -693,13 +707,6 @@ function removeStateAfterStop(command, runId, paths, sessionId) {
     staticFailure(command, runId, "STATE_UNSAFE", 20, "Warm Browser stopped the owned browser process group but could not remove its private session state.", "Repair the retained private Warm Browser session state; the owned browser process group is already stopped.", false, "stopped");
   }
 }
-function hasLaunchContract(observed, executable, profileRoot, port, marker) {
-  const hasArgument = (argument) => ` ${observed.commandLine} `.includes(` ${argument} `);
-  return observed.processGroupId === observed.pid && observed.executable === executable && (observed.commandLine === executable || observed.commandLine.startsWith(`${executable} `)) && (hasArgument(`--user-data-dir=${profileRoot}`) || hasArgument(`--user-data-dir="${profileRoot}"`)) && hasArgument("--remote-debugging-address=127.0.0.1") && hasArgument(`--remote-debugging-port=${port}`) && hasArgument(`--agent-browser-launch-marker=${marker}`);
-}
-function identityMatches(expected, observed, profileRoot, port, marker) {
-  return observed.pid === expected.pid && observed.processGroupId === expected.processGroupId && observed.startedAtToken === expected.startedAtToken && observed.executable === expected.executable && observed.commandLine === expected.commandLine && hasLaunchContract(observed, expected.executable, profileRoot, port, marker);
-}
 function canonicalProcess(value) {
   return {
     pid: value.pid,
@@ -721,7 +728,7 @@ async function recoverLaunching(command, runId, paths, state, adapter) {
     staticFailure(command, runId, "LAUNCH_PROCESS_AMBIGUOUS", 20, "The stale launch marker does not identify exactly one browser leader.", "Inspect the marker-matched processes and private state; Warm Browser did not signal them.");
   }
   const candidate = first.processes[0];
-  if (!hasLaunchContract(candidate, adapter.chromeExecutable(), state.profileRoot, state.endpoint.port, state.launchMarker))
+  if (!isOwnedLaunch(candidate, state.launch))
     identityFailure(command, runId);
   const second = adapter.findLaunchProcesses(state.launchMarker);
   if (second.kind === "unverifiable")
@@ -730,10 +737,10 @@ async function recoverLaunching(command, runId, paths, state, adapter) {
     removeOwnedState(paths, state.sessionId);
     return { kind: "recovered", stoppedOwnedProcess: false };
   }
-  if (second.processes.length !== 1 || !identityMatches(candidate, second.processes[0], state.profileRoot, state.endpoint.port, state.launchMarker)) {
+  if (second.processes.length !== 1 || !isSameProcess(candidate, second.processes[0]) || !isOwnedLaunch(second.processes[0], state.launch)) {
     staticFailure(command, runId, "LAUNCH_PROCESS_AMBIGUOUS", 20, "The stale launch marker changed before cleanup.", "Inspect the marker-matched processes and private state; Warm Browser did not signal them.");
   }
-  if (!await adapter.terminateProcessGroup(second.processes[0])) {
+  if (!await adapter.terminateProcessGroup(second.processes[0], state.launch)) {
     staticFailure(command, runId, "UNEXPECTED_FAILURE", 1, "Warm Browser could not clean up its stale marked process group.", "Inspect the owned process group and private state before retrying.");
   }
   removeStateAfterStop(command, runId, paths, state.sessionId);
@@ -766,7 +773,7 @@ async function inspectSession(command, runId, paths, adapter) {
     removeOwnedState(paths, state.sessionId);
     return { kind: "recovered", stoppedOwnedProcess: false };
   }
-  if (!identityMatches(state.process, first.process, state.profileRoot, state.endpoint.port, state.launchMarker))
+  if (!isSameProcess(state.process, first.process) || !isOwnedLaunch(first.process, state.launch))
     identityFailure(command, runId);
   if (state.phase === "starting") {
     if (adapter.nowEpochMs() - state.createdAtEpochMs <= startingTimeoutMs) {
@@ -779,9 +786,9 @@ async function inspectSession(command, runId, paths, adapter) {
       removeOwnedState(paths, state.sessionId);
       return { kind: "recovered", stoppedOwnedProcess: false };
     }
-    if (!identityMatches(state.process, second.process, state.profileRoot, state.endpoint.port, state.launchMarker))
+    if (!isSameProcess(state.process, second.process) || !isOwnedLaunch(second.process, state.launch))
       identityFailure(command, runId);
-    if (!await adapter.terminateProcessGroup(second.process)) {
+    if (!await adapter.terminateProcessGroup(second.process, state.launch)) {
       staticFailure(command, runId, "UNEXPECTED_FAILURE", 1, "Warm Browser could not clean up its stale starting process group.", "Inspect the owned process group and private state before retrying.");
     }
     removeStateAfterStop(command, runId, paths, state.sessionId);
@@ -860,9 +867,15 @@ async function start(parsed, paths, adapter) {
     staticFailure("start", parsed.runId, "START_IN_PROGRESS", 22, "Another start transaction acquired Browser Session ownership.", "Wait briefly, then run warm-browser status --run-id ID.", true, priorTx);
   }
   const sessionId = adapter.createSessionId();
+  const argumentList = chromeArgumentList({
+    profileRoot,
+    port,
+    launchMarker: sessionId
+  });
   const launching = {
     schemaVersion: 1,
     phase: "launching",
+    launch: launchOwnership({ executable, profileRoot, port, launchMarker: sessionId }),
     sessionId,
     startRunId: parsed.runId,
     launchMarker: sessionId,
@@ -877,9 +890,8 @@ async function start(parsed, paths, adapter) {
     intentWritten = true;
     spawned = await adapter.spawnChrome({
       executable,
-      profileRoot,
-      port,
-      launchMarker: launching.launchMarker
+      argumentList,
+      ownership: launching.launch
     });
     const starting = {
       ...launching,
@@ -906,7 +918,7 @@ async function start(parsed, paths, adapter) {
         "CDP_IDENTITY_UNVERIFIED",
         "The launched Chrome CDP identity could not be verified."
       ];
-      if (!await adapter.terminateProcessGroup(spawned)) {
+      if (!await adapter.terminateProcessGroup(spawned, launching.launch)) {
         staticFailure("start", parsed.runId, "UNEXPECTED_FAILURE", 1, "Warm Browser could not roll back its unverified browser process group.", "Inspect the owned process group and private state before retrying.");
       }
       removeOwnedState(paths, sessionId);
@@ -935,7 +947,7 @@ async function start(parsed, paths, adapter) {
       launchCleanupUnverified(parsed.runId, priorTx);
     }
     if (spawned !== undefined) {
-      if (!await adapter.terminateProcessGroup(spawned)) {
+      if (!await adapter.terminateProcessGroup(spawned, launching.launch)) {
         launchCleanupUnverified(parsed.runId, priorTx);
       }
       removeOwnedState(paths, sessionId);
@@ -1013,9 +1025,9 @@ async function stop(parsed, paths, adapter) {
     removeOwnedState(paths, state.sessionId);
     return recoveredStop(parsed, false);
   }
-  if (!identityMatches(state.process, observed.process, state.profileRoot, state.endpoint.port, state.launchMarker))
+  if (!isSameProcess(state.process, observed.process) || !isOwnedLaunch(observed.process, state.launch))
     identityFailure("stop", parsed.runId);
-  if (!await adapter.terminateProcessGroup(observed.process)) {
+  if (!await adapter.terminateProcessGroup(observed.process, state.launch)) {
     staticFailure("stop", parsed.runId, "UNEXPECTED_FAILURE", 1, "Warm Browser could not stop its verified browser process group.", "Inspect the owned process group and private state before retrying.");
   }
   removeStateAfterStop("stop", parsed.runId, paths, state.sessionId);

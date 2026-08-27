@@ -48,6 +48,7 @@ function runningState(probe: ProductionCliProbe): Record<string, unknown> {
 		launchMarker: "session-probe",
 		createdAtEpochMs: 1_000,
 		profileRoot: probe.profileRoot,
+		launch: { executable: installedChrome, commandLine: chromeCommand(probe.profileRoot) },
 		endpoint: {
 			host: "127.0.0.1",
 			port: 9242,
@@ -73,6 +74,7 @@ function launchingState(probe: ProductionCliProbe): Record<string, unknown> {
 		launchMarker: "session-probe",
 		createdAtEpochMs: 1_000,
 		profileRoot: probe.profileRoot,
+		launch: { executable: installedChrome, commandLine: chromeCommand(probe.profileRoot) },
 		endpoint: { host: "127.0.0.1", port: 9242 },
 	}
 }
@@ -374,6 +376,68 @@ test("a well-formed marked row is stopped and cleaned when its group is proved g
 	])
 	expect(existsSync(probe.lockPath)).toBe(false)
 })
+
+/**
+ * Independent oracle: marker-matched command lines that differ from the durable
+ * launch by exactly one argument. Each keeps the launch marker, so recovery
+ * finds the row and must refuse it on ownership rather than on failing to find
+ * it. Restated by hand so no production builder supplies the expectation.
+ */
+const unownedLaunchCommands = [
+	[
+		"one extra argument",
+		(profileRoot: string) => `${chromeCommand(profileRoot)} --load-extension=/tmp/unowned`,
+	],
+	[
+		"a missing keychain argument",
+		(profileRoot: string) => chromeCommand(profileRoot).replace(" --use-mock-keychain", ""),
+	],
+	[
+		"a missing password-store argument",
+		(profileRoot: string) => chromeCommand(profileRoot).replace(" --password-store=basic", ""),
+	],
+	[
+		"one changed argument",
+		(profileRoot: string) =>
+			chromeCommand(profileRoot).replace("--profile-directory=Default", "--profile-directory=Other"),
+	],
+] as const
+
+test.each(unownedLaunchCommands)(
+	"stale launch recovery refuses a marked row differing by %s and signals nothing",
+	(_name, build) => {
+		const probe = productionCliProbe()
+		seedSessionState(probe, launchingState(probe))
+		const stateBefore = readFileSync(probe.sessionPath, "utf8")
+		writeHostEffectsPlan(probe, {
+			processTable: verifiedReading(
+				`${systemRows}${processRow("4242", "4242", build(probe.profileRoot))}`,
+			),
+		})
+
+		const result = runProductionCli(probe, ["status", "--run-id", "unowned-launch"])
+
+		expect(result.exitCode).toBe(20)
+		expect(result.stdout.toString()).toBe("")
+		expect(result.stderr.toString()).toBe(
+			output({
+				schemaVersion: 1,
+				status: "error",
+				command: "status",
+				resultCode: "PROCESS_IDENTITY_UNVERIFIED",
+				runId: "unowned-launch",
+				transactionState: "unchanged",
+				retrySafe: false,
+				nextAction:
+					"Inspect the live process and private Warm Browser state; do not signal the stored process id.",
+				message: "The stored browser process identity does not match the live process.",
+			}),
+		)
+		expect(readFileSync(probe.sessionPath, "utf8")).toBe(stateBefore)
+		expect(existsSync(probe.lockPath)).toBe(true)
+		expect(hostEffects(probe)).toEqual([])
+	},
+)
 
 // Independent oracle: the raw host commands Warm Browser is allowed to run.
 test.each(["/bin/ps", "/usr/sbin/lsof"] as const)(
