@@ -439,6 +439,103 @@ test.each(unownedLaunchCommands)(
 	},
 )
 
+/** Every signal the run recorded, in order. */
+function signalEffects(probe: ProductionCliProbe): Array<Record<string, unknown>> {
+	return hostEffects(probe).filter(({ action }) => action === "signal")
+}
+
+/**
+ * Independent oracle: readings that no longer prove the same owner once the
+ * stop has been requested. Each keeps process identity 4242 alive so the
+ * bounded liveness probes still answer "present", which is exactly the state in
+ * which escalation used to be taken on nothing more than a number.
+ */
+const changedOwnerAfterSignal = [
+	[
+		"a reused identity running an unrelated process",
+		() => `${systemRows}${processRow("4242", "4242", "/usr/bin/login -pf someone")}`,
+	],
+	[
+		"the same identity under a foreign process group",
+		(profileRoot: string) =>
+			`${systemRows}${processRow("4242", "4243", chromeCommand(profileRoot))}`,
+	],
+	[
+		"the same identity with one argument gained",
+		(profileRoot: string) =>
+			`${systemRows}${
+				processRow("4242", "4242", `${chromeCommand(profileRoot)} --load-extension=/tmp/unowned`)
+			}`,
+	],
+] as const
+
+test.each(changedOwnerAfterSignal)(
+	"escalation is refused when the process table shows %s after the stop was requested",
+	(_name, build) => {
+		const probe = productionCliProbe()
+		seedSessionState(probe, launchingState(probe))
+		const stateBefore = readFileSync(probe.sessionPath, "utf8")
+		writeHostEffectsPlan(probe, {
+			processTable: ownedRowReading(probe),
+			// The request lands, the group still answers, and only then does the
+			// table stop naming the process Warm Browser owns.
+			signalOutcomes: { SIGTERM: "delivered", "0": "denied" },
+			processTableAfterSignal: verifiedReading(build(probe.profileRoot)),
+		})
+
+		const result = runProductionCli(probe, ["status", "--run-id", "escalation-refused"])
+
+		expect(result.exitCode).toBe(1)
+		expect(result.stdout.toString()).toBe("")
+		expect(JSON.parse(result.stderr.toString())).toMatchObject({
+			resultCode: "UNEXPECTED_FAILURE",
+			transactionState: "unchanged",
+			message: "Warm Browser could not clean up its stale marked process group.",
+		})
+		expect(readFileSync(probe.sessionPath, "utf8")).toBe(stateBefore)
+		expect(existsSync(probe.lockPath)).toBe(true)
+		expect(signalEffects(probe)[0]).toEqual({
+			action: "signal",
+			processGroupId: 4242,
+			signal: "SIGTERM",
+		})
+		// The one irreversible act is never taken on an unproved identity.
+		expect(signalEffects(probe).filter(({ signal }) => signal === "SIGKILL")).toEqual([])
+	},
+)
+
+test("an unchanged exact owner is escalated once and then proved absent", () => {
+	const probe = productionCliProbe()
+	seedSessionState(probe, launchingState(probe))
+	writeHostEffectsPlan(probe, {
+		processTable: ownedRowReading(probe),
+		signalOutcomes: { SIGTERM: "delivered", "0": "denied", SIGKILL: "absent" },
+	})
+
+	const result = runProductionCli(probe, ["status", "--run-id", "escalation-proved"])
+
+	expect(result.exitCode).toBe(0)
+	expect(result.stderr.toString()).toBe("")
+	expect(JSON.parse(result.stdout.toString())).toMatchObject({
+		resultCode: "STALE_SESSION_RECOVERED",
+		transactionState: "recovered",
+		data: { trigger: "status", postcondition: "absent", stoppedOwnedProcess: true },
+	})
+	expect(existsSync(probe.lockPath)).toBe(false)
+	expect(signalEffects(probe).at(0)).toEqual({
+		action: "signal",
+		processGroupId: 4242,
+		signal: "SIGTERM",
+	})
+	expect(signalEffects(probe).at(-1)).toEqual({
+		action: "signal",
+		processGroupId: 4242,
+		signal: "SIGKILL",
+	})
+	// Exactly one escalation, never a second.
+	expect(signalEffects(probe).filter(({ signal }) => signal === "SIGKILL")).toHaveLength(1)
+})
+
 // Independent oracle: the raw host commands Warm Browser is allowed to run.
 test.each(["/bin/ps", "/usr/sbin/lsof"] as const)(
 	"the %s host reading has exactly one production reader",

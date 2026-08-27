@@ -40,6 +40,12 @@ interface HostEffectsPlan {
 	 * preflight reading can be followed by an unverifiable or non-exact one.
 	 */
 	readonly processTableAfterSpawn?: ProcessTableReading
+	/**
+	 * The literal `ps` reading served once any signal has been delivered. This is
+	 * the real window between requesting a stop and escalating it, in which a
+	 * process identity can exit and its number be reused.
+	 */
+	readonly processTableAfterSignal?: ProcessTableReading
 	readonly executableInstalled?: boolean
 	readonly spawnOutcome?: "leader" | "missing_executable"
 	readonly spawnedPid?: number
@@ -79,6 +85,8 @@ function action(value: Record<string, unknown>): void {
 	appendFileSync(actionsPath, `${JSON.stringify(value)}\n`)
 }
 
+let signalsDelivered = 0
+
 function row(leader: SpawnedLeader): string {
 	const identity = String(leader.pid).padStart(5)
 	const group = String(leader.processGroupId).padStart(5)
@@ -90,6 +98,9 @@ const fake: typeof import("../../src/modules/warm-browser/host-effects") = {
 	readProcessTable: () => {
 		const current = plan()
 		const leaders = spawnedLeaders()
+		if (signalsDelivered > 0 && current.processTableAfterSignal !== undefined) {
+			return current.processTableAfterSignal
+		}
 		if (leaders.length > 0 && current.processTableAfterSpawn !== undefined) {
 			return current.processTableAfterSpawn
 		}
@@ -120,6 +131,7 @@ const fake: typeof import("../../src/modules/warm-browser/host-effects") = {
 	},
 	signalProcessGroup: (processGroupId, signal) => {
 		action({ action: "signal", processGroupId, signal })
+		if (signal !== 0) signalsDelivered += 1
 		const current = plan()
 		return current.signalOutcomes?.[String(signal)] ?? current.signalOutcome ?? "absent"
 	},

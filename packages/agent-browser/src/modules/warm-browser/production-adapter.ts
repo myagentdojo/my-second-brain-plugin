@@ -104,6 +104,18 @@ async function terminateProcessGroupWithEscalation(
 	if (requested !== "delivered") return false
 	const afterTermination = await awaitProcessGroupAbsence(processGroupId, 40)
 	if (afterTermination !== "present") return afterTermination === "absent"
+	// The bounded probes only proved that something answers to this process
+	// group. Between the request and now the identity may have exited and its
+	// number been reused, so the table is read again and the whole ownership
+	// re-proved. Escalation is the last irreversible act available, and it is
+	// never taken on an identity that is merely still numerically present.
+	const table = processTable()
+	if (table.kind === "unverifiable") return false
+	const observed = table.processes.find(
+		(processIdentity) => processIdentity.pid === expected.pid,
+	)
+	if (observed === undefined) return true
+	if (!ownsProcess(expected, observed, ownership)) return false
 	const escalated = signalProcessGroup(processGroupId, "SIGKILL")
 	if (escalated === "absent") return true
 	if (escalated !== "delivered") return false

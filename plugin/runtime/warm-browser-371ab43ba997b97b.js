@@ -259,6 +259,14 @@ async function terminateProcessGroupWithEscalation(expected, ownership) {
   const afterTermination = await awaitProcessGroupAbsence(processGroupId, 40);
   if (afterTermination !== "present")
     return afterTermination === "absent";
+  const table = processTable();
+  if (table.kind === "unverifiable")
+    return false;
+  const observed = table.processes.find((processIdentity) => processIdentity.pid === expected.pid);
+  if (observed === undefined)
+    return true;
+  if (!ownsProcess(expected, observed, ownership))
+    return false;
   const escalated = signalProcessGroup(processGroupId, "SIGKILL");
   if (escalated === "absent")
     return true;
