@@ -144,7 +144,7 @@ async function connectLoopbackPort(port) {
     };
     socket.once("connect", () => finish("occupied"));
     socket.once("error", (error) => finish(error.code === "ECONNREFUSED" ? "free" : "unverifiable"));
-    socket.setTimeout(300, () => finish("unverifiable"));
+    socket.setTimeout(portProbeTimeoutMs, () => finish("unverifiable"));
   });
 }
 function readLoopbackListener(port) {
@@ -157,7 +157,7 @@ function readLoopbackListener(port) {
   };
 }
 async function readLoopbackJson(url) {
-  const response = await fetch(url, { signal: AbortSignal.timeout(500) });
+  const response = await fetch(url, { signal: AbortSignal.timeout(loopbackReadTimeoutMs) });
   return { ok: response.ok, body: await response.json() };
 }
 

@@ -2,6 +2,7 @@ import { spawn, spawnSync } from "node:child_process"
 import { accessSync, constants, lstatSync } from "node:fs"
 import { createConnection } from "node:net"
 
+import { loopbackReadTimeoutMs, portProbeTimeoutMs } from "./bounds"
 import type { ListenerReading } from "./listener-table"
 import type { ProcessTableReading } from "./process-table"
 
@@ -111,7 +112,7 @@ export async function connectLoopbackPort(
 			(error: NodeJS.ErrnoException) =>
 				finish(error.code === "ECONNREFUSED" ? "free" : "unverifiable"),
 		)
-		socket.setTimeout(300, () => finish("unverifiable"))
+		socket.setTimeout(portProbeTimeoutMs, () => finish("unverifiable"))
 	})
 }
 
@@ -132,6 +133,6 @@ export function readLoopbackListener(port: number): ListenerReading {
 
 /** Reads one bounded JSON document from a loopback URL. */
 export async function readLoopbackJson(url: string): Promise<LoopbackJsonReading> {
-	const response = await fetch(url, { signal: AbortSignal.timeout(500) })
+	const response = await fetch(url, { signal: AbortSignal.timeout(loopbackReadTimeoutMs) })
 	return { ok: response.ok, body: await response.json() }
 }

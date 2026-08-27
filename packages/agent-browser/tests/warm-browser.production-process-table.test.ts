@@ -413,9 +413,7 @@ test.each(unownedLaunchCommands)(
 					"Inspect the live process and private Warm Browser state; do not signal the stored process id.",
 				message: "The stored browser process identity does not match the live process.",
 		})
-		expect(readFileSync(probe.sessionPath, "utf8")).toBe(stateBefore)
-		expect(existsSync(probe.lockPath)).toBe(true)
-		expect(hostEffects(probe)).toEqual([])
+		expectReceiptAndLockRetained(probe, stateBefore)
 	},
 )
 
@@ -432,6 +430,16 @@ function expectStaleSessionRecovered(result: Bun.ReadableSyncSubprocess): void {
 		transactionState: "recovered",
 		data: { trigger: "status", postcondition: "absent", stoppedOwnedProcess: true },
 	})
+}
+
+/**
+ * The refusal left everything as it was: the receipt byte for byte, the lock
+ * held, and no host effect at all.
+ */
+function expectReceiptAndLockRetained(probe: ProductionCliProbe, stateBefore: string): void {
+	expect(readFileSync(probe.sessionPath, "utf8")).toBe(stateBefore)
+	expect(existsSync(probe.lockPath)).toBe(true)
+	expect(hostEffects(probe)).toEqual([])
 }
 
 /** Every signal the run recorded, in order. */
@@ -671,9 +679,7 @@ test.each(unprovedLaunchAbsence)(
 			message: "The stored browser process identity does not match the live process.",
 		})
 		// The receipt still names the browser nobody else is accounting for.
-		expect(readFileSync(probe.sessionPath, "utf8")).toBe(stateBefore)
-		expect(existsSync(probe.lockPath)).toBe(true)
-		expect(hostEffects(probe)).toEqual([])
+		expectReceiptAndLockRetained(probe, stateBefore)
 	},
 )
 
@@ -796,10 +802,7 @@ test.each(rebrokenReceipts)(
 	expect(result.stdout.toString()).toBe("")
 	expect(JSON.parse(result.stderr.toString())).toMatchObject({ resultCode })
 	// The receipt and the lock survive exactly as they were.
-	expect(readFileSync(probe.sessionPath, "utf8")).toBe(stateBefore)
-	expect(existsSync(probe.lockPath)).toBe(true)
-	// Nothing was observed on its behalf and nothing was signalled.
-	expect(hostEffects(probe)).toEqual([])
+	expectReceiptAndLockRetained(probe, stateBefore)
 	},
 )
 
@@ -826,9 +829,7 @@ test("a receipt whose process disagrees with its launch is refused without readi
 	expect(JSON.parse(result.stderr.toString())).toMatchObject({
 		resultCode: "PROCESS_IDENTITY_UNVERIFIED",
 	})
-	expect(readFileSync(probe.sessionPath, "utf8")).toBe(stateBefore)
-	expect(existsSync(probe.lockPath)).toBe(true)
-	expect(hostEffects(probe)).toEqual([])
+	expectReceiptAndLockRetained(probe, stateBefore)
 })
 
 // Independent oracle: the raw host commands Warm Browser is allowed to run.
