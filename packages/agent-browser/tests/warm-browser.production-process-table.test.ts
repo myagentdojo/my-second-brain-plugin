@@ -354,13 +354,7 @@ test("a well-formed marked row is stopped and cleaned when its group is proved g
 
 	const result = runProductionCli(probe, ["status", "--run-id", "marked-row-recovered"])
 
-	expect(result.exitCode).toBe(0)
-	expect(result.stderr.toString()).toBe("")
-	expect(JSON.parse(result.stdout.toString())).toMatchObject({
-		resultCode: "STALE_SESSION_RECOVERED",
-		transactionState: "recovered",
-		data: { trigger: "status", postcondition: "absent", stoppedOwnedProcess: true },
-	})
+	expectStaleSessionRecovered(result)
 	expect(hostEffects(probe)).toEqual([
 		{ action: "signal", processGroupId: 4242, signal: "SIGTERM" },
 	])
@@ -424,6 +418,21 @@ test.each(unownedLaunchCommands)(
 		expect(hostEffects(probe)).toEqual([])
 	},
 )
+
+/**
+ * Independent oracle: the result a stale session recovered by a proved stop
+ * must publish. Restated by hand so no production table supplies it, and owned
+ * once because every test that reaches it is claiming the same thing.
+ */
+function expectStaleSessionRecovered(result: Bun.ReadableSyncSubprocess): void {
+	expect(result.exitCode).toBe(0)
+	expect(result.stderr.toString()).toBe("")
+	expect(JSON.parse(result.stdout.toString())).toMatchObject({
+		resultCode: "STALE_SESSION_RECOVERED",
+		transactionState: "recovered",
+		data: { trigger: "status", postcondition: "absent", stoppedOwnedProcess: true },
+	})
+}
 
 /** Every signal the run recorded, in order. */
 function signalEffects(probe: ProductionCliProbe): Array<Record<string, unknown>> {
@@ -509,13 +518,7 @@ test("an emptied process group is a proved stop even when its identity moved on"
 
 	const result = runProductionCli(probe, ["status", "--run-id", "group-emptied"])
 
-	expect(result.exitCode).toBe(0)
-	expect(result.stderr.toString()).toBe("")
-	expect(JSON.parse(result.stdout.toString())).toMatchObject({
-		resultCode: "STALE_SESSION_RECOVERED",
-		transactionState: "recovered",
-		data: { trigger: "status", postcondition: "absent", stoppedOwnedProcess: true },
-	})
+	expectStaleSessionRecovered(result)
 	expect(existsSync(probe.lockPath)).toBe(false)
 	// Proved by observation, so the group was never escalated on.
 	expect(signalEffects(probe).filter(({ signal }) => signal === "SIGKILL")).toEqual([])
@@ -531,13 +534,7 @@ test("an unchanged exact owner is escalated once and then proved absent", () => 
 
 	const result = runProductionCli(probe, ["status", "--run-id", "escalation-proved"])
 
-	expect(result.exitCode).toBe(0)
-	expect(result.stderr.toString()).toBe("")
-	expect(JSON.parse(result.stdout.toString())).toMatchObject({
-		resultCode: "STALE_SESSION_RECOVERED",
-		transactionState: "recovered",
-		data: { trigger: "status", postcondition: "absent", stoppedOwnedProcess: true },
-	})
+	expectStaleSessionRecovered(result)
 	expect(existsSync(probe.lockPath)).toBe(false)
 	expect(signalEffects(probe).at(0)).toEqual({
 		action: "signal",
