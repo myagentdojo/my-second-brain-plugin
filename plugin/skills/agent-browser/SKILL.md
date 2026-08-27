@@ -64,8 +64,9 @@ The intended public Command Vocabulary is `start`, `status`, `open`,
 
 Maturity: `page-control-slice`. The generated payload activates Warm Browser
 `help`, `start`, `status`, `open`, `snapshot`, `click`, `fill`, and `stop`;
-`screenshot` and `login` are not callable. `fill` refuses every credential field
-and names `login`, so credential entry has no path in this slice. Profile
+`screenshot` and `login` are not callable. `fill` refuses every credential field,
+including the login identifier beside the password, and names `login`, so
+credential entry has no path in this slice. Profile
 Cutover, credential delivery, installation, and release remain separate tickets.
 Do not claim profile exclusivity or a real-profile launch until their owning
 proofs complete.

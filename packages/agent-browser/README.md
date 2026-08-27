@@ -77,8 +77,11 @@ non-empty `nextAction`, and `runId`. Exit classes are `0` success, `2` usage,
 `20` inspect/repair, `21` refusal, `22` transient, and `1` unexpected.
 
 The closed transaction vocabulary is `unchanged`, `started`, `stopped`,
-`recovered`, `rolled_back`, and `acted`. A page command that changed the
-Controlled Page, or that cannot prove it did not, records `acted`. The closed
+`recovered`, `rolled_back`, `acted`, and `invalidated`. A page command that
+changed the Controlled Page, or that cannot prove it did not, records `acted`. A
+command that reached nothing but dropped the Snapshot References it held records
+`invalidated`, which neither denies that durable state moved nor claims the page
+was touched. The closed
 Result Vocabulary is `HELP`, `SESSION_STARTED`, `SESSION_RUNNING`,
 `SESSION_ABSENT`, `SESSION_STOPPED`, `STALE_SESSION_RECOVERED`, `USAGE_ERROR`,
 `PLATFORM_UNSUPPORTED`, `STATE_UNSAFE`, `CHROME_UNAVAILABLE`,
@@ -109,13 +112,16 @@ reference from an earlier generation resolves against nothing. `click` and
 The published snapshot carries roles, names, and references, never selectors or
 node identities.
 
-Every `open` invalidates every earlier reference before it navigates, a fresh
-`snapshot` replaces the generation, an act that moves the page invalidates the
-references it used, and binding a replacement Controlled Page drops them too.
-Invalidation is durable and total: the generation stops existing, so no dead
-reference survives anywhere to be resolved later. A reference is also refused
-once it is older than its bound, once the live page identity differs from the
-one it was issued against, and once it names another Controlled Page.
+Every `open` invalidates every earlier reference before it navigates, and a
+fresh `snapshot` replaces the generation. Every command that proves the page
+moved or was replaced also drops the generation, durably, before it returns its
+refusal: a detected page replacement, a page that moved while it was being read,
+a page that moved before an act, and a page that moved during one. Invalidation
+is total: the generation stops existing, so no dead reference survives anywhere
+to be resolved later, and a command that reloads the receipt afterwards finds
+nothing to resolve. A reference is also refused once it is older than its bound,
+once the live page identity differs from the one it was issued against, and once
+it names another Controlled Page.
 
 The Controlled Page is reached at an address Warm Browser computes,
 `ws://127.0.0.1:<port>/devtools/page/<target>`, never at the socket the endpoint
@@ -124,13 +130,28 @@ Controlled Page, so such an endpoint exposes one page fewer than it appears to.
 
 A page replacement is never adopted silently. Every command refuses with
 `CONTROLLED_PAGE_REPLACED` until one `open --url URL --adopt-page` binds the
-replacement and drops every reference with it.
+replacement, and the refusal itself has already dropped every reference bound to
+the page that went.
+
+A navigation succeeds only on the document it asked for. `open` binds success to
+the frame and document load `Page.navigate` returned, so a navigation another
+document wins in the meantime is reported as `PAGE_IDENTITY_CHANGED` rather than
+as the page opening. `click` and `fill` prove the page identity once more
+immediately before dispatching, so a navigation that lands during the reads
+before it never receives the input. After the act, a page that moved is the act
+working only when the act was a click on a link or a submit control; typing
+never navigates a page, and no other element does, so any other page that moved
+is another document arriving and is never reported as success.
 
 `fill` refuses a credential field twice: once from what the snapshot recorded,
 before anything is said to the page, and once from the live description taken
-immediately before typing. Both refusals name `login`, which is not callable in
-this slice. Warm Browser never types authentication material, and `--value`
-carries non-secret text only.
+immediately before typing. A login identifier is a credential field on the same
+footing as the password beside it: it is the half of the pair that names the
+account, and typing it through the public interface would put it in an argument
+list exactly as a password would. The standard `autocomplete` tokens and the
+usual username, login, and address identifiers are all classified. Both refusals
+name `login`, which is not callable in this slice. Warm Browser never types
+authentication material, and `--value` carries non-secret text only.
 
 ## Deterministic Controlled Page proof
 
@@ -144,9 +165,18 @@ inspected. An independent CDP target reader that shares no code with the Module
 reads the same endpoint and proves the process and Controlled Page Warm Browser
 selected.
 
+The fixture also models a navigation that lands part-way through one
+conversation, delayed or competing, so the race protection is proved against a
+page that moves under the command rather than only before it. An independent
+reader links the launched leader, the loopback listener readings, the endpoint's
+targets, and the socket that was dialled without reading anything Warm Browser
+printed, and it is shown refusing a listener owned by another process and a
+Controlled Page the session never bound.
+
 `tests/warm-browser.negative-controls.test.ts` runs those scenarios twice: once
-against the Module and once against a copy with exactly one invalidation or
-Controlled Page guard removed, recording that the owning proof no longer holds.
+against the Module and once against a copy with exactly one invalidation,
+Controlled Page, credential, or navigation-binding guard removed, recording that
+the owning proof no longer holds.
 
 ## Real Chrome compatibility proof
 

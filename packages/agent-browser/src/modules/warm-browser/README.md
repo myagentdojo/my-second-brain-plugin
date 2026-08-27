@@ -42,17 +42,27 @@ performed and keeps the retained state repairable.
 One Controlled Page is operated through Snapshot References and never through a
 public selector. A reference names an element ordinal at a Snapshot Generation
 and carries that generation in its own text, so a reference issued against an
-earlier one resolves against nothing. Every `open`, every fresh `snapshot`, every
-act that moves the page, and every adoption of a replacement page invalidates the
-generation durably and completely, which is why no register of dead references
-exists to be consulted later. Every use re-proves the live page identity as well,
-so a reference that outlived the page it described is refused rather than
-followed. The page is reached at an address this Module computes, never at the
-socket the endpoint advertises, and a target identity it could not address again
-is not a Controlled Page at all. A replacement page is refused until one `open`
-is told to adopt it. `fill` refuses a credential field from the snapshot before
-saying anything to the page, and again from the live description immediately
-before typing; both refusals route to `login`.
+earlier one resolves against nothing. Every `open`, every fresh `snapshot`, and
+every act that moves the page invalidates the generation durably; so does every
+command that merely proves the page moved or was replaced, before it returns its
+refusal, which is why no register of dead references exists to be consulted
+later. Every use re-proves the live page identity as well, so a reference that
+outlived the page it described is refused rather than followed. The page is
+reached at an address this Module computes, never at the socket the endpoint
+advertises, and a target identity it could not address again is not a Controlled
+Page at all. A replacement page is refused until one `open` is told to adopt it.
+
+A navigation is bound to the document it asked for: `open` succeeds only on the
+frame and document load the browser said it started, an act proves the identity
+once more immediately before dispatching, and a page that moved after the act is
+the act working only when the act was a click on something that navigates.
+Anything else that moved the page is another document arriving, and success is
+never claimed about it.
+
+`fill` refuses a credential field from the snapshot before saying anything to the
+page, and again from the live description immediately before typing. The login
+identifier is classified with the password, because it is the half of the pair
+that names the account; both refusals route to `login`.
 
 A Screenshot is a private session-owned PNG of the Controlled Page, distinct
 from the structured interaction snapshot. Warm Browser returns only its owned
