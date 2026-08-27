@@ -3,6 +3,8 @@ import { existsSync, readdirSync, readFileSync } from "node:fs"
 import { join, resolve } from "node:path"
 
 import {
+	expectError,
+	expectRefusal,
 	hostEffects,
 	installedChrome,
 	packageRoot,
@@ -114,10 +116,7 @@ function expectInspectionUnverified(
 	command: "start" | "status" | "stop",
 	runId: string,
 ): void {
-	expect(result.exitCode).toBe(20)
-	expect(result.stdout.toString()).toBe("")
-	expect(result.stderr.toString()).toBe(
-		output({
+	expectError(result, 20, {
 			schemaVersion: 1,
 			status: "error",
 			command,
@@ -127,8 +126,7 @@ function expectInspectionUnverified(
 			retrySafe: false,
 			nextAction: "Inspect the host process table and private Warm Browser state before retrying.",
 			message: "Warm Browser could not verify the local process table.",
-		}),
-	)
+	})
 }
 
 const ambiguousReadings: ReadonlyArray<
@@ -240,10 +238,7 @@ test("a well-formed table still proves one live profile owner without signalling
 
 	const result = runProductionCli(probe, ["start", "--run-id", "profile-in-use-start"])
 
-	expect(result.exitCode).toBe(21)
-	expect(result.stdout.toString()).toBe("")
-	expect(result.stderr.toString()).toBe(
-		output({
+	expectError(result, 21, {
 			schemaVersion: 1,
 			status: "error",
 			command: "start",
@@ -253,8 +248,7 @@ test("a well-formed table still proves one live profile owner without signalling
 			retrySafe: false,
 			nextAction: "Close the existing profile owner, then retry Warm Browser start.",
 			message: "An unowned process is using the Agent Chrome Profile.",
-		}),
-	)
+	})
 	expect(existsSync(probe.lockPath)).toBe(false)
 	expect(hostEffects(probe)).toEqual([])
 })
@@ -325,9 +319,7 @@ test("a well-formed owned row is still matched exactly before endpoint verificat
 
 	const result = runProductionCli(probe, ["stop", "--run-id", "owned-row-verify"])
 
-	expect(result.exitCode).toBe(20)
-	expect(result.stdout.toString()).toBe("")
-	expect(JSON.parse(result.stderr.toString())).toMatchObject({
+	expectRefusal(result, 20, {
 		resultCode: "CDP_IDENTITY_UNVERIFIED",
 		transactionState: "unchanged",
 	})
@@ -345,9 +337,7 @@ test("a well-formed marked row is still matched exactly before stale-launch clea
 
 	const result = runProductionCli(probe, ["status", "--run-id", "marked-row-cleanup"])
 
-	expect(result.exitCode).toBe(1)
-	expect(result.stdout.toString()).toBe("")
-	expect(JSON.parse(result.stderr.toString())).toMatchObject({
+	expectRefusal(result, 1, {
 		resultCode: "UNEXPECTED_FAILURE",
 		message: "Warm Browser could not clean up its stale marked process group.",
 	})
@@ -417,10 +407,7 @@ test.each(unownedLaunchCommands)(
 
 		const result = runProductionCli(probe, ["status", "--run-id", "unowned-launch"])
 
-		expect(result.exitCode).toBe(20)
-		expect(result.stdout.toString()).toBe("")
-		expect(result.stderr.toString()).toBe(
-			output({
+		expectError(result, 20, {
 				schemaVersion: 1,
 				status: "error",
 				command: "status",
@@ -431,8 +418,7 @@ test.each(unownedLaunchCommands)(
 				nextAction:
 					"Inspect the live process and private Warm Browser state; do not signal the stored process id.",
 				message: "The stored browser process identity does not match the live process.",
-			}),
-		)
+		})
 		expect(readFileSync(probe.sessionPath, "utf8")).toBe(stateBefore)
 		expect(existsSync(probe.lockPath)).toBe(true)
 		expect(hostEffects(probe)).toEqual([])
@@ -485,9 +471,7 @@ test.each(changedOwnerAfterSignal)(
 
 		const result = runProductionCli(probe, ["status", "--run-id", "escalation-refused"])
 
-		expect(result.exitCode).toBe(1)
-		expect(result.stdout.toString()).toBe("")
-		expect(JSON.parse(result.stderr.toString())).toMatchObject({
+		expectRefusal(result, 1, {
 			resultCode: "UNEXPECTED_FAILURE",
 			transactionState: "unchanged",
 			message: "Warm Browser could not clean up its stale marked process group.",
@@ -597,10 +581,7 @@ test.each(invalidReceipts)("a durable receipt carrying %s is unsafe state", (_na
 
 	const result = runProductionCli(probe, ["status", "--run-id", "invalid-receipt"])
 
-	expect(result.exitCode).toBe(20)
-	expect(result.stdout.toString()).toBe("")
-	expect(result.stderr.toString()).toBe(
-		output({
+	expectError(result, 20, {
 			schemaVersion: 1,
 			status: "error",
 			command: "status",
@@ -610,8 +591,7 @@ test.each(invalidReceipts)("a durable receipt carrying %s is unsafe state", (_na
 			retrySafe: false,
 			nextAction: "Repair the private XDG state ownership and permissions before retrying.",
 			message: "Warm Browser private state is unsafe or unreadable.",
-		}),
-	)
+	})
 	expect(existsSync(probe.sessionPath)).toBe(true)
 	expect(hostEffects(probe)).toEqual([])
 })
