@@ -12,7 +12,11 @@ import { join } from "node:path"
 
 import { afterEach, expect, test } from "bun:test"
 
-import { loadSkillCatalog, renderRuntimeCustodyFiles } from "./runtime-custody-config"
+import {
+	loadSkillCatalog,
+	packagedLauncherNames,
+	renderRuntimeCustodyFiles,
+} from "./runtime-custody-config"
 
 const root = new URL("..", import.meta.url).pathname.replace(/\/$/, "")
 const temporaryRoots: string[] = []
@@ -44,6 +48,43 @@ function custodyFixture(mutate: (lock: any, catalog: any) => void): string {
 
 test("the unmodified lock and catalog validate", () => {
 	expect(() => loadSkillCatalog(custodyFixture(() => {}))).not.toThrow()
+})
+
+test("names every packaged launcher the catalog registers", () => {
+	// Independent oracle: the launchers this payload ships, restated by hand.
+	// The packaging proof compares against the derivation, and this pins what
+	// that derivation must currently produce.
+	expect(packagedLauncherNames(root)).toEqual([
+		"frontier-runner",
+		"hello-world",
+		"skill-a",
+		"skill-b",
+		"warm-browser",
+	])
+})
+
+test("the packaged launcher closure follows the catalog rather than a frozen list", () => {
+	// Registering a skill must be carried by the closure, not break it.
+	const added = custodyFixture((_lock, catalog) => {
+		catalog.skills["late-skill"] = {
+			entry: "runtime/late-skill.js",
+			runtimeProfile: "bun",
+		}
+	})
+	expect(packagedLauncherNames(added)).toContain("late-skill")
+
+	// A projected launcher name is the name that ships.
+	const projected = custodyFixture((_lock, catalog) => {
+		catalog.skills["skill-a"].launcher = "projected-skill-a"
+	})
+	expect(packagedLauncherNames(projected)).toContain("projected-skill-a")
+	expect(packagedLauncherNames(projected)).not.toContain("skill-a")
+
+	// Removing a skill removes its launcher.
+	const removed = custodyFixture((_lock, catalog) => {
+		delete catalog.skills["skill-b"]
+	})
+	expect(packagedLauncherNames(removed)).not.toContain("skill-b")
 })
 
 test("renders one custody launcher for every catalog skill", () => {

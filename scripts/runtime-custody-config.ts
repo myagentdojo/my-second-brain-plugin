@@ -288,6 +288,31 @@ export function renderRuntimeCustodyFiles(root: string): GeneratedFile[] {
 }
 
 /**
+ * Name every launcher the payload is expected to carry, in packaged order.
+ *
+ * The launcher closure follows the skill catalog: one launcher per registered
+ * skill, under its projected name. Naming it here rather than freezing a list
+ * at some past version means a packaging proof stays a proof that the payload
+ * matches the catalog, instead of a proof that the catalog never changed.
+ *
+ * @param root - Plugin Repository root owning the skill catalog
+ * @returns Launcher basenames sorted as they appear under `plugin/bin/`
+ *
+ * @example
+ * ```ts
+ * const launchers = packagedLauncherNames(process.cwd())
+ * ```
+ */
+export function packagedLauncherNames(root: string): string[] {
+	const prefix = "plugin/bin/"
+	return renderRuntimeCustodyFiles(root)
+		.map((file) => file.path)
+		.filter((path) => path.startsWith(prefix))
+		.map((path) => path.slice(prefix.length))
+		.sort(compareCodeUnits)
+}
+
+/**
  * Write runtime-custody projections and preserve launcher executability.
  *
  * @param root - Plugin Repository root receiving generated payload files
