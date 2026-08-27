@@ -5,6 +5,7 @@ import * as productionAdapterModule from "../src/modules/warm-browser/production
 import {
 	hostEffects,
 	installedChrome,
+	type ProductionCliProbe,
 	productionCliProbe,
 	removeProductionCliProbes,
 	runProductionCli,
@@ -35,6 +36,18 @@ const healthyEndpoint = {
 	},
 	"/json/list": { ok: true, body: [{ id: "page-1", type: "page" }] },
 } as const
+
+/**
+ * Independent oracle: one termination request followed by exactly one liveness
+ * probe. A third entry would mean Warm Browser escalated onto a process group
+ * whose liveness it had not observed.
+ */
+function expectRequestedThenProbed(probe: ProductionCliProbe): void {
+	expect(hostEffects(probe).filter(({ action }) => action === "signal")).toEqual([
+		{ action: "signal", processGroupId: 4242, signal: "SIGTERM" },
+		{ action: "signal", processGroupId: 4242, signal: 0 },
+	])
+}
 
 function launchPlan(): Record<string, unknown> {
 	return {
@@ -194,6 +207,104 @@ test("the production missing-executable launch emits one redacted JSON line with
 	expect(existsSync(probe.lockPath)).toBe(false)
 	expect(hostEffects(probe).filter(({ action }) => action === "signal")).toEqual([])
 })
+
+test("a delivered SIGTERM whose liveness probe proves absence stops without escalating", () => {
+	const probe = productionCliProbe(launchPlan())
+	expect(runProductionCli(probe, ["start", "--run-id", "probed-start"]).exitCode).toBe(0)
+	writeHostEffectsPlan(probe, {
+		...launchPlan(),
+		signalOutcomes: { SIGTERM: "delivered", "0": "absent" },
+	})
+
+	const result = runProductionCli(probe, ["stop", "--run-id", "probed-stop"])
+
+	expect(result.stderr.toString()).toBe("")
+	expect(JSON.parse(result.stdout.toString())).toMatchObject({
+		command: "stop",
+		resultCode: "SESSION_STOPPED",
+		transactionState: "stopped",
+		data: { stoppedProcessId: 4242, postcondition: "absent" },
+	})
+	expect(existsSync(probe.sessionPath)).toBe(false)
+	expectRequestedThenProbed(probe)
+})
+
+test("a delivered SIGTERM whose liveness probe fails never reports the owned group stopped", () => {
+	const probe = productionCliProbe(launchPlan())
+	expect(runProductionCli(probe, ["start", "--run-id", "probe-failed-start"]).exitCode).toBe(0)
+	const stateBefore = readFileSync(probe.sessionPath, "utf8")
+	// The request is delivered, then the group's liveness cannot be observed at
+	// all. An uncertain probe is not proof the group is gone.
+	writeHostEffectsPlan(probe, {
+		...launchPlan(),
+		signalOutcomes: { SIGTERM: "delivered", "0": "failed" },
+	})
+
+	const result = runProductionCli(probe, ["stop", "--run-id", "probe-failed-stop"])
+
+	expect(result.exitCode).toBe(1)
+	expect(result.stdout.toString()).toBe("")
+	expect(result.stderr.toString()).toBe(
+		`${
+			JSON.stringify({
+				schemaVersion: 1,
+				status: "error",
+				command: "stop",
+				resultCode: "UNEXPECTED_FAILURE",
+				runId: "probe-failed-stop",
+				transactionState: "unchanged",
+				retrySafe: false,
+				nextAction: "Inspect the owned process group and private state before retrying.",
+				message: "Warm Browser could not stop its verified browser process group.",
+			})
+		}\n`,
+	)
+	// Durable ownership survives, so the unstoppable group stays inspectable.
+	expect(readFileSync(probe.sessionPath, "utf8")).toBe(stateBefore)
+	expect(existsSync(probe.lockPath)).toBe(true)
+	expectRequestedThenProbed(probe)
+})
+
+/**
+ * Independent oracle: `lsof -Fp` readings whose bytes cannot prove exactly one
+ * loopback owner. Each names the expected owner so a reading that hides a
+ * second owner behind an unparsed line cannot pass as a single proved one.
+ */
+const unsafeListenerReadings = [
+	["a malformed line beside the expected owner", "p4242\nlsof: WARNING: unreadable\n"],
+	["a second distinct owner", "p4242\np4243\n"],
+	["a leading-zero process identity", "p04242\n"],
+	["a zero process identity", "p0\n"],
+	["output truncated before its final newline", "p4242"],
+] as const
+
+test.each(unsafeListenerReadings)(
+	"the launched CDP endpoint stays unverified when the listener reading shows %s",
+	(_name, stdout) => {
+		const probe = productionCliProbe({
+			...launchPlan(),
+			listener: { status: 0, signal: null, failed: false, stdout },
+		})
+
+		const result = runProductionCli(probe, ["start", "--run-id", "listener-unsafe"])
+
+		expect(result.exitCode).toBe(20)
+		expect(JSON.parse(result.stderr.toString())).toMatchObject({
+			resultCode: "CDP_IDENTITY_UNVERIFIED",
+			transactionState: "rolled_back",
+		})
+		// The refusal came from the listener reading, not an earlier gate: the
+		// launch reached its endpoint check and then rolled its own group back.
+		expect(hostEffects(probe).map(({ action }) => action)).toEqual([
+			"port",
+			"spawn",
+			"listener",
+			"signal",
+		])
+		expect(existsSync(probe.sessionPath)).toBe(false)
+		expect(existsSync(probe.lockPath)).toBe(false)
+	},
+)
 
 test("an unsafe Agent Chrome Profile refuses the launch before any host effect", () => {
 	const probe = productionCliProbe(launchPlan())

@@ -15,11 +15,12 @@ import {
 	hostPlatform,
 	isExecutableFile,
 	readLoopbackJson,
-	readLoopbackListenerOwner,
+	readLoopbackListener,
 	readProcessTable,
 	signalProcessGroup,
 	startDetachedProcess,
 } from "./host-effects"
+import { observeLoopbackListener } from "./listener-table"
 import { observeProcessTable } from "./process-table"
 
 const installedChrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
@@ -79,31 +80,63 @@ function processTable(): ProcessListInspection {
 	return observeProcessTable(readProcessTable(), installedChrome)
 }
 
-function processGroupExists(processGroupId: number): boolean {
+function loopbackListenerOwner(port: number): "absent" | "unverifiable" | number {
+	return observeLoopbackListener(readLoopbackListener(port))
+}
+
+type ProcessGroupObservation = "present" | "absent" | "unverified"
+
+/**
+ * Observes one process group without signalling it. A delivered or denied probe
+ * proves the group is present, and only the "no such process" outcome proves it
+ * absent. Every other outcome, including an unsafe identity or an unexpected
+ * error, is an uncertain observation: it never reads as proved absence, because
+ * proved absence is what lets the caller remove durable ownership state.
+ */
+function observeProcessGroup(processGroupId: number): ProcessGroupObservation {
 	const outcome = signalProcessGroup(processGroupId, 0)
-	return outcome === "delivered" || outcome === "denied"
+	if (outcome === "delivered" || outcome === "denied") return "present"
+	return outcome === "absent" ? "absent" : "unverified"
 }
 
 async function pause(milliseconds: number): Promise<void> {
 	await new Promise((resolve) => setTimeout(resolve, milliseconds))
 }
 
+/**
+ * Waits for one signalled process group to be observed absent, and reports what
+ * it last observed. An uncertain observation ends the wait immediately: the
+ * group is neither proved gone nor proved present, so neither escalation nor a
+ * claimed stop is admissible.
+ */
+async function awaitProcessGroupAbsence(
+	processGroupId: number,
+	attempts: number,
+): Promise<ProcessGroupObservation> {
+	for (let attempt = 0; attempt < attempts; attempt += 1) {
+		const observed = observeProcessGroup(processGroupId)
+		if (observed !== "present") return observed
+		await pause(50)
+	}
+	return "present"
+}
+
+/**
+ * Stops one process group and answers whether the stop is proved. Only an
+ * observed absence answers true; a group still present after its bound is
+ * escalated once, and an unverifiable observation ends the attempt without
+ * signalling further.
+ */
 async function terminateProcessGroupWithEscalation(processGroupId: number): Promise<boolean> {
 	const requested = signalProcessGroup(processGroupId, "SIGTERM")
 	if (requested === "absent") return true
 	if (requested !== "delivered") return false
-	for (let attempt = 0; attempt < 40; attempt += 1) {
-		if (!processGroupExists(processGroupId)) return true
-		await pause(50)
-	}
+	const afterTermination = await awaitProcessGroupAbsence(processGroupId, 40)
+	if (afterTermination !== "present") return afterTermination === "absent"
 	const escalated = signalProcessGroup(processGroupId, "SIGKILL")
 	if (escalated === "absent") return true
 	if (escalated !== "delivered") return false
-	for (let attempt = 0; attempt < 20; attempt += 1) {
-		if (!processGroupExists(processGroupId)) return true
-		await pause(50)
-	}
-	return false
+	return (await awaitProcessGroupAbsence(processGroupId, 20)) === "absent"
 }
 
 async function readEndpoint(
@@ -115,7 +148,7 @@ async function readEndpoint(
 		if (table.kind === "unverifiable") return { kind: "process_unverifiable" }
 		const observed = table.processes.find((processIdentity) => processIdentity.pid === expected.pid)
 		if (!sameProcess(expected, observed)) return { kind: "browser_unverified" }
-		const owner = readLoopbackListenerOwner(port)
+		const owner = loopbackListenerOwner(port)
 		if (owner === "unverifiable" || (owner !== "absent" && owner !== expected.pid)) {
 			return { kind: "listener_unverified" }
 		}

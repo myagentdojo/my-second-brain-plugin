@@ -5,6 +5,7 @@ import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 
 import type { SignalOutcome } from "../../src/modules/warm-browser/host-effects"
+import type { ListenerReading } from "../../src/modules/warm-browser/listener-table"
 import type { ProcessTableReading } from "../../src/modules/warm-browser/process-table"
 
 /**
@@ -37,7 +38,14 @@ interface HostEffectsPlan {
 	readonly spawnedPid?: number
 	readonly spawnedStartedAtToken?: string
 	readonly signalOutcome?: SignalOutcome
+	/**
+	 * Signal outcomes keyed by the exact signal, so one request and its later
+	 * liveness probe can be scripted apart. Falls back to `signalOutcome`.
+	 */
+	readonly signalOutcomes?: Record<string, SignalOutcome>
 	readonly portStatus?: "free" | "occupied" | "unverifiable"
+	/** The literal `lsof` reading the production observer must interpret. */
+	readonly listener?: ListenerReading
 	readonly listenerOwner?: number | "absent" | "unverifiable" | "spawned"
 	/** Loopback JSON documents keyed by URL pathname. */
 	readonly loopbackJson?: Record<string, LoopbackDocument>
@@ -95,18 +103,25 @@ const fake: typeof import("../../src/modules/warm-browser/host-effects") = {
 	},
 	signalProcessGroup: (processGroupId, signal) => {
 		action({ action: "signal", processGroupId, signal })
-		return plan().signalOutcome ?? "absent"
+		const current = plan()
+		return current.signalOutcomes?.[String(signal)] ?? current.signalOutcome ?? "absent"
 	},
 	connectLoopbackPort: async (port) => {
 		action({ action: "port", port })
 		return plan().portStatus ?? "free"
 	},
-	readLoopbackListenerOwner: (port) => {
+	readLoopbackListener: (port) => {
 		action({ action: "listener", port })
-		const owner = plan().listenerOwner ?? "unverifiable"
-		if (owner !== "spawned") return owner
-		const leaders = spawnedLeaders()
-		return leaders.at(-1)?.pid ?? "absent"
+		const current = plan()
+		if (current.listener !== undefined) return current.listener
+		// The ergonomic plan names an owner; the fake renders the canonical
+		// `lsof -Fp` bytes for it, so the production observer still does the
+		// interpreting. A raw `listener` reading bypasses this renderer.
+		const owner = current.listenerOwner ?? "unverifiable"
+		const pid = owner === "spawned" ? spawnedLeaders().at(-1)?.pid ?? "absent" : owner
+		if (pid === "unverifiable") return { status: 2, signal: null, failed: false, stdout: "" }
+		if (pid === "absent") return { status: 1, signal: null, failed: false, stdout: "" }
+		return { status: 0, signal: null, failed: false, stdout: `p${pid}\n` }
 	},
 	readLoopbackJson: async (url) => {
 		action({ action: "http", url })

@@ -93,21 +93,47 @@ async function connectLoopbackPort(port) {
     socket.setTimeout(300, () => finish("unverifiable"));
   });
 }
-function readLoopbackListenerOwner(port) {
+function readLoopbackListener(port) {
   const result = spawnSync("/usr/sbin/lsof", ["-nP", "-a", `-iTCP@127.0.0.1:${port}`, "-sTCP:LISTEN", "-Fp"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
-  if (result.status === 1 && result.stdout.trim() === "")
-    return "absent";
-  if (result.status !== 0)
-    return "unverifiable";
-  const owners = [
-    ...new Set(result.stdout.split(`
-`).filter((line) => /^p[0-9]+$/.test(line)).map((line) => Number(line.slice(1))))
-  ];
-  return owners.length === 1 ? owners[0] : "unverifiable";
+  return {
+    status: result.status,
+    signal: result.signal,
+    failed: result.error !== undefined,
+    stdout: typeof result.stdout === "string" ? result.stdout : null
+  };
 }
 async function readLoopbackJson(url) {
   const response = await fetch(url, { signal: AbortSignal.timeout(500) });
   return { ok: response.ok, body: await response.json() };
+}
+
+// packages/agent-browser/src/modules/warm-browser/listener-table.ts
+var processIdentityField = /^p([1-9][0-9]*)$/;
+function observeLoopbackListener(reading) {
+  if (reading.failed || reading.signal !== null)
+    return "unverifiable";
+  const stdout = reading.stdout;
+  if (typeof stdout !== "string")
+    return "unverifiable";
+  if (reading.status === 1)
+    return stdout === "" ? "absent" : "unverifiable";
+  if (reading.status !== 0)
+    return "unverifiable";
+  if (stdout === "" || !stdout.endsWith(`
+`))
+    return "unverifiable";
+  const owners = new Set;
+  for (const line of stdout.slice(0, -1).split(`
+`)) {
+    const match = processIdentityField.exec(line);
+    if (!match)
+      return "unverifiable";
+    const owner = Number(match[1]);
+    if (!Number.isSafeInteger(owner))
+      return "unverifiable";
+    owners.add(owner);
+  }
+  return owners.size === 1 ? [...owners][0] : "unverifiable";
 }
 
 // packages/agent-browser/src/modules/warm-browser/process-table.ts
@@ -187,12 +213,26 @@ function sameProcess(expected, observed) {
 function processTable() {
   return observeProcessTable(readProcessTable(), installedChrome);
 }
-function processGroupExists(processGroupId) {
+function loopbackListenerOwner(port) {
+  return observeLoopbackListener(readLoopbackListener(port));
+}
+function observeProcessGroup(processGroupId) {
   const outcome = signalProcessGroup(processGroupId, 0);
-  return outcome === "delivered" || outcome === "denied";
+  if (outcome === "delivered" || outcome === "denied")
+    return "present";
+  return outcome === "absent" ? "absent" : "unverified";
 }
 async function pause(milliseconds) {
   await new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+async function awaitProcessGroupAbsence(processGroupId, attempts) {
+  for (let attempt = 0;attempt < attempts; attempt += 1) {
+    const observed = observeProcessGroup(processGroupId);
+    if (observed !== "present")
+      return observed;
+    await pause(50);
+  }
+  return "present";
 }
 async function terminateProcessGroupWithEscalation(processGroupId) {
   const requested = signalProcessGroup(processGroupId, "SIGTERM");
@@ -200,22 +240,15 @@ async function terminateProcessGroupWithEscalation(processGroupId) {
     return true;
   if (requested !== "delivered")
     return false;
-  for (let attempt = 0;attempt < 40; attempt += 1) {
-    if (!processGroupExists(processGroupId))
-      return true;
-    await pause(50);
-  }
+  const afterTermination = await awaitProcessGroupAbsence(processGroupId, 40);
+  if (afterTermination !== "present")
+    return afterTermination === "absent";
   const escalated = signalProcessGroup(processGroupId, "SIGKILL");
   if (escalated === "absent")
     return true;
   if (escalated !== "delivered")
     return false;
-  for (let attempt = 0;attempt < 20; attempt += 1) {
-    if (!processGroupExists(processGroupId))
-      return true;
-    await pause(50);
-  }
-  return false;
+  return await awaitProcessGroupAbsence(processGroupId, 20) === "absent";
 }
 async function readEndpoint(port, expected) {
   for (let attempt = 0;attempt < 40; attempt += 1) {
@@ -225,7 +258,7 @@ async function readEndpoint(port, expected) {
     const observed = table.processes.find((processIdentity) => processIdentity.pid === expected.pid);
     if (!sameProcess(expected, observed))
       return { kind: "browser_unverified" };
-    const owner = readLoopbackListenerOwner(port);
+    const owner = loopbackListenerOwner(port);
     if (owner === "unverifiable" || owner !== "absent" && owner !== expected.pid) {
       return { kind: "listener_unverified" };
     }

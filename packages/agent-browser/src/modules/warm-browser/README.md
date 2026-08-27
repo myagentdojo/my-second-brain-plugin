@@ -16,10 +16,16 @@ The lifecycle contract fails closed on unsupported platforms, unsafe profile or
 state, ambiguous ownership, occupied or unverifiable ports, process mismatch,
 and CDP or Controlled Page identity failure. Ownership requires the whole
 observed command line to equal the saved one, so an unrecognised argument is
-never signalled or cleaned. One Module file owns the local
-process-table observation, and any unparsed, forged, repeated, or otherwise
-ambiguous row makes that whole observation unverifiable instead of proved
-absence. A proved stop whose durable cleanup fails reports the stop it
+never signalled or cleaned. One Module file owns each raw host reading and one
+owns each interpretation of it: the local process table and the loopback
+listener are read without interpretation and observed without reading. Any
+unparsed, forged, repeated, or otherwise ambiguous row makes that whole
+observation unverifiable instead of proved absence, and no row is ever skipped,
+because a skipped row would let a live process read as proved absence.
+Stopping an owned process group answers only what it observed: a group proved
+gone is stopped, a group still present after its bound is escalated once, and a
+group whose liveness cannot be observed is never escalated onto and never
+reported stopped. A proved stop whose durable cleanup fails reports the stop it
 performed and keeps the retained state repairable.
 
 A Screenshot is a private session-owned PNG of the Controlled Page, distinct

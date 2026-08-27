@@ -375,11 +375,15 @@ test("a well-formed marked row is stopped and cleaned when its group is proved g
 	expect(existsSync(probe.lockPath)).toBe(false)
 })
 
-test("the local process table has exactly one production reader", () => {
-	const moduleRoot = resolve(packageRoot, "src/modules/warm-browser")
-	const readers = readdirSync(moduleRoot)
-		.filter((entry) => entry.endsWith(".ts"))
-		.filter((entry) => readFileSync(join(moduleRoot, entry), "utf8").includes("/bin/ps"))
+// Independent oracle: the raw host commands Warm Browser is allowed to run.
+test.each(["/bin/ps", "/usr/sbin/lsof"] as const)(
+	"the %s host reading has exactly one production reader",
+	(hostCommand) => {
+		const moduleRoot = resolve(packageRoot, "src/modules/warm-browser")
+		const readers = readdirSync(moduleRoot)
+			.filter((entry) => entry.endsWith(".ts"))
+			.filter((entry) => readFileSync(join(moduleRoot, entry), "utf8").includes(hostCommand))
 
-	expect(readers).toEqual(["host-effects.ts"])
-})
+		expect(readers).toEqual(["host-effects.ts"])
+	},
+)

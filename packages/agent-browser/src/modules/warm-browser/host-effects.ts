@@ -2,6 +2,7 @@ import { spawn, spawnSync } from "node:child_process"
 import { accessSync, constants, lstatSync } from "node:fs"
 import { createConnection } from "node:net"
 
+import type { ListenerReading } from "./listener-table"
 import type { ProcessTableReading } from "./process-table"
 
 /**
@@ -114,24 +115,19 @@ export async function connectLoopbackPort(
 	})
 }
 
-/** Names the single process listening on one loopback port, when provable. */
-export function readLoopbackListenerOwner(port: number): "absent" | "unverifiable" | number {
+/** Reads the listeners on one loopback port without interpreting its bytes. */
+export function readLoopbackListener(port: number): ListenerReading {
 	const result = spawnSync(
 		"/usr/sbin/lsof",
 		["-nP", "-a", `-iTCP@127.0.0.1:${port}`, "-sTCP:LISTEN", "-Fp"],
 		{ encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
 	)
-	if (result.status === 1 && result.stdout.trim() === "") return "absent"
-	if (result.status !== 0) return "unverifiable"
-	const owners = [
-		...new Set(
-			result.stdout
-				.split("\n")
-				.filter((line) => /^p[0-9]+$/.test(line))
-				.map((line) => Number(line.slice(1))),
-		),
-	]
-	return owners.length === 1 ? owners[0]! : "unverifiable"
+	return {
+		status: result.status,
+		signal: result.signal,
+		failed: result.error !== undefined,
+		stdout: typeof result.stdout === "string" ? result.stdout : null,
+	}
 }
 
 /** Reads one bounded JSON document from a loopback URL. */
