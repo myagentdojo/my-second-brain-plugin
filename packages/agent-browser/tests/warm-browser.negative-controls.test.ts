@@ -762,7 +762,7 @@ test("removing the accessible name lets a public fill of a label-only username f
 	expect(
 		await scenario(mutatedPackage({
 			file: "src/modules/warm-browser/credential-fields.ts",
-			find: "\t\tnormalise(accessibleName),\n",
+			find: "\t\theard,\n",
 			replace: "",
 		})),
 	).toEqual({ resultCode: "FIELD_FILLED", exitCode: 0, typed: ["someone"] })

@@ -400,6 +400,24 @@ function undeliverable(reason: UndeliverableAct): ActionStep {
 }
 
 /**
+ * What a step that stopped inside the act says about the Controlled Page.
+ *
+ * Nothing is dispatched before the act has asked the page for something: a click
+ * brings its element into view first, and a fill asks for focus first. Both
+ * change the page, and a call that did not answer is never proof that what it
+ * asked for did not happen. So every step that stopped in there reports the page
+ * touched, and the one place that decides it is here rather than at each reason.
+ */
+function touchedByAct(step: Exclude<ActionStep, { readonly kind: "acted" }>): PageActionOutcome {
+	if (step.kind === "undeliverable") {
+		return { kind: "undeliverable", reason: step.reason, touchedPage: true }
+	}
+	return step.kind === "element_absent"
+		? { kind: "element_absent", touchedPage: true }
+		: { kind: "unverified" }
+}
+
+/**
  * Whether a navigation this element caused is one the caller asked for.
  *
  * Clicking a link or a submit control navigates the page, and that is the act
@@ -571,13 +589,17 @@ async function refuseUnfillableField(
 ): Promise<PageActionOutcome | undefined> {
 	if (!(await channel.call("Accessibility.enable", {})).ok) return { kind: "unverified" }
 	const field = await readNodeAccessibility(channel, backendNodeId)
-	if (field === undefined) return { kind: "undeliverable", reason: "field_unreadable" }
+	if (field === undefined) {
+		return { kind: "undeliverable", reason: "field_unreadable", touchedPage: false }
+	}
 	if (isCredentialField(description, field.name)) return { kind: "credential_field" }
 	// Warm Browser types into an empty field. Text inserted into a field that
 	// already holds some is appended to it, so a field with content in it is
 	// refused rather than filled with something neither the caller nor the page
 	// asked for.
-	return field.holdsValue ? { kind: "undeliverable", reason: "field_not_empty" } : undefined
+	return field.holdsValue
+		? { kind: "undeliverable", reason: "field_not_empty", touchedPage: false }
+		: undefined
 }
 
 /**
@@ -608,9 +630,9 @@ export async function actOnControlledPage(input: {
 			const described = await channel.call("DOM.describeNode", {
 				backendNodeId: input.backendNodeId,
 			})
-			if (!described.ok) return { kind: "element_absent" }
+			if (!described.ok) return { kind: "element_absent", touchedPage: false }
 			const description = describedNode(record(record(described.result)?.node) ?? {})
-			if (description === undefined) return { kind: "element_absent" }
+			if (description === undefined) return { kind: "element_absent", touchedPage: false }
 			if (input.action.kind === "fill") {
 				const refusal = await refuseUnfillableField(channel, input.backendNodeId, description)
 				if (refusal !== undefined) return refusal
@@ -629,7 +651,7 @@ export async function actOnControlledPage(input: {
 			const step = input.action.kind === "click"
 				? await clickNode(channel, input.backendNodeId)
 				: await typeIntoNode(channel, input.backendNodeId, input.action.value)
-			if (step.kind !== "acted") return step
+			if (step.kind !== "acted") return touchedByAct(step)
 			const after = await readBasis(channel, input.targetId)
 			if (after === undefined) return { kind: "unverified" }
 			return outcomeAfterAct({ action: input.action, description, atDispatch, after })

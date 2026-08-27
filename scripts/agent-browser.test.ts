@@ -116,6 +116,8 @@ test("Agent Browser has the approved lifecycle workspace and generated activatio
 	expect(warmBrowser).toContain("never at the socket the endpoint\nadvertises")
 	expect(warmBrowser).toMatch(/command that merely proves the page moved or was replaced/)
 	expect(warmBrowser).toMatch(/login\nidentifier is classified with the password/)
+	expect(warmBrowser).toContain("The name counts only where a value could be typed")
+	expect(warmBrowser).toMatch(/says what the attempt already cost the page/)
 	expect(warmBrowser).toMatch(/A navigation is bound to the document it asked for/)
 	expect(warmBrowser).toContain("Snapshot Generation")
 	expect(warmBrowser).toContain("Screenshot lifecycle")
@@ -156,11 +158,48 @@ test("Agent Browser has the approved lifecycle workspace and generated activatio
 	expect(packageReadme).toContain("## Deterministic Controlled Page proof")
 	expect(packageReadme).toMatch(/`e<ordinal>@<generation>`/)
 	expect(packageReadme).toContain("CONTROLLED_PAGE_REPLACED")
-	expect(packageReadme).toMatch(
-		/`SNAPSHOT_ABSENT`,\s+`ELEMENT_NOT_ACTIONABLE`,\s+`SNAPSHOT_REFERENCE_INVALID`/,
-	)
+	expect(packageReadme).toContain("`ELEMENT_NOT_ACTIONABLE`")
 	expect(packageReadme).toContain("independent CDP target reader")
 	expect(packageReadme).toContain("`invalidated`")
+	expect(packageReadme).toMatch(
+		/only one decided before the page was asked for\nanything records `unchanged`/,
+	)
+	expect(packageReadme).toMatch(/the name a reader would hear is asked only about a field a value/)
 	expect(packageReadme).toMatch(/A navigation succeeds only on the document it asked for/)
 	expect(packageReadme).toMatch(/A login identifier is a credential field on the same\s+footing/)
+})
+
+/**
+ * The codes one text lists, taken from the paragraph that follows its anchor.
+ *
+ * The anchor must appear exactly once and the paragraph it opens must name
+ * codes. A region that moved or was reworded fails here, instead of letting an
+ * empty list read as agreement between two texts neither of which was read.
+ */
+function listedResultCodes(text: string, anchor: string, code: RegExp): readonly string[] {
+	const parts = text.split(anchor)
+	expect(parts.length, anchor).toBe(2)
+	const codes = [...parts[1]!.split("\n\n")[0]!.matchAll(code)].map((match) => match[1]!)
+	expect(codes.length, anchor).toBeGreaterThan(1)
+	return codes
+}
+
+test("the published Result Vocabulary is the whole closed one Warm Browser declares", () => {
+	const warmBrowserRoot = join(root, "packages", "agent-browser", "src", "modules", "warm-browser")
+	// Two readings that share nothing: the union as the Module declares it, and
+	// the list as the package README publishes it. Because neither is derived from
+	// the other, a code added, removed, renamed, or reordered on one side is a
+	// disagreement here rather than a drift the next reader discovers.
+	const declared = listedResultCodes(
+		readFileSync(join(warmBrowserRoot, "contract.ts"), "utf8"),
+		"export type ResultCode =\n",
+		/"([A-Z_]+)"/g,
+	)
+	const published = listedResultCodes(
+		readFileSync(join(root, "packages", "agent-browser", "README.md"), "utf8"),
+		"Result Vocabulary is",
+		/`([A-Z_]+)`/g,
+	)
+
+	expect(published).toEqual(declared)
 })

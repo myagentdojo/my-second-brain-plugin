@@ -1546,12 +1546,44 @@ test.each([
 		command: "click",
 		resultCode: "ELEMENT_NOT_ACTIONABLE",
 		runId: "unreachable-click",
-		transactionState: "unchanged",
+		transactionState: "acted",
 		retrySafe: false,
 		nextAction: "Run warm-browser snapshot --run-id ID to issue fresh Snapshot References.",
 		message: "Warm Browser could not prove the click would reach the referenced element.",
 	})
 	expect(fixture.clicks()).toEqual([])
+	// Nothing was dispatched, but every one of these refusals had already asked
+	// the page to bring the element into view, and a page that scrolled is a page
+	// that changed. `unchanged` would deny that.
+	expect(fixture.latestConversation()).toContain("DOM.scrollIntoViewIfNeeded")
+})
+
+test("a click whose element goes after the page scrolled says the page changed", async () => {
+	const { fixture, probe } = await pageProbe({
+		url: "https://fixture.test/sign-in",
+		elements: signInPage,
+		// The element is brought into view and is then not there to be measured,
+		// which is the one way this act loses its element after moving the page.
+		failMethods: ["DOM.getContentQuads"],
+	})
+	const snapshot = await takeSnapshot(probe, "quads-gone-snapshot")
+
+	const clicked = await runProductionCliAsync(probe, [
+		"click",
+		"--ref",
+		snapshot.elements[0]!.ref,
+		"--run-id",
+		"quads-gone-click",
+	])
+
+	expectRefusal(clicked, 21, {
+		command: "click",
+		resultCode: "SNAPSHOT_REFERENCE_STALE",
+		transactionState: "acted",
+		message: "The referenced element is no longer part of the Controlled Page.",
+	})
+	expect(fixture.clicks()).toEqual([])
+	expect(fixture.latestConversation()).toContain("DOM.scrollIntoViewIfNeeded")
 })
 
 test("a click that lands on the referenced element's own content is delivered", async () => {
@@ -1619,23 +1651,29 @@ test("a fill proves the referenced field holds focus and ends up holding the val
 	expect(fixture.fieldValue(16)).toBe("warm browser")
 })
 
+// The third row is the one that never asked the page for anything: it is decided
+// from a reading, before focus. The first two had already asked for focus, which
+// moves it and runs the page's own focus handlers, so they say the page changed.
 test.each([
 	[
 		"focus moved somewhere else",
 		{ focusMovesTo: 13 },
 		"Warm Browser could not prove the referenced field holds focus.",
+		"acted",
 	],
 	[
 		"the field could not take focus",
 		{ focusFails: true },
 		"Warm Browser could not focus the referenced field.",
+		"acted",
 	],
 	[
 		"the field already holds a value",
 		{ value: "already here" },
 		"Warm Browser fills an empty field, and the referenced one already holds a value.",
+		"unchanged",
 	],
-] as const)("a fill is refused when %s", async (_name, trait, message) => {
+] as const)("a fill is refused when %s", async (_name, trait, message, transactionState) => {
 	const { fixture, probe } = await pageProbe({
 		url: "https://fixture.test/sign-in",
 		elements: [
@@ -1673,12 +1711,15 @@ test.each([
 	expectRefusal(filled, 21, {
 		command: "fill",
 		resultCode: "ELEMENT_NOT_ACTIONABLE",
-		transactionState: "unchanged",
+		transactionState,
 		message,
 	})
 	// Nothing was typed anywhere, least of all into the password field beside it.
 	expect(fixture.insertedText()).toEqual([])
 	expect(fixture.fieldValue(13)).toBe("")
+	// The state each row reports is the one the conversation accounts for: focus
+	// was asked for, or it was never reached.
+	expect(fixture.latestConversation().includes("DOM.focus")).toBe(transactionState === "acted")
 })
 
 test.each([
@@ -1723,6 +1764,43 @@ test.each([
 	])
 	expectRefusal(filled, 21, { command: "fill", resultCode: "CREDENTIAL_FIELD_REFUSED" })
 	expect(fixture.attachedTargets().length).toBe(attachedBefore)
+})
+
+// The name a reader would hear is part of a field's identity, but a link and a
+// button carry their own visible text as that name, and that text says what the
+// control does rather than what a field holds. Calling these credential fields
+// would tell an agent that the control it must click is one it may not touch.
+test.each([
+	[
+		"a link whose text is the way in",
+		{ role: "link", name: "Log in", nodeName: "A", attributes: { href: "/login" } },
+	],
+	[
+		"a button whose text offers to get in touch",
+		{ role: "button", name: "Email us", nodeName: "BUTTON", attributes: {} },
+	],
+] as const)("a snapshot names an ordinary control carrying %s", async (_name, element) => {
+	const { fixture, probe } = await pageProbe({
+		url: "https://fixture.test/sign-in",
+		elements: [{ backendNodeId: 97, box: [10, 10, 200, 24], ...element }],
+	})
+
+	const snapshot = await takeSnapshot(probe, "ordinary-control-snapshot")
+
+	expect(snapshot.data).toMatchObject({
+		elements: [{ ref: `e1@${snapshot.generationId}`, credentialField: false }],
+	})
+	// And the control the snapshot published as ordinary is one a click reaches.
+	const clicked = await runProductionCliAsync(probe, [
+		"click",
+		"--ref",
+		snapshot.elements[0]!.ref,
+		"--run-id",
+		"ordinary-control-click",
+	])
+	expect(clicked.stderr).toBe("")
+	expect(clicked.exitCode).toBe(0)
+	expect(fixture.clicks()).toEqual([{ x: 110, y: 22 }])
 })
 
 test("a fill is refused when the page will not describe the referenced field", async () => {

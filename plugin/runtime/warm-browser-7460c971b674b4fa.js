@@ -191,23 +191,37 @@ var credentialIdentifierFragments = [
   "email"
 ];
 var identifierAttributes = ["name", "id", "autocomplete", "aria-label", "placeholder"];
+var editableNodeNames = ["INPUT", "TEXTAREA", "SELECT"];
+var editableRoles = ["textbox", "searchbox", "combobox", "spinbutton"];
 function normalise(value) {
   return value.toLowerCase().replaceAll(/[^a-z0-9]/g, "");
+}
+function attributeToken(description, name) {
+  return (description.attributes[name] ?? "").trim().toLowerCase();
+}
+function isEditableField(description) {
+  if (editableNodeNames.includes(description.nodeName.toUpperCase())) {
+    return true;
+  }
+  const editable = attributeToken(description, "contenteditable");
+  if (editable !== "" && editable !== "false")
+    return true;
+  return editableRoles.includes(attributeToken(description, "role"));
 }
 function isCredentialField(description, accessibleName = "") {
   if (description === undefined)
     return true;
-  const attributes = description.attributes;
-  const type = (attributes.type ?? "").trim().toLowerCase();
+  const type = attributeToken(description, "type");
   if (credentialInputTypes.includes(type))
     return true;
-  const autocomplete = (attributes.autocomplete ?? "").trim().toLowerCase().split(/\s+/);
+  const autocomplete = attributeToken(description, "autocomplete").split(/\s+/);
   if (autocomplete.some((token) => credentialAutocompleteTokens.includes(token))) {
     return true;
   }
+  const heard = isEditableField(description) ? normalise(accessibleName) : "";
   const identifier = [
-    ...identifierAttributes.map((attribute) => normalise(attributes[attribute] ?? "")),
-    normalise(accessibleName)
+    ...identifierAttributes.map((attribute) => normalise(description.attributes[attribute] ?? "")),
+    heard
   ].join(" ");
   return credentialIdentifierFragments.some((fragment) => identifier.includes(fragment));
 }
@@ -464,6 +478,12 @@ async function readControlledPageSnapshot(input) {
 function undeliverable(reason) {
   return { kind: "undeliverable", reason };
 }
+function touchedByAct(step) {
+  if (step.kind === "undeliverable") {
+    return { kind: "undeliverable", reason: step.reason, touchedPage: true };
+  }
+  return step.kind === "element_absent" ? { kind: "element_absent", touchedPage: true } : { kind: "unverified" };
+}
 function mayNavigate(description) {
   const attributes = description.attributes;
   const nodeName = description.nodeName.toUpperCase();
@@ -552,11 +572,12 @@ async function refuseUnfillableField(channel, backendNodeId, description) {
   if (!(await channel.call("Accessibility.enable", {})).ok)
     return { kind: "unverified" };
   const field = await readNodeAccessibility(channel, backendNodeId);
-  if (field === undefined)
-    return { kind: "undeliverable", reason: "field_unreadable" };
+  if (field === undefined) {
+    return { kind: "undeliverable", reason: "field_unreadable", touchedPage: false };
+  }
   if (isCredentialField(description, field.name))
     return { kind: "credential_field" };
-  return field.holdsValue ? { kind: "undeliverable", reason: "field_not_empty" } : undefined;
+  return field.holdsValue ? { kind: "undeliverable", reason: "field_not_empty", touchedPage: false } : undefined;
 }
 async function actOnControlledPage(input) {
   return await withControlledPage(input.port, input.targetId, { kind: "unverified" }, async (channel) => {
@@ -573,10 +594,10 @@ async function actOnControlledPage(input) {
       backendNodeId: input.backendNodeId
     });
     if (!described.ok)
-      return { kind: "element_absent" };
+      return { kind: "element_absent", touchedPage: false };
     const description = describedNode(record(record(described.result)?.node) ?? {});
     if (description === undefined)
-      return { kind: "element_absent" };
+      return { kind: "element_absent", touchedPage: false };
     if (input.action.kind === "fill") {
       const refusal = await refuseUnfillableField(channel, input.backendNodeId, description);
       if (refusal !== undefined)
@@ -589,7 +610,7 @@ async function actOnControlledPage(input) {
       return { kind: "identity_changed" };
     const step = input.action.kind === "click" ? await clickNode(channel, input.backendNodeId) : await typeIntoNode(channel, input.backendNodeId, input.action.value);
     if (step.kind !== "acted")
-      return step;
+      return touchedByAct(step);
     const after = await readBasis(channel, input.targetId);
     if (after === undefined)
       return { kind: "unverified" };
@@ -1942,8 +1963,11 @@ var undeliverableMessages = {
   field_not_focusable: "Warm Browser could not focus the referenced field.",
   field_focus_moved: "Warm Browser could not prove the referenced field holds focus."
 };
-function undeliverableAct(command, runId, reason) {
-  staticFailure(command, runId, "ELEMENT_NOT_ACTIONABLE", 21, undeliverableMessages[reason], freshSnapshotAction);
+function actTransaction(touchedPage) {
+  return touchedPage ? "acted" : "unchanged";
+}
+function undeliverableAct(command, runId, reason, touchedPage) {
+  staticFailure(command, runId, "ELEMENT_NOT_ACTIONABLE", 21, undeliverableMessages[reason], freshSnapshotAction, false, actTransaction(touchedPage));
 }
 function credentialRefusal(command, runId) {
   staticFailure(command, runId, "CREDENTIAL_FIELD_REFUSED", 21, "Warm Browser does not type credentials into the Controlled Page.", "Use the Warm Browser login command for a credential field; it is not callable in this slice.");
@@ -2053,10 +2077,11 @@ async function actOnPage(parsed, command, paths, adapter) {
     invalidateReferences(command, parsed.runId, paths, state, "invalidated");
     staticFailure(command, parsed.runId, "PAGE_IDENTITY_CHANGED", 21, "The Controlled Page is no longer the page this Snapshot Reference was issued against.", freshSnapshotAction, false, transaction);
   }
-  if (outcome.kind === "undeliverable")
-    undeliverableAct(command, parsed.runId, outcome.reason);
+  if (outcome.kind === "undeliverable") {
+    undeliverableAct(command, parsed.runId, outcome.reason, outcome.touchedPage);
+  }
   if (outcome.kind === "element_absent") {
-    staticFailure(command, parsed.runId, "SNAPSHOT_REFERENCE_STALE", 21, "The referenced element is no longer part of the Controlled Page.", freshSnapshotAction);
+    staticFailure(command, parsed.runId, "SNAPSHOT_REFERENCE_STALE", 21, "The referenced element is no longer part of the Controlled Page.", freshSnapshotAction, false, actTransaction(outcome.touchedPage));
   }
   if (outcome.kind === "superseded") {
     invalidateReferences(command, parsed.runId, paths, state, "acted");

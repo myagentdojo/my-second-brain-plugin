@@ -256,19 +256,35 @@ export type UndeliverableAct =
 	| "field_not_focusable"
 	| "field_focus_moved"
 
+/**
+ * What one act on one element of the Controlled Page came to.
+ *
+ * An outcome that dispatched nothing still says whether the attempt had already
+ * asked the page to do something, because `touchedPage` is what a caller needs
+ * to report the page truthfully. A click brings its element into view and a fill
+ * asks for focus, and both are the page changing: the first scrolls it, the
+ * second moves focus and runs the page's own focus handlers. Neither is the act,
+ * and an answer that did not come back is never proof of anything about the
+ * page, so an act that got as far as asking may no longer report that it left
+ * the page alone.
+ */
 export type PageActionOutcome =
 	| { readonly kind: "acted"; readonly basis: ControlledPageBasis }
 	/** The page was not the one the reference was issued against. */
 	| { readonly kind: "identity_changed" }
 	/** Nothing was dispatched, because delivery to the element was not provable. */
-	| { readonly kind: "undeliverable"; readonly reason: UndeliverableAct }
+	| {
+		readonly kind: "undeliverable"
+		readonly reason: UndeliverableAct
+		readonly touchedPage: boolean
+	}
 	/**
 	 * The act reached the page, and the page then moved to a document the act
 	 * could not have asked for. Success is never claimed about that document.
 	 */
 	| { readonly kind: "superseded" }
 	/** The referenced element is no longer a thing this page can be acted on. */
-	| { readonly kind: "element_absent" }
+	| { readonly kind: "element_absent"; readonly touchedPage: boolean }
 	/** The live element is a credential field, whatever the snapshot recorded. */
 	| { readonly kind: "credential_field" }
 	| { readonly kind: "unverified" }

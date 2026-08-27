@@ -78,10 +78,13 @@ non-empty `nextAction`, and `runId`. Exit classes are `0` success, `2` usage,
 
 The closed transaction vocabulary is `unchanged`, `started`, `stopped`,
 `recovered`, `rolled_back`, `acted`, and `invalidated`. A page command that
-changed the Controlled Page, or that cannot prove it did not, records `acted`. A
-command that reached nothing but dropped the Snapshot References it held records
-`invalidated`, which neither denies that durable state moved nor claims the page
-was touched. The closed
+changed the Controlled Page, or that cannot prove it did not, records `acted`.
+That includes an act that dispatched nothing: bringing an element into view
+scrolls the page and asking a field for focus moves it, so a refusal that got
+that far records `acted`, and only one decided before the page was asked for
+anything records `unchanged`. A command that reached nothing but dropped the
+Snapshot References it held records `invalidated`, which neither denies that
+durable state moved nor claims the page was touched. The closed
 Result Vocabulary is `HELP`, `SESSION_STARTED`, `SESSION_RUNNING`,
 `SESSION_ABSENT`, `SESSION_STOPPED`, `STALE_SESSION_RECOVERED`, `USAGE_ERROR`,
 `PLATFORM_UNSUPPORTED`, `STATE_UNSAFE`, `CHROME_UNAVAILABLE`,
@@ -149,9 +152,13 @@ immediately before typing. A login identifier is a credential field on the same
 footing as the password beside it: it is the half of the pair that names the
 account, and typing it through the public interface would put it in an argument
 list exactly as a password would. The standard `autocomplete` tokens and the
-usual username, login, and address identifiers are all classified. Both refusals
-name `login`, which is not callable in this slice. Warm Browser never types
-authentication material, and `--value` carries non-secret text only.
+usual username, login, and address identifiers are all classified. Those
+attribute rules hold for every node, because an attribute is the page saying what
+the node is; the name a reader would hear is asked only about a field a value
+could go into, because a link or a button carries its own visible text as that
+name and `Log in` says what the control does rather than what a field holds. Both
+refusals name `login`, which is not callable in this slice. Warm Browser never
+types authentication material, and `--value` carries non-secret text only.
 
 ## Deterministic Controlled Page proof
 

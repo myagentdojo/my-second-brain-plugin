@@ -58,8 +58,41 @@ const credentialIdentifierFragments = [
 /** The attributes an identifier fragment is looked for in. */
 const identifierAttributes = ["name", "id", "autocomplete", "aria-label", "placeholder"] as const
 
+/** Node names that are a field a value goes into, whatever else the page says. */
+const editableNodeNames = ["INPUT", "TEXTAREA", "SELECT"] as const
+
+/** Declared roles that make any node a field a value goes into. */
+const editableRoles = ["textbox", "searchbox", "combobox", "spinbutton"] as const
+
 function normalise(value: string): string {
 	return value.toLowerCase().replaceAll(/[^a-z0-9]/g, "")
+}
+
+/** One attribute read the way the page's own tokens compare: trimmed, lowercased. */
+function attributeToken(description: DomNodeDescription, name: string): string {
+	return (description.attributes[name] ?? "").trim().toLowerCase()
+}
+
+/**
+ * Whether this node is a surface a value could be typed into at all.
+ *
+ * It decides one thing only: whether the name a reader would hear is part of
+ * this node's identity as a field. A link and a button carry their own visible
+ * text as their accessible name, and text like `Log in` or `Email us` names what
+ * the control does rather than what a field holds; reading those as credential
+ * material tells a caller the control it must click is one it may not touch.
+ *
+ * Every attribute rule stays outside this question, because an attribute is the
+ * page saying what the node is rather than what a reader would call it, and a
+ * node with no description at all is refused before this is ever asked.
+ */
+function isEditableField(description: DomNodeDescription): boolean {
+	if ((editableNodeNames as readonly string[]).includes(description.nodeName.toUpperCase())) {
+		return true
+	}
+	const editable = attributeToken(description, "contenteditable")
+	if (editable !== "" && editable !== "false") return true
+	return (editableRoles as readonly string[]).includes(attributeToken(description, "role"))
 }
 
 /**
@@ -67,25 +100,27 @@ function normalise(value: string): string {
  * reader would hear.
  *
  * The accessible name is part of the identity: a field labelled `Username` with
- * no attribute saying so is still the field that names the account. A field this
- * Module could not describe at all is also treated as credential material,
- * because an undescribed field cannot be ruled out and a refusal is recoverable.
+ * no attribute saying so is still the field that names the account. It counts
+ * only where a value could be typed, because a link or a button carries its own
+ * visible text as that name. A field this Module could not describe at all is
+ * treated as credential material, because an undescribed field cannot be ruled
+ * out and a refusal is recoverable.
  */
 export function isCredentialField(
 	description: DomNodeDescription | undefined,
 	accessibleName = "",
 ): boolean {
 	if (description === undefined) return true
-	const attributes = description.attributes
-	const type = (attributes.type ?? "").trim().toLowerCase()
+	const type = attributeToken(description, "type")
 	if ((credentialInputTypes as readonly string[]).includes(type)) return true
-	const autocomplete = (attributes.autocomplete ?? "").trim().toLowerCase().split(/\s+/)
+	const autocomplete = attributeToken(description, "autocomplete").split(/\s+/)
 	if (autocomplete.some((token) => (credentialAutocompleteTokens as readonly string[]).includes(token))) {
 		return true
 	}
+	const heard = isEditableField(description) ? normalise(accessibleName) : ""
 	const identifier = [
-		...identifierAttributes.map((attribute) => normalise(attributes[attribute] ?? "")),
-		normalise(accessibleName),
+		...identifierAttributes.map((attribute) => normalise(description.attributes[attribute] ?? "")),
+		heard,
 	].join(" ")
 	return credentialIdentifierFragments.some((fragment) => identifier.includes(fragment))
 }

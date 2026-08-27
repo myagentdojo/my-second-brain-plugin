@@ -69,15 +69,21 @@ readings disagree about is refused rather than guessed at. A `fill` asks for
 focus and then reads back which node holds it, so a focus handler cannot divert
 the value into a field the caller never named, and it types only into an empty
 field, because inserted text is appended to whatever is already there. An act
-that cannot prove all of this dispatches nothing and says which proof failed.
+that cannot prove all of this dispatches nothing and says which proof failed, and
+it says what the attempt already cost the page: bringing an element into view
+scrolls the page and asking for focus moves it, so a refusal that got that far
+records `acted` rather than claiming it left the page alone.
 
 `fill` refuses a credential field from the snapshot before saying anything to the
 page, and again from the live description and accessible name immediately before
 typing. A field is classified from what the page says about it and from the name
 a reader would hear, so a field labelled `Username` carrying no attribute saying
-so is still caught. A field the document reading could not describe at all is
-credential material by default, and a field inside a shadow root is described
-rather than missed, because the document is read through them. The login
+so is still caught. The name counts only where a value could be typed, because
+a link or a button carries its own visible text as its accessible name and that
+text names what the control does rather than what a field holds. A field the
+document reading could not describe at all is credential material by default,
+and a field inside a shadow root is described rather than missed, because the
+document is read through them. The login
 identifier is classified with the password, because it is the half of the pair
 that names the account; both refusals route to `login`.
 

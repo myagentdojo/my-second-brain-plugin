@@ -1321,7 +1321,24 @@ const undeliverableMessages: Readonly<Record<UndeliverableAct, string>> = {
 	field_focus_moved: "Warm Browser could not prove the referenced field holds focus.",
 }
 
-function undeliverableAct(command: PageCommand, runId: string, reason: UndeliverableAct): never {
+/**
+ * What an act that dispatched nothing did to the Controlled Page.
+ *
+ * A refusal decided before the page was asked for anything left it alone. One
+ * that got as far as scrolling an element into view or asking a field for focus
+ * did not, and `unchanged` would deny the scroll, the moved focus, and every
+ * handler the page ran because of them.
+ */
+function actTransaction(touchedPage: boolean): TransactionState {
+	return touchedPage ? "acted" : "unchanged"
+}
+
+function undeliverableAct(
+	command: PageCommand,
+	runId: string,
+	reason: UndeliverableAct,
+	touchedPage: boolean,
+): never {
 	staticFailure(
 		command,
 		runId,
@@ -1329,6 +1346,8 @@ function undeliverableAct(command: PageCommand, runId: string, reason: Undeliver
 		21,
 		undeliverableMessages[reason],
 		freshSnapshotAction,
+		false,
+		actTransaction(touchedPage),
 	)
 }
 
@@ -1520,7 +1539,9 @@ async function actOnPage(
 			transaction,
 		)
 	}
-	if (outcome.kind === "undeliverable") undeliverableAct(command, parsed.runId, outcome.reason)
+	if (outcome.kind === "undeliverable") {
+		undeliverableAct(command, parsed.runId, outcome.reason, outcome.touchedPage)
+	}
 	if (outcome.kind === "element_absent") {
 		staticFailure(
 			command,
@@ -1529,6 +1550,8 @@ async function actOnPage(
 			21,
 			"The referenced element is no longer part of the Controlled Page.",
 			freshSnapshotAction,
+			false,
+			actTransaction(outcome.touchedPage),
 		)
 	}
 	if (outcome.kind === "superseded") {
