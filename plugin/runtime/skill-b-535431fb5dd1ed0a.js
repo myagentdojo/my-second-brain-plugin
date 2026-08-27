@@ -2,7 +2,7 @@
 var __commonJS = (cb, mod) => () => (mod || cb((mod = { exports: {} }).exports, mod), mod.exports);
 
 // node_modules/.bun/kleur@4.1.5/node_modules/kleur/index.js
-var require_kleur = __commonJS(function(exports, module) {
+var require_kleur = __commonJS((exports, module) => {
   var FORCE_COLOR;
   var NODE_DISABLE_COLORS;
   var NO_COLOR;
@@ -101,7 +101,7 @@ var require_kleur = __commonJS(function(exports, module) {
 });
 
 // node_modules/.bun/ms@2.1.3/node_modules/ms/index.js
-var require_ms = __commonJS(function(exports, module) {
+var require_ms = __commonJS((exports, module) => {
   var s = 1000;
   var m = s * 60;
   var h = m * 60;
@@ -211,7 +211,7 @@ var require_ms = __commonJS(function(exports, module) {
 });
 
 // packages/skill-b/src/main.cjs
-var require_main = __commonJS(function(exports, module) {
+var require_main = __commonJS((exports, module) => {
   var kleur = require_kleur();
   var ms = require_ms();
   kleur.enabled = true;
