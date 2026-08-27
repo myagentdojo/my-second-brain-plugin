@@ -293,7 +293,7 @@ function accessibilityNodes(reply) {
     if (node === undefined)
       return;
     const backendNodeId = node.backendDOMNodeId;
-    if (typeof backendNodeId !== "number" || !Number.isSafeInteger(backendNodeId))
+    if (typeof backendNodeId !== "number" || !Number.isSafeInteger(backendNodeId) || backendNodeId < 1)
       continue;
     const properties = Array.isArray(node.properties) ? node.properties : [];
     const focusable = properties.some((property) => {

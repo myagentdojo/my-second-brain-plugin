@@ -1018,3 +1018,31 @@ test.each([
 	// The receipt is preserved exactly as it was found, for inspection.
 	expect(readFileSync(probe.sessionPath, "utf8")).toBe(stateBefore)
 })
+
+test("an element whose node identity a receipt could not carry is left out", async () => {
+	const { probe } = await pageProbe({
+		url: "https://fixture.test/sign-in",
+		elements: [
+			{ backendNodeId: 0, role: "button", name: "Unwritable", nodeName: "BUTTON", box: [0, 0, 8, 8] },
+			{ backendNodeId: 7, role: "button", name: "Writable", nodeName: "BUTTON", box: [0, 20, 8, 8] },
+		],
+	})
+
+	const snapshot = await takeSnapshot(probe, "unwritable-node-snapshot")
+
+	// The whole reading still succeeds; only the element that could never be
+	// referenced is missing, and the reference numbering names what remains.
+	expect(snapshot.data).toMatchObject({
+		elementCount: 1,
+		elements: [{ ref: `e1@${snapshot.generationId}`, name: "Writable" }],
+	})
+	const clicked = await runProductionCliAsync(probe, [
+		"click",
+		"--ref",
+		`e1@${snapshot.generationId}`,
+		"--run-id",
+		"unwritable-node-click",
+	])
+	expect(clicked.stderr).toBe("")
+	expect(clicked.exitCode).toBe(0)
+})

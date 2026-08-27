@@ -159,8 +159,14 @@ function accessibilityNodes(reply: unknown): readonly AccessibilityNodeReading[]
 	for (const entry of nodes) {
 		const node = record(entry)
 		if (node === undefined) return undefined
+		// A node identity outside the range a receipt may carry is no identity: it
+		// could not be written down, so the element it names cannot be referenced
+		// and is left out rather than failing the whole reading.
 		const backendNodeId = node.backendDOMNodeId
-		if (typeof backendNodeId !== "number" || !Number.isSafeInteger(backendNodeId)) continue
+		if (
+			typeof backendNodeId !== "number" || !Number.isSafeInteger(backendNodeId) ||
+			backendNodeId < 1
+		) continue
 		const properties = Array.isArray(node.properties) ? node.properties : []
 		const focusable = properties.some((property) => {
 			const entryRecord = record(property)
