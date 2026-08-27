@@ -22,6 +22,13 @@ listener are read without interpretation and observed without reading. Any
 unparsed, forged, repeated, or otherwise ambiguous row makes that whole
 observation unverifiable instead of proved absence, and no row is ever skipped,
 because a skipped row would let a live process read as proved absence.
+A launch signals nothing until one fully observed row proves the exact process
+it created: the launched identity leading its own process group, running the
+installed executable, and carrying the launched argument list byte for byte. A
+post-spawn reading that is unverifiable, that never shows the identity within
+its bound, or that shows any non-exact one preserves the durable launch marker
+and reports unverified cleanup, because a process identity may have been reused
+and only the marker-matched path can prove ownership before signalling.
 Stopping an owned process group answers only what it observed: a group proved
 gone is stopped, a group still present after its bound is escalated once, and a
 group whose liveness cannot be observed is never escalated onto and never

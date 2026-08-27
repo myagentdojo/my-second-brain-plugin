@@ -1,10 +1,11 @@
 import { afterEach, expect, test } from "bun:test"
-import { chmodSync, existsSync, readFileSync } from "node:fs"
+import { chmodSync, existsSync, readFileSync, statSync } from "node:fs"
 
 import * as productionAdapterModule from "../src/modules/warm-browser/production-adapter"
 import {
 	hostEffects,
 	installedChrome,
+	processRow,
 	type ProductionCliProbe,
 	productionCliProbe,
 	removeProductionCliProbes,
@@ -47,6 +48,57 @@ function expectRequestedThenProbed(probe: ProductionCliProbe): void {
 		{ action: "signal", processGroupId: 4242, signal: "SIGTERM" },
 		{ action: "signal", processGroupId: 4242, signal: 0 },
 	])
+}
+
+/**
+ * Independent oracle: the refusal a launch must emit when it cannot prove what
+ * its own process identity names. Restated here so no production table, catalog,
+ * or builder supplies its own expectation.
+ */
+function expectLaunchCleanupUnverified(
+	result: Bun.ReadableSyncSubprocess,
+	runId: string,
+): void {
+	expect(result.exitCode).toBe(1)
+	expect(result.stdout.toString()).toBe("")
+	expect(result.stderr.toString()).toBe(
+		`${
+			JSON.stringify({
+				schemaVersion: 1,
+				status: "error",
+				command: "start",
+				resultCode: "UNEXPECTED_FAILURE",
+				runId,
+				transactionState: "unchanged",
+				retrySafe: false,
+				nextAction: "Inspect the durable launch intent and marker-matched processes before retrying.",
+				message: "Warm Browser could not verify cleanup of its launched browser process group.",
+			})
+		}\n`,
+	)
+}
+
+/**
+ * The durable launch marker survives exactly as first written, and no process
+ * group was signalled. The whole recorded effect list is pinned: one port probe
+ * and one spawn, so a third entry would mean the launch signalled an identity it
+ * had not proved.
+ */
+function expectLaunchMarkerRetainedUnsignalled(probe: ProductionCliProbe, runId: string): void {
+	const receipt = JSON.parse(readFileSync(probe.sessionPath, "utf8")) as Record<string, unknown>
+	expect(receipt).toEqual({
+		schemaVersion: 1,
+		phase: "launching",
+		sessionId: receipt.sessionId,
+		startRunId: runId,
+		launchMarker: receipt.sessionId,
+		createdAtEpochMs: receipt.createdAtEpochMs,
+		profileRoot: probe.profileRoot,
+		endpoint: { host: "127.0.0.1", port: 9242 },
+	})
+	expect(statSync(probe.sessionPath).mode & 0o7777).toBe(0o600)
+	expect(existsSync(probe.lockPath)).toBe(true)
+	expect(hostEffects(probe).map(({ action }) => action)).toEqual(["port", "spawn"])
 }
 
 function launchPlan(): Record<string, unknown> {
@@ -305,6 +357,75 @@ test.each(unsafeListenerReadings)(
 		expect(existsSync(probe.lockPath)).toBe(false)
 	},
 )
+
+test("a post-spawn table that cannot be verified never signals the launched identity", () => {
+	// The preflight table is clear, so the launch proceeds and spawns. The table
+	// then stops answering at all, which cannot prove what pid 4242 now names.
+	const probe = productionCliProbe({
+		...launchPlan(),
+		processTableAfterSpawn: { status: null, signal: null, failed: true, stdout: null },
+	})
+
+	const result = runProductionCli(probe, ["start", "--run-id", "post-spawn-unverifiable"])
+
+	expectLaunchCleanupUnverified(result, "post-spawn-unverifiable")
+	expectLaunchMarkerRetainedUnsignalled(probe, "post-spawn-unverifiable")
+})
+
+/**
+ * Independent oracle: post-spawn readings that name the launched process
+ * identity without proving it is the launched process. Every row here parses,
+ * so each is refused on ownership alone, and the first three carry the launched
+ * identity as its own process-group leader: matching pid and pgid must not be
+ * enough to claim a process and signal it.
+ */
+const unownedPostSpawnRows = [
+	["no row at all for the launched identity", () => systemRows],
+	[
+		"the launched identity reused by an unrelated process",
+		() => `${systemRows}${processRow("4242", "4242", "/usr/bin/login -pf someone")}`,
+	],
+	[
+		"the installed Chrome under a different Agent Chrome Profile",
+		() =>
+			`${systemRows}${
+				processRow("4242", "4242", `${installedChrome} --user-data-dir=/tmp/other-profile`)
+			}`,
+	],
+	[
+		"the installed Chrome path suffixed -evil",
+		() =>
+			`${systemRows}${
+				processRow("4242", "4242", `${installedChrome}-evil --user-data-dir=/tmp/other-profile`)
+			}`,
+	],
+] as const
+
+test.each(unownedPostSpawnRows)(
+	"a post-spawn table showing %s never signals the launched identity",
+	(_name, build) => {
+		const probe = productionCliProbe({
+			...launchPlan(),
+			processTableAfterSpawn: verifiedReading(build()),
+		})
+
+		const result = runProductionCli(probe, ["start", "--run-id", "post-spawn-unowned"])
+
+		expectLaunchCleanupUnverified(result, "post-spawn-unowned")
+		expectLaunchMarkerRetainedUnsignalled(probe, "post-spawn-unowned")
+	},
+)
+
+test("a launched identity that does not lead its own process group is never signalled", () => {
+	// The rendered row is the exact launched Chrome, argument list and all; only
+	// its process group differs, so the launch owns no group it may signal.
+	const probe = productionCliProbe({ ...launchPlan(), spawnedProcessGroupId: 4243 })
+
+	const result = runProductionCli(probe, ["start", "--run-id", "post-spawn-foreign-group"])
+
+	expectLaunchCleanupUnverified(result, "post-spawn-foreign-group")
+	expectLaunchMarkerRetainedUnsignalled(probe, "post-spawn-foreign-group")
+})
 
 test("an unsafe Agent Chrome Profile refuses the launch before any host effect", () => {
 	const probe = productionCliProbe(launchPlan())

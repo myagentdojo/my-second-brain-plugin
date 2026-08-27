@@ -33,9 +33,18 @@ interface HostEffectsPlan {
 	readonly platform?: string
 	/** The literal `ps` reading the production parser must interpret. */
 	readonly processTable?: ProcessTableReading
+	/**
+	 * The literal `ps` reading served once this launch has spawned a leader,
+	 * exactly as given and with no rendered leader row appended. It models a
+	 * table that answers differently after the process exists, so a clear
+	 * preflight reading can be followed by an unverifiable or non-exact one.
+	 */
+	readonly processTableAfterSpawn?: ProcessTableReading
 	readonly executableInstalled?: boolean
 	readonly spawnOutcome?: "leader" | "missing_executable"
 	readonly spawnedPid?: number
+	/** A process group other than the launched identity's own, when named. */
+	readonly spawnedProcessGroupId?: number
 	readonly spawnedStartedAtToken?: string
 	readonly signalOutcome?: SignalOutcome
 	/**
@@ -53,6 +62,7 @@ interface HostEffectsPlan {
 
 interface SpawnedLeader {
 	readonly pid: number
+	readonly processGroupId: number
 	readonly startedAtToken: string
 	readonly commandLine: string
 }
@@ -71,17 +81,22 @@ function action(value: Record<string, unknown>): void {
 
 function row(leader: SpawnedLeader): string {
 	const identity = String(leader.pid).padStart(5)
-	return `${identity} ${identity} ${leader.startedAtToken} ${leader.commandLine}\n`
+	const group = String(leader.processGroupId).padStart(5)
+	return `${identity} ${group} ${leader.startedAtToken} ${leader.commandLine}\n`
 }
 
 const fake: typeof import("../../src/modules/warm-browser/host-effects") = {
 	hostPlatform: () => plan().platform ?? "darwin",
 	readProcessTable: () => {
-		const reading = plan().processTable
+		const current = plan()
+		const leaders = spawnedLeaders()
+		if (leaders.length > 0 && current.processTableAfterSpawn !== undefined) {
+			return current.processTableAfterSpawn
+		}
+		const reading = current.processTable
 		if (reading === undefined) return { status: 1, signal: null, failed: false, stdout: "" }
 		if (typeof reading.stdout !== "string") return reading
-		const live = spawnedLeaders().map(row).join("")
-		return { ...reading, stdout: `${reading.stdout}${live}` }
+		return { ...reading, stdout: `${reading.stdout}${leaders.map(row).join("")}` }
 	},
 	isExecutableFile: () => plan().executableInstalled !== false,
 	startDetachedProcess: async (executable, argumentList) => {
@@ -93,8 +108,10 @@ const fake: typeof import("../../src/modules/warm-browser/host-effects") = {
 			const attempt = spawnSync(join(root, "missing-chrome"), [], { stdio: "ignore" })
 			throw attempt.error ?? new Error("the fake expected a missing executable")
 		}
+		const pid = current.spawnedPid ?? 4242
 		const leader: SpawnedLeader = {
-			pid: current.spawnedPid ?? 4242,
+			pid,
+			processGroupId: current.spawnedProcessGroupId ?? pid,
 			startedAtToken: current.spawnedStartedAtToken ?? "Thu Aug 27 09:52:01 2026",
 			commandLine: [executable, ...argumentList].join(" "),
 		}

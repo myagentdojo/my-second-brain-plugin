@@ -76,6 +76,30 @@ function sameProcess(
 	)
 }
 
+/**
+ * Proves one observed row is the exact process this launch created, before that
+ * row has ever been signalled.
+ *
+ * A process identity alone proves nothing: the identity may have been reused by
+ * an unrelated process between the launch and the reading. The row must lead its
+ * own process group, run the installed executable at a whole-token boundary, and
+ * carry the launched argument list byte for byte, marker included. The start
+ * token is restated so a future observation that stopped parsing one could not
+ * silently hand back an identity that later ownership checks cannot compare.
+ */
+function isLaunchedProcess(
+	observed: BrowserProcessIdentity,
+	launched: { readonly pid: number; readonly executable: string; readonly commandLine: string },
+): boolean {
+	return (
+		observed.pid === launched.pid &&
+		observed.processGroupId === launched.pid &&
+		observed.executable === launched.executable &&
+		observed.commandLine === launched.commandLine &&
+		observed.startedAtToken !== ""
+	)
+}
+
 function processTable(): ProcessListInspection {
 	return observeProcessTable(readProcessTable(), installedChrome)
 }
@@ -251,19 +275,33 @@ export const productionAdapter: WarmBrowserAdapter = {
 	},
 	inspectPort: connectLoopbackPort,
 	spawnChrome: async ({ executable, profileRoot, port, launchMarker }) => {
-		const pid = await startDetachedProcess(
+		const argumentList = chromeArgumentList({ profileRoot, port, launchMarker })
+		const launched = {
+			pid: await startDetachedProcess(executable, argumentList),
 			executable,
-			chromeArgumentList({ profileRoot, port, launchMarker }),
-		)
+			commandLine: [executable, ...argumentList].join(" "),
+		}
 		for (let attempt = 0; attempt < 20; attempt += 1) {
 			const table = processTable()
-			if (table.kind === "unverifiable") break
-			const observed = table.processes.find((processIdentity) => processIdentity.pid === pid)
-			if (observed !== undefined && observed.processGroupId === pid) return observed
+			// An unverifiable table cannot say what this process identity now
+			// names, so nothing is signalled: the durable launch marker is left
+			// for the marker-matched cleanup path, which can prove ownership.
+			if (table.kind === "unverifiable") throw new SpawnCleanupUnverifiedError()
+			const observed = table.processes.find(
+				(processIdentity) => processIdentity.pid === launched.pid,
+			)
+			if (observed !== undefined) {
+				// The identity is live. Either this row proves it is the exact
+				// process this launch created, or the identity has been reused and
+				// signalling it would reach a process Warm Browser does not own.
+				if (!isLaunchedProcess(observed, launched)) throw new SpawnCleanupUnverifiedError()
+				return observed
+			}
 			await pause(25)
 		}
-		if (!(await terminateProcessGroupWithEscalation(pid))) throw new SpawnCleanupUnverifiedError()
-		throw new Error("Chrome process identity could not be read")
+		// The launched identity never appeared within its bound. It is neither
+		// proved live nor proved gone, so it is never signalled either.
+		throw new SpawnCleanupUnverifiedError()
 	},
 	inspectProcess: (pid) => {
 		const table = processTable()

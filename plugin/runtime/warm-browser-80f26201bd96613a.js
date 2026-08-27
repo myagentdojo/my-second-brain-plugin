@@ -210,6 +210,9 @@ function privateOwnedDirectory(path) {
 function sameProcess(expected, observed) {
   return observed !== undefined && observed.pid === expected.pid && observed.processGroupId === expected.processGroupId && observed.startedAtToken === expected.startedAtToken && observed.executable === expected.executable && observed.commandLine === expected.commandLine;
 }
+function isLaunchedProcess(observed, launched) {
+  return observed.pid === launched.pid && observed.processGroupId === launched.pid && observed.executable === launched.executable && observed.commandLine === launched.commandLine && observed.startedAtToken !== "";
+}
 function processTable() {
   return observeProcessTable(readProcessTable(), installedChrome);
 }
@@ -338,19 +341,25 @@ var productionAdapter = {
   },
   inspectPort: connectLoopbackPort,
   spawnChrome: async ({ executable, profileRoot, port, launchMarker }) => {
-    const pid = await startDetachedProcess(executable, chromeArgumentList({ profileRoot, port, launchMarker }));
+    const argumentList = chromeArgumentList({ profileRoot, port, launchMarker });
+    const launched = {
+      pid: await startDetachedProcess(executable, argumentList),
+      executable,
+      commandLine: [executable, ...argumentList].join(" ")
+    };
     for (let attempt = 0;attempt < 20; attempt += 1) {
       const table = processTable();
       if (table.kind === "unverifiable")
-        break;
-      const observed = table.processes.find((processIdentity) => processIdentity.pid === pid);
-      if (observed !== undefined && observed.processGroupId === pid)
+        throw new SpawnCleanupUnverifiedError;
+      const observed = table.processes.find((processIdentity) => processIdentity.pid === launched.pid);
+      if (observed !== undefined) {
+        if (!isLaunchedProcess(observed, launched))
+          throw new SpawnCleanupUnverifiedError;
         return observed;
+      }
       await pause(25);
     }
-    if (!await terminateProcessGroupWithEscalation(pid))
-      throw new SpawnCleanupUnverifiedError;
-    throw new Error("Chrome process identity could not be read");
+    throw new SpawnCleanupUnverifiedError;
   },
   inspectProcess: (pid) => {
     const table = processTable();
