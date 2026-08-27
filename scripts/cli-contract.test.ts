@@ -2,7 +2,7 @@ import { expect, test } from "bun:test"
 
 const root = new URL("..", import.meta.url).pathname
 
-function run(arguments_: string[]): ReturnType<typeof Bun.spawnSync> {
+function run(arguments_: string[]): Bun.ReadableSyncSubprocess {
 	return Bun.spawnSync({
 		cmd: [process.execPath, "run", ...arguments_],
 		cwd: root,

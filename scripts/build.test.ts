@@ -1017,7 +1017,8 @@ test("dependency admission selects license files in code-unit order", () => {
 		packageJson: { name: "sorted-license", version: "1.0.0", license: "MIT" },
 		files: { LICENCE: "Deterministic licence text.\n" },
 	})
-	expect(admitDependencyClosure(fixtureRoot)[0].licenseText).toBe("Deterministic licence text.\n")
+	const [admittedDependency] = admitDependencyClosure(fixtureRoot)
+	expect(admittedDependency?.licenseText).toBe("Deterministic licence text.\n")
 })
 
 test("third-party notices carry package name, version, license, and text", () => {
@@ -1451,7 +1452,7 @@ function runRepositoryBuild(): {
 	if (build.exitCode !== 0) throw new Error(build.stderr.toString())
 	const outputLines = build.stdout.toString().trim().split("\n")
 	expect(outputLines).toHaveLength(1)
-	const report = JSON.parse(outputLines[0])
+	const report = JSON.parse(outputLines[0] ?? "")
 	expect(report.helloWorldRuntime).toBe(join(root, "plugin", "runtime", "hello-world.js"))
 	const inventory = JSON.parse(
 		readFileSync(join(root, "plugin", "runtime", "bundle-inventory.json"), "utf8"),
@@ -1477,10 +1478,12 @@ test("workspace bundles build, relocate, and execute without hooks, workspaces, 
 		"capability tour",
 	)
 	const environment = { PATH: "/usr/bin:/bin", HOME: installedRoot }
+	const helloWorldBundle = result.bundles["hello-world"]
+	if (helloWorldBundle === undefined) throw new Error("missing hello-world bundle")
 	const helloWorld = Bun.spawnSync({
 		cmd: [
 			process.execPath,
-			join(installedRoot, result.bundles["hello-world"].path),
+			join(installedRoot, helloWorldBundle.path),
 			"hello",
 			"--json",
 		],
@@ -1499,8 +1502,10 @@ test("workspace bundles build, relocate, and execute without hooks, workspaces, 
 		runId: "relocated-offline-proof",
 	})
 
+	const skillABundle = result.bundles["skill-a"]
+	if (skillABundle === undefined) throw new Error("missing skill-a bundle")
 	const skillA = Bun.spawnSync({
-		cmd: [process.execPath, join(installedRoot, result.bundles["skill-a"].path)],
+		cmd: [process.execPath, join(installedRoot, skillABundle.path)],
 		cwd: installedRoot,
 		env: environment,
 		stdout: "pipe",
@@ -1516,8 +1521,10 @@ test("workspace bundles build, relocate, and execute without hooks, workspaces, 
 		sideEffects: "none",
 	})
 
+	const skillBBundle = result.bundles["skill-b"]
+	if (skillBBundle === undefined) throw new Error("missing skill-b bundle")
 	const skillB = Bun.spawnSync({
-		cmd: [process.execPath, join(installedRoot, result.bundles["skill-b"].path)],
+		cmd: [process.execPath, join(installedRoot, skillBBundle.path)],
 		cwd: installedRoot,
 		env: environment,
 		stdout: "pipe",
@@ -1666,7 +1673,9 @@ test("repeated builds produce identical bundle, inventory, and notices bytes", (
 	)
 	expect(readFileSync(join(root, "plugin", "THIRD-PARTY-NOTICES.md"))).toEqual(firstNotices)
 	for (const [skillId, bundle] of Object.entries(second.bundles)) {
-		expect(readFileSync(join(root, "plugin", bundle.path))).toEqual(firstBundles[skillId])
+		const firstBundle = firstBundles[skillId]
+		if (firstBundle === undefined) throw new Error(`missing first bundle ${skillId}`)
+		expect(readFileSync(join(root, "plugin", bundle.path))).toEqual(firstBundle)
 	}
 })
 
@@ -1849,7 +1858,10 @@ test("packaging admission fails on a stale copied bundle before any archive is p
 	const inventoryPath = join(fixtureRoot, "plugin", "runtime", "bundle-inventory.json")
 	const inventory = JSON.parse(readFileSync(inventoryPath, "utf8"))
 	const [skillId] = Object.keys(inventory.bundles)
-	const bundlePath = join(fixtureRoot, "plugin", inventory.bundles[skillId].path)
+	if (skillId === undefined) throw new Error("fixture bundle inventory is empty")
+	const bundle = inventory.bundles[skillId]
+	if (bundle === undefined) throw new Error(`fixture bundle ${skillId} is missing`)
+	const bundlePath = join(fixtureRoot, "plugin", bundle.path)
 	writeFileSync(bundlePath, "console.log('tampered');\n")
 	const packaged = Bun.spawnSync({
 		cmd: [process.execPath, "run", "scripts/package.ts"],

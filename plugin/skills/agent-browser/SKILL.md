@@ -1,0 +1,56 @@
+---
+name: agent-browser
+description: "Operate the My Second Brain dedicated browser when an agent needs browser interaction or secret-safe login."
+---
+
+# Agent Browser
+
+Read [`CONTEXT.md`](CONTEXT.md) before using this skill.
+
+Use Agent Browser for browser work that needs the dedicated Agent Chrome
+Profile, including a login backed by the configured Credential Vault. The skill
+coordinates the task. Warm Browser owns the browser process, the verified CDP
+endpoint, the Controlled Page, and every deterministic browser operation.
+
+## Accepted outcome
+
+Operate one Controlled Page in one Browser Session through the `warm-browser`
+CLI. Preserve browser-local continuity in the Agent Chrome Profile while
+keeping credential metadata, usernames, passwords, and authentication material
+outside the agent process.
+
+## Workflow contract
+
+1. Start or inspect the Browser Session. Use port `9242` unless the current
+   start needs an explicit `--port <number>` override.
+2. Take a snapshot and act only through its short-lived Snapshot References.
+3. Treat navigation, page replacement, and a fresh snapshot generation as
+   reference-invalidating events. Take another snapshot before continuing.
+4. For login, select the intended username or password field from the current
+   snapshot. Require human approval immediately before credential access.
+5. Let Private Delivery resolve exactly one Login item for the current exact
+   origin, revalidate that origin, fill one selected field, report only
+   non-secret shape, and exit.
+6. Discard earlier references after a private fill. Take a fresh snapshot before
+   any final submit, and require human approval for a consequential submission.
+
+## Boundaries
+
+- Browser operation initially supports macOS and installed Google Chrome only.
+- Warm Browser is the only supported browser operator. Do not call Playwright
+  directly from this skill.
+- Use one Browser Session, one Controlled Page, and the existing Agent Chrome
+  Profile. Do not create named sessions or manage multiple pages.
+- Fail closed when the exact process, CDP endpoint, Controlled Page, origin, or
+  unique Credential Match cannot be proved.
+- Cross-origin login frames, other browser applications, other 1Password
+  vaults, credential enrollment, passkey bypass, and CAPTCHA bypass are not
+  supported.
+- Do not invoke Browser Use, Browser Connect, Warm Chrome, or
+  `browser-use-prototyper` as a fallback.
+
+## Current maturity
+
+Maturity: `scaffolded`. This file records the accepted workflow and boundaries,
+but Warm Browser is not implemented, installed, activated, or released. Stop
+and report that state instead of claiming browser behaviour.

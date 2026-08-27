@@ -57,7 +57,7 @@ test("runtime custody sources generate one thin launcher and checked shell proje
 		schemaVersion: 1,
 		profiles: {
 			bun: {
-				version: "1.3.14",
+				version: "1.4.0",
 			},
 		},
 	})
@@ -100,6 +100,7 @@ test("runtime custody sources generate one thin launcher and checked shell proje
 	).sort()
 	// Independent oracle: do not import the build allowlist that this inventory checks.
 	expect(installedSkills).toEqual([
+		"agent-browser",
 		"capability-tour",
 		"decision-view",
 		"dev-mode",
@@ -165,7 +166,7 @@ test("runtime custody sources generate one thin launcher and checked shell proje
 		new URL("../plugin/runtime/runtime-lock.sh", import.meta.url),
 	).text()
 	expect(lockProjection).toContain("Generated from runtime/runtime.lock.json")
-	expect(lockProjection).toContain("RUNTIME_LOCK_VERSION='1.3.14'")
+	expect(lockProjection).toContain("RUNTIME_LOCK_VERSION='1.4.0'")
 
 	const catalogProjection = await Bun.file(
 		new URL("../plugin/runtime/skill-catalog.sh", import.meta.url),

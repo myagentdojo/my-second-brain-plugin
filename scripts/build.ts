@@ -140,12 +140,13 @@ const bundleTranspiler = new Bun.Transpiler({ loader: "js" })
 function executableCodeMask(code: string): string {
 	const masked = Array<string>(code.length).fill(" ")
 	for (let index = 0; index < code.length; index++) {
-		if (/\s/.test(code[index])) masked[index] = code[index]
+		const character = code[index] ?? ""
+		if (/\s/.test(character)) masked[index] = character
 	}
 	let index = 0
 
 	const copy = (start: number, end: number): void => {
-		for (let cursor = start; cursor < end; cursor++) masked[cursor] = code[cursor]
+		for (let cursor = start; cursor < end; cursor++) masked[cursor] = code[cursor] ?? ""
 	}
 	const identifierStart = (character: string): boolean => /[A-Za-z_$]/.test(character)
 	const identifierPart = (character: string): boolean => /[A-Za-z0-9_$]/.test(character)
@@ -238,7 +239,7 @@ function executableCodeMask(code: string): string {
 		const functionParameterParens: boolean[] = []
 		const statementBlockBraces: boolean[] = []
 		while (index < code.length) {
-			const character = code[index]
+			const character = code[index] ?? ""
 			if (/\s/.test(character)) {
 				index++
 				continue
@@ -279,7 +280,7 @@ function executableCodeMask(code: string): string {
 				copy(start, index)
 				const identifier = code.slice(start, index)
 				let before = start - 1
-				while (before >= 0 && /\s/.test(masked[before])) before--
+				while (before >= 0 && /\s/.test(masked[before] ?? "")) before--
 				const isMemberIdentifier = masked[before] === "." || masked[before] === "#"
 				if (!(pendingControlCondition && identifier === "await")) {
 					pendingControlCondition =
@@ -312,27 +313,27 @@ function executableCodeMask(code: string): string {
 			}
 			if (character === "{") {
 				let before = index - 1
-				while (before >= 0 && /\s/.test(masked[before])) before--
+				while (before >= 0 && /\s/.test(masked[before] ?? "")) before--
 				let isLabeledBlock = false
 				if (
 					masked[before] === ":" &&
 					(statementBlockBraces.length === 0 || statementBlockBraces.at(-1) === true)
 				) {
 					let labelEnd = before - 1
-					while (labelEnd >= 0 && /\s/.test(masked[labelEnd])) labelEnd--
+					while (labelEnd >= 0 && /\s/.test(masked[labelEnd] ?? "")) labelEnd--
 					let labelStart = labelEnd
-					while (labelStart >= 0 && identifierPart(masked[labelStart])) labelStart--
+					while (labelStart >= 0 && identifierPart(masked[labelStart] ?? "")) labelStart--
 					let boundary = labelStart
-					while (boundary >= 0 && /\s/.test(masked[boundary])) boundary--
+					while (boundary >= 0 && /\s/.test(masked[boundary] ?? "")) boundary--
 					isLabeledBlock =
-						labelStart < labelEnd && (boundary < 0 || /[;{}]/.test(masked[boundary]))
+						labelStart < labelEnd && (boundary < 0 || /[;{}]/.test(masked[boundary] ?? ""))
 				}
 				masked[index++] = character
 				braceDepth++
 				const isDeclarationBlock =
 					declarationBodyReady ||
 					pendingClassDeclarationDepth === controlConditionParens.length
-				const isStandaloneBlock = before < 0 || /[;{}]/.test(masked[before])
+				const isStandaloneBlock = before < 0 || /[;{}]/.test(masked[before] ?? "")
 				statementBlockBraces.push(
 					pendingControlBlock ||
 					pendingDirectStatementBlock ||
@@ -397,7 +398,7 @@ function executableCodeMask(code: string): string {
 
 function isPropertyLabel(code: string, start: number, length: number): boolean {
 	let after = start + length
-	while (after < code.length && /\s/.test(code[after])) after++
+	while (after < code.length && /\s/.test(code[after] ?? "")) after++
 	return code[after] === ":"
 }
 
@@ -438,7 +439,7 @@ export function collectModuleSpecifiers(code: string): string[] {
 		const raw = /^__require\(\s*(["'])((?:(?!\1)[^\\]|\\.)*)\1\s*\)/.exec(
 			code.slice(match.index),
 		)
-		if (raw) specifiers.add(raw[2])
+		if (raw && raw[2] !== undefined) specifiers.add(raw[2])
 	}
 	return [...specifiers].sort(compareCodeUnits)
 }
@@ -535,7 +536,7 @@ export function validateBundleText(skillId: string, code: string): void {
 	for (const match of executable.matchAll(/\b(?:__require|require)\b/g)) {
 		if (isPropertyLabel(executable, match.index, match[0].length)) continue
 		let before = match.index - 1
-		while (before >= 0 && /\s/.test(executable[before])) before--
+		while (before >= 0 && /\s/.test(executable[before] ?? "")) before--
 		if (executable[before] === ".") {
 			const owner = executable.slice(0, before)
 			if (/\b(?:globalThis|import\s*\.\s*meta)\s*(?:\?\s*)?$/.test(owner)) {
@@ -601,7 +602,7 @@ function isOwnedHelloWorldAdapter(skillId: string, skill: CatalogRuntimeSkill): 
 }
 
 function barePackageName(specifier: string): string {
-	if (!specifier.startsWith("@")) return specifier.split("/", 1)[0]
+	if (!specifier.startsWith("@")) return specifier.split("/", 1)[0] ?? ""
 	return specifier.split("/", 2).join("/")
 }
 
@@ -991,10 +992,11 @@ function resolveLockDependency(
 		)
 	}
 	if (boundEntry) {
+		const boundEntryKey = boundEntry.key
 		if (satisfies(boundEntry)) return boundEntry
 		throw new DependencyAdmissionError(
 			"lock-invalid",
-			`bun.lock selection ${boundEntry.key} does not satisfy ${name}@${requested}`,
+			`bun.lock selection ${boundEntryKey} does not satisfy ${name}@${requested}`,
 		)
 	}
 	if (parent) {
@@ -1019,9 +1021,11 @@ function resolveLockDependency(
 	}
 	const candidates = [...packages.values()].filter((entry) => entry.name === expectedName)
 	const exact = candidates.filter((entry) => entry.reference === expectedRange)
-	if (exact.length === 1) return exact[0]
+	const [exactEntry] = exact
+	if (exactEntry !== undefined && exact.length === 1) return exactEntry
 	const satisfying = candidates.filter(satisfies)
-	if (satisfying.length === 1) return satisfying[0]
+	const [satisfyingEntry] = satisfying
+	if (satisfyingEntry !== undefined && satisfying.length === 1) return satisfyingEntry
 	throw new DependencyAdmissionError(
 		"lock-invalid",
 		`bun.lock cannot resolve ${name}@${requested} to one package entry`,
@@ -1396,6 +1400,7 @@ export function renderBundleInventoryProjection(bundles: Record<string, BundleRe
 		.sort(compareCodeUnits)
 		.map((skillId) => {
 			const record = bundles[skillId]
+			if (record === undefined) throw new Error(`missing bundle record for ${skillId}`)
 			return `	${shellQuote(skillId)})
 		RUNTIME_BUNDLE_PATH=${shellQuote(record.path)}
 		RUNTIME_BUNDLE_BYTES=${shellQuote(String(record.bytes))}
@@ -1643,6 +1648,9 @@ const capabilityAssetFiles = [
 	"assets/vault.svg",
 ].sort(compareCodeUnits)
 const nonBundledSkillPayloadFiles = [
+	"skills/agent-browser/AGENTS.md",
+	"skills/agent-browser/CONTEXT.md",
+	"skills/agent-browser/SKILL.md",
 	"skills/capability-tour/SKILL.md",
 	"skills/capability-tour/references/capability-reviewer.md",
 	"skills/decision-view/AGENTS.md",
@@ -1700,7 +1708,7 @@ export function validateBunOnlyPayload(root: string): void {
 	const inventory = pluginPayloadInventory(root)
 	const inventorySet = new Set(inventory)
 	for (const path of inventory) {
-		const surface = path.split("/", 1)[0]
+		const surface = path.split("/", 1)[0] ?? ""
 		if (!allowedPayloadSurfaces.has(surface)) {
 			throw new Error(`Bun payload closure: unsupported payload surface ${surface}/`)
 		}

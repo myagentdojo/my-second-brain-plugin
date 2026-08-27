@@ -16,7 +16,7 @@ const valid = {
 	sideEffects: ["runtime cache updated"],
 	retrySafe: true,
 	nextAction: "Retry the skill launcher.",
-	runtime: { version: "1.3.14", executableSha256: "a".repeat(64) },
+	runtime: { version: "1.4.0", executableSha256: "a".repeat(64) },
 }
 
 test("accepts a complete runtime control envelope", () => {

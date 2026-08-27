@@ -133,7 +133,7 @@ for (const [shape, value] of [
 
 test("rejects a runtime lock version that is not an exact semantic version", () => {
 	const fixtureRoot = custodyFixture((lock) => {
-		lock.profiles.bun.version = "^1.3.14"
+		lock.profiles.bun.version = "^1.4.0"
 	})
 	expect(() => loadSkillCatalog(fixtureRoot)).toThrow(
 		/runtime lock bun version must be an exact semantic version/,

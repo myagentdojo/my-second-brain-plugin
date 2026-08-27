@@ -148,7 +148,8 @@ function proveClaudeDevelopmentInstallation(): void {
 			}),
 		) as Array<{ id?: string; scope?: string; enabled?: boolean }>
 		const development = plugins.filter((entry) => entry.id === developmentId)
-		if (development.length !== 1 || development[0].scope !== "user" || !development[0].enabled) {
+		const developmentEntry = development[0]
+		if (development.length !== 1 || developmentEntry?.scope !== "user" || !developmentEntry.enabled) {
 			throw new Error("ordinary-directory Claude inspection did not find one enabled user link")
 		}
 		const details = run(["claude", "plugin", "details", developmentId], {
@@ -176,11 +177,12 @@ function proveClaudeDevelopmentInstallation(): void {
 			}),
 		) as Array<{ id?: string; version?: string; scope?: string; enabled?: boolean }>
 		const production = productionPlugins.filter((entry) => entry.id === productionId)
+		const productionEntry = production[0]
 		if (
 			production.length !== 1 ||
-			production[0].version !== claudeManifest.version ||
-			production[0].scope !== "user" ||
-			!production[0].enabled ||
+			productionEntry?.version !== claudeManifest.version ||
+			productionEntry?.scope !== "user" ||
+			!productionEntry.enabled ||
 			readFileSync(sentinel, "utf8") !== "preserve me\n"
 		) {
 			throw new Error("exact production version, enabled state, or retained data was not restored")

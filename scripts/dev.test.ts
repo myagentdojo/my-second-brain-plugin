@@ -962,10 +962,10 @@ test("Claude development watches workspace, runtime, manifest, and lock inputs",
 		"plugin/assets",
 		"plugin/.claude-plugin",
 		"plugin/.codex-plugin",
-	]) {
+	] as const) {
 		expect(recursivePaths.has(relativePath)).toBe(true)
 	}
-	for (const relativePath of ["package.json", "bun.lock", "bunfig.toml", "plugin.config.json"]) {
+	for (const relativePath of ["package.json", "bun.lock", "bunfig.toml", "plugin.config.json"] as const) {
 		expect(filePaths.has(relativePath)).toBe(true)
 	}
 })
@@ -1082,7 +1082,7 @@ test("an unparsable production Marketplace URL blocks before profile mutation", 
 		})
 		const state = profile.readState()
 		expect(state.marketplaces).toHaveLength(1)
-		expect(state.marketplaces[0].url).toBe("https://user:password@")
+		expect(state.marketplaces[0]?.url).toBe("https://user:password@")
 		expect(
 			state.commands.some((command) => /plugin (install|uninstall|enable|disable)/.test(command.join(" "))),
 		).toBe(false)
@@ -1306,7 +1306,7 @@ test("restore reports when the captured production version is unavailable", () =
 			error: { code: "PRODUCTION_VERSION_UNAVAILABLE" },
 		})
 		const finalState = profile.readState()
-		expect(finalState.plugins[0].version).toBe("0.0.0-unavailable")
+		expect(finalState.plugins[0]?.version).toBe("0.0.0-unavailable")
 		expect(
 			finalState.commands.some(
 				(command) => command.join(" ") === `plugin install ${productionId} --scope user --yes`,
@@ -1347,7 +1347,7 @@ test("install and restore preserve a production Marketplace without an installed
 		})
 		expect(profile.readState().plugins).toHaveLength(0)
 		expect(profile.readState().marketplaces).toHaveLength(1)
-		expect(profile.readState().marketplaces[0].path).toBe(profile.productionMarketplaceRoot)
+		expect(profile.readState().marketplaces[0]?.path).toBe(profile.productionMarketplaceRoot)
 	} finally {
 		profile.cleanup()
 	}
@@ -1373,7 +1373,7 @@ test(
 			)
 			expect(productionRestored.exitCode).toBe(0)
 			expect(jsonOutput(productionRestored).current.production).toBe("installed")
-			expect(productionProfile.readState().plugins[0].enabled).toBe(false)
+			expect(productionProfile.readState().plugins[0]?.enabled).toBe(false)
 
 			const absentRestored = run(
 				["claude", "restore", "--apply", "--json", "--no-input"],
@@ -1493,7 +1493,7 @@ for (const productionEnabled of [true, false]) {
 				enabled: productionEnabled,
 			})
 			expect(state.marketplaces).toHaveLength(1)
-			expect(state.marketplaces[0].path).toBe(profile.productionMarketplaceRoot)
+			expect(state.marketplaces[0]?.path).toBe(profile.productionMarketplaceRoot)
 			expect(readFileSync(sentinel, "utf8")).toBe("preserve me\n")
 		} finally {
 			profile.cleanup()
@@ -1539,7 +1539,9 @@ test(
 			)
 			expect(installed.exitCode).toBe(0)
 			const disabled = profile.readState()
-			disabled.plugins[0].enabled = false
+			const disabledDevelopmentPlugin = disabled.plugins[0]
+			if (disabledDevelopmentPlugin === undefined) throw new Error("development plugin is missing")
+			disabledDevelopmentPlugin.enabled = false
 			profile.writeState(disabled)
 
 			const preview = run(["claude", "install", "--json", "--no-input"], profile.environment)
@@ -1549,7 +1551,7 @@ test(
 				transactionState: "previewed",
 				current: { development: "installed", linkedToCanonicalPayload: true },
 			})
-			expect(profile.readState().plugins[0].enabled).toBe(false)
+			expect(profile.readState().plugins[0]?.enabled).toBe(false)
 
 			const repaired = run(
 				["claude", "install", "--apply", "--json", "--no-input"],
@@ -1561,7 +1563,7 @@ test(
 				transactionState: "installed",
 				current: { development: "installed", linkedToCanonicalPayload: true },
 			})
-			expect(profile.readState().plugins[0].enabled).toBe(true)
+			expect(profile.readState().plugins[0]?.enabled).toBe(true)
 
 			const restored = run(
 				["claude", "restore", "--apply", "--json", "--no-input"],
@@ -1713,7 +1715,7 @@ test("failed development install restores the exact production state", () => {
 			enabled: false,
 		})
 		expect(state.marketplaces).toHaveLength(1)
-		expect(state.marketplaces[0].name).toBe(pluginName)
+		expect(state.marketplaces[0]?.name).toBe(pluginName)
 	} finally {
 		profile.cleanup()
 	}

@@ -93,6 +93,7 @@ function parseOptions(arguments_: string[]): Options | null {
 	])
 	for (let index = 0; index < arguments_.length; index += 1) {
 		const argument = arguments_[index]
+		if (argument === undefined) continue
 		if (!supported.has(argument)) fail(`unknown option: ${argument}`)
 		if (!["--dry-run", "--force", "--json"].includes(argument)) index += 1
 	}
@@ -128,7 +129,10 @@ function validateDisplayName(value: string): string {
 function githubRepository(url: string): { owner: string; repository: string } | undefined {
 	const match = /^https:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?$/i.exec(url)
 	if (!match) return undefined
-	return { owner: match[1], repository: match[2] }
+	const owner = match[1]
+	const repository = match[2]
+	if (owner === undefined || repository === undefined) return undefined
+	return { owner, repository }
 }
 
 function readResetFile(repositoryRoot: string, path: string): string {

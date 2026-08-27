@@ -47,6 +47,7 @@ export function parsePlatformProofOptions(arguments_: string[]): PlatformProofOp
 	])
 	for (let index = 0; index < arguments_.length; index += 1) {
 		const argument = arguments_[index]
+		if (argument === undefined) continue
 		if (!supported.has(argument)) throw new Error(`unknown option: ${argument}`)
 		if (argument !== "--fixture-acknowledged") index += 1
 	}
@@ -126,7 +127,7 @@ function runLauncher(
 	homeRoot: string,
 	cacheRoot: string,
 	networkDenied: boolean,
-): ReturnType<typeof Bun.spawnSync> {
+): Bun.ReadableSyncSubprocess {
 	const command = [launcher, ...arguments_]
 	return Bun.spawnSync({
 		cmd: networkDenied ? networkIsolatedCommand(command) : command,
@@ -175,7 +176,9 @@ export function proveRuntimePlatform(options: PlatformProofOptions): Record<stri
 		if (extract.exitCode !== 0) throw new Error(`candidate extraction failed: ${extract.stderr}`)
 		const roots = readdirSync(extractedRoot)
 		if (roots.length !== 1) throw new Error("candidate archive must contain exactly one plugin root")
-		const pluginRoot = join(extractedRoot, roots[0])
+		const pluginDirectory = roots[0]
+		if (pluginDirectory === undefined) throw new Error("candidate archive root is missing")
+		const pluginRoot = join(extractedRoot, pluginDirectory)
 		if (checksums.payloadInventorySha256 !== payloadDigest(pluginRoot)) {
 			throw new Error("extracted payload inventory does not match checksum metadata")
 		}

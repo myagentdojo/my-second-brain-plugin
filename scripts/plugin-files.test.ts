@@ -227,7 +227,8 @@ test("in-process USTAR bytes are platform canonical", () => {
 	const { sourceRoot } = pluginFixture()
 	const first = deterministicPluginArchive(sourceRoot, "plugin-0.1.0")
 	const second = deterministicPluginArchive(sourceRoot, "plugin-0.1.0")
-	const header = Buffer.from(Bun.gunzipSync(first.bytes)).subarray(0, 512)
+	const uncompressed = Bun.gunzipSync(Uint8Array.from(first.bytes))
+	const header = Buffer.from(Uint8Array.from(uncompressed)).subarray(0, 512)
 	const headerText = (offset: number) =>
 		header.subarray(offset, offset + 32).toString("utf8").replace(/\0.*$/, "")
 

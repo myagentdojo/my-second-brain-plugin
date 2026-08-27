@@ -32,7 +32,7 @@ afterEach(() => {
 	}
 })
 
-function run(arguments_: string[], environment: Record<string, string> = {}): ReturnType<typeof Bun.spawnSync> {
+function run(arguments_: string[], environment: Record<string, string> = {}): Bun.ReadableSyncSubprocess {
 	return Bun.spawnSync({
 		cmd: [process.execPath, "run", "update", "--", ...arguments_],
 		cwd: root,
@@ -136,7 +136,7 @@ function checkoutRelease(repositoryRoot: string, tag: string, destination: strin
 	git(["checkout", "--quiet", "--detach", tag], destination)
 }
 
-function releaseProof(checkoutRoot: string): ReturnType<typeof Bun.spawnSync> {
+function releaseProof(checkoutRoot: string): Bun.ReadableSyncSubprocess {
 	return Bun.spawnSync({
 		cmd: [process.execPath, "test", "runtime/src/portable-command.test.ts"],
 		cwd: checkoutRoot,

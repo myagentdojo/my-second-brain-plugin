@@ -158,6 +158,7 @@ function parseCodex(arguments_: string[]): CodexInvocation {
 	const seen = new Set<string>()
 	for (let index = 1; index < arguments_.length; index += 1) {
 		const argument = arguments_[index]
+		if (argument === undefined) continue
 		if (seen.has(argument)) throw new UsageError(`${argument} may be provided once`)
 		seen.add(argument)
 		switch (argument) {

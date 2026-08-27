@@ -211,7 +211,7 @@ test.each([
 	["lowercase brand color", (value: PluginConfig) => (value.brandColor = "#abcdef"), "brandColor"],
 	["composer icon escape", (value: PluginConfig) => (value.composerIcon = "../icon.svg"), "composerIcon"],
 	["logo extension", (value: PluginConfig) => (value.logo = "./assets/logo.png"), "logo"],
-] as const)("rejects invalid published %s metadata", (_name, mutate, message) => {
+	] as const satisfies readonly (readonly [string, (value: PluginConfig) => void, string])[])("rejects invalid published %s metadata", (_name, mutate, message) => {
 	const invalid = structuredClone(config)
 	mutate(invalid)
 	expect(() => renderGeneratedFiles(invalid)).toThrow(message)

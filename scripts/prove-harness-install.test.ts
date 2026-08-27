@@ -41,7 +41,7 @@ let proof: ReturnType<typeof proveHarnessInstall>
 const claudeNativeTest = Bun.which("claude") ? test : test.skip
 const codexNativeTest = Bun.which("codex") ? test : test.skip
 
-function nativeQualificationSummary(client: "claude" | "codex") {
+function nativeQualificationSummary(client: "claude" | "codex"): import("./prove-harness-install").NativeQualificationEvidence {
 	const hash = (value: string) => value.repeat(64)
 	return {
 		schema: "native-capability-qualification-v1",
@@ -107,7 +107,7 @@ test("fresh-native qualification promotion accepts only candidate-bound bounded 
 
 test("a bounded failed qualification records evidence without promoting native claims", () => {
 	const summary = nativeQualificationSummary("codex")
-	const failed = {
+	const failed: typeof summary = {
 		...summary,
 		conclusions: { ...summary.conclusions, sessionStart: "failed" },
 	}

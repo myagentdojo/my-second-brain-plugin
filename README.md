@@ -201,7 +201,7 @@ Use [`CONTEXT.md`](CONTEXT.md) for canonical language. The architecture rational
 ## Current boundaries
 
 - macOS arm64/x64 and Linux arm64/x64 only.
-- The locked x64 baseline assets support AVX-capable CPUs for this Bun 1.3.14 candidate. Older no-AVX x64 hosts are outside the support boundary; custody executes `bun --version` before publication and refuses an unusable binary.
+- The locked x64 baseline assets support AVX-capable CPUs for this Bun 1.4.0 candidate. Older no-AVX x64 hosts are outside the support boundary; custody executes `bun --version` before publication and refuses an unusable binary. Development uses TypeScript 7.0.2 with the Bun type declarations pinned at 1.4.0.
 - Bun is pinned by version and per-target archive/executable digests; users do not install or pin it themselves.
 - Publisher-reviewed bundles and dependencies execute with the user's normal Bun and OS capabilities. This is not a sandbox or an untrusted-plugin runtime.
 - The build rejects native addons, statically visible computed loaders and direct `eval`/`Function` use, undeclared assets, and runtime package installation. These are deterministic bundle-hygiene checks, not adversarial capability confinement; publisher review owns indirect or obfuscated code, and architecture-layer isolation owns untrusted code ([ADR 0006](docs/adr/0006-single-bun-runtime-tier.md)).

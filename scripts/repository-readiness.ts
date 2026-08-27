@@ -1211,7 +1211,7 @@ export function actionReferencesFromWorkflows(workflows: string[]): string[] {
 					...source.matchAll(/^\s*(?:-\s*)?uses:\s*([^\s#]+)/gm),
 				])
 				.map((match) => match[1])
-				.filter((reference) => !reference.startsWith("./")),
+				.filter((reference): reference is string => typeof reference === "string" && !reference.startsWith("./")),
 		),
 	].sort()
 }

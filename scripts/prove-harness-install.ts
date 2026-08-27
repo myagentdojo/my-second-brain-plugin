@@ -1407,7 +1407,7 @@ function runInstalledRuntime(
 	pluginRoot: string,
 	cacheRoot: string,
 	commandArguments: string[],
-): ReturnType<typeof Bun.spawnSync> {
+): Bun.ReadableSyncSubprocess {
 	return Bun.spawnSync({
 		cmd: commandArguments,
 		cwd: pluginRoot,

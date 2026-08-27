@@ -162,8 +162,10 @@ function loadRuntimeCustodyConfig(root: string): {
 
 function renderLockProjection(lock: RuntimeLock): string {
 	const profile = lock.profiles.bun
+	if (profile === undefined) throw new Error("runtime lock Bun profile is missing")
 	const cases = SUPPORTED_RUNTIME_PLATFORMS.map((platform) => {
 		const asset = profile.assets[platform]
+		if (asset === undefined) throw new Error(`runtime lock asset is missing for ${platform}`)
 		return `	${platform})
 		RUNTIME_ASSET_ARCHIVE_NAME=${shellQuote(asset.archiveName)}
 		RUNTIME_ASSET_URL=${shellQuote(asset.url)}
