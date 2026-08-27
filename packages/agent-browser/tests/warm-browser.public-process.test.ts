@@ -201,6 +201,25 @@ async function waitFor(path: string): Promise<void> {
 	throw new Error(`test barrier did not appear: ${path}`)
 }
 
+/**
+ * Waits for a document another process is writing to be readable in full. A
+ * receipt caught mid-write exists but does not parse, so existence alone is not
+ * the barrier these tests need.
+ */
+async function waitForJson(path: string): Promise<Record<string, unknown>> {
+	for (let attempt = 0; attempt < 500; attempt += 1) {
+		if (existsSync(path)) {
+			try {
+				return readJson(path)
+			} catch {
+				// Still being written; poll again rather than read a partial document.
+			}
+		}
+		await new Promise((resolve) => setTimeout(resolve, 10))
+	}
+	throw new Error(`test barrier never produced a readable document: ${path}`)
+}
+
 test("help is one literal agent-native success envelope", () => {
 	const result = Bun.spawnSync({
 		cmd: [process.execPath, productionEntry, "help", "--run-id", "help-run"],
@@ -1130,9 +1149,8 @@ test("SIGKILL after fake spawn leaves durable intent that recovers exactly one m
 		stdout: "pipe",
 		stderr: "pipe",
 	})
-	await waitFor(testFixture.sessionPath)
 	await waitFor(ledgerPath(testFixture))
-	expect(readJson(testFixture.sessionPath)).toMatchObject({
+	expect(await waitForJson(testFixture.sessionPath)).toMatchObject({
 		phase: "launching",
 		sessionId: "session-1",
 		launchMarker: "session-1",
