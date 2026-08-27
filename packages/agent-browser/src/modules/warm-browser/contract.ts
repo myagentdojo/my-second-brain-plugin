@@ -1,7 +1,14 @@
 export const schemaVersion = 1 as const
 
-export type SliceCommand = "start" | "status" | "stop"
-export type CliCommand = "help" | SliceCommand
+export const commandVocabulary = [
+	{ name: "help", sideEffects: "none" },
+	{ name: "start", sideEffects: "starts one owned browser process group" },
+	{ name: "status", sideEffects: "may remove proved stale private state" },
+	{ name: "stop", sideEffects: "stops one verified owned browser process group" },
+] as const
+
+export type CliCommand = (typeof commandVocabulary)[number]["name"]
+export type SliceCommand = Exclude<CliCommand, "help">
 export type TransactionState = "unchanged" | "started" | "stopped" | "recovered" | "rolled_back"
 
 export type ResultCode =
@@ -18,7 +25,9 @@ export type ResultCode =
 	| "PROFILE_UNSAFE"
 	| "PROFILE_PROCESS_AMBIGUOUS"
 	| "PROFILE_IN_USE"
+	| "PROCESS_INSPECTION_UNVERIFIED"
 	| "PROCESS_IDENTITY_UNVERIFIED"
+	| "LAUNCH_PROCESS_AMBIGUOUS"
 	| "CDP_IDENTITY_UNVERIFIED"
 	| "CONTROLLED_PAGE_UNAVAILABLE"
 	| "CONTROLLED_PAGE_AMBIGUOUS"
@@ -73,6 +82,15 @@ export interface BrowserProcessIdentity {
 	readonly commandLine: string
 }
 
+export type ProcessInspection =
+	| { readonly kind: "found"; readonly process: BrowserProcessIdentity }
+	| { readonly kind: "absent" }
+	| { readonly kind: "unverifiable" }
+
+export type ProcessListInspection =
+	| { readonly kind: "verified"; readonly processes: readonly BrowserProcessIdentity[] }
+	| { readonly kind: "unverifiable" }
+
 export interface VerifiedEndpoint {
 	readonly browserVersion: string
 	readonly controlledPageTargetId: string
@@ -80,6 +98,7 @@ export interface VerifiedEndpoint {
 
 export type EndpointVerification =
 	| { readonly kind: "verified"; readonly endpoint: VerifiedEndpoint }
+	| { readonly kind: "process_unverifiable" }
 	| { readonly kind: "browser_unverified" }
 	| { readonly kind: "listener_unverified" }
 	| { readonly kind: "controlled_page_unavailable" }
@@ -94,14 +113,16 @@ export interface WarmBrowserAdapter {
 	inspectChrome(executable: string): "installed" | "unavailable"
 	profileRoot(): string
 	inspectProfile(profileRoot: string): "safe" | "unsafe"
-	findProfileProcesses(profileRoot: string): readonly BrowserProcessIdentity[]
+	findProfileProcesses(profileRoot: string): ProcessListInspection
+	findLaunchProcesses(launchMarker: string): ProcessListInspection
 	inspectPort(port: number): Promise<"free" | "occupied" | "unverifiable">
 	spawnChrome(input: {
 		readonly executable: string
 		readonly profileRoot: string
 		readonly port: number
+		readonly launchMarker: string
 	}): Promise<BrowserProcessIdentity>
-	inspectProcess(pid: number): BrowserProcessIdentity | undefined
+	inspectProcess(pid: number): ProcessInspection
 	verifyEndpoint(input: {
 		readonly host: "127.0.0.1"
 		readonly port: number

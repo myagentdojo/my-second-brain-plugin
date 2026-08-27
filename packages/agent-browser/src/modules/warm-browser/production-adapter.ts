@@ -9,10 +9,15 @@ import { SpawnCleanupUnverifiedError } from "./contract"
 import type {
 	BrowserProcessIdentity,
 	EndpointVerification,
+	ProcessListInspection,
 	WarmBrowserAdapter,
 } from "./contract"
 
 const installedChrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+
+function commandHasArgument(commandLine: string, argument: string): boolean {
+	return ` ${commandLine} `.includes(` ${argument} `)
+}
 
 function privateOwnedDirectory(path: string): boolean {
 	if (!existsSync(path)) return false
@@ -25,24 +30,25 @@ function privateOwnedDirectory(path: string): boolean {
 	)
 }
 
-function processTable(): BrowserProcessIdentity[] {
+function processTable(): ProcessListInspection {
 	const result = spawnSync("/bin/ps", ["-axo", "pid=,pgid=,lstart=,command="], {
 		encoding: "utf8",
 		stdio: ["ignore", "pipe", "ignore"],
 	})
-	if (result.status !== 0) return []
+	if (result.status !== 0) return { kind: "unverifiable" }
 	const rows: BrowserProcessIdentity[] = []
 	for (const line of result.stdout.split("\n")) {
-		const match =
-			/^\s*(\d+)\s+(\d+)\s+(\S+\s+\S+\s+\d+\s+\S+\s+\d{4})\s+(.+)$/.exec(line)
+		const match = /^\s*(\d+)\s+(\d+)\s+(\S+\s+\S+\s+\d+\s+\S+\s+\d{4})\s+(.+)$/.exec(line)
 		if (!match) continue
 		const pid = Number(match[1])
 		const processGroupId = Number(match[2])
 		const commandLine = match[4]!
-		const executable = commandLine.startsWith(installedChrome) ? installedChrome : commandLine.split(" ")[0]!
+		const executable = commandLine.startsWith(installedChrome)
+			? installedChrome
+			: commandLine.split(" ")[0]!
 		rows.push({ pid, processGroupId, startedAtToken: match[3]!, executable, commandLine })
 	}
-	return rows
+	return { kind: "verified", processes: rows }
 }
 
 function sameProcess(
@@ -72,7 +78,7 @@ async function pause(milliseconds: number): Promise<void> {
 	await new Promise((resolve) => setTimeout(resolve, milliseconds))
 }
 
-async function terminateSpawnedProcessGroup(processGroupId: number): Promise<boolean> {
+async function terminateProcessGroupWithEscalation(processGroupId: number): Promise<boolean> {
 	try {
 		process.kill(-processGroupId, "SIGTERM")
 	} catch (error) {
@@ -126,8 +132,10 @@ async function inspectLoopbackPort(port: number): Promise<"free" | "occupied" | 
 			resolve(result)
 		}
 		socket.once("connect", () => finish("occupied"))
-		socket.once("error", (error: NodeJS.ErrnoException) =>
-			finish(error.code === "ECONNREFUSED" ? "free" : "unverifiable"),
+		socket.once(
+			"error",
+			(error: NodeJS.ErrnoException) =>
+				finish(error.code === "ECONNREFUSED" ? "free" : "unverifiable"),
 		)
 		socket.setTimeout(300, () => finish("unverifiable"))
 	})
@@ -138,7 +146,9 @@ async function readEndpoint(
 	expected: BrowserProcessIdentity,
 ): Promise<EndpointVerification> {
 	for (let attempt = 0; attempt < 40; attempt += 1) {
-		const observed = processTable().find((processIdentity) => processIdentity.pid === expected.pid)
+		const table = processTable()
+		if (table.kind === "unverifiable") return { kind: "process_unverifiable" }
+		const observed = table.processes.find((processIdentity) => processIdentity.pid === expected.pid)
 		if (!sameProcess(expected, observed)) return { kind: "browser_unverified" }
 		const owner = listenerOwner(port)
 		if (owner === "unverifiable" || (owner !== "absent" && owner !== expected.pid)) {
@@ -178,7 +188,9 @@ async function readEndpoint(
 			})
 			const targets = (await targetsResponse.json()) as Array<{ id?: unknown; type?: unknown }>
 			if (!targetsResponse.ok || !Array.isArray(targets)) return { kind: "browser_unverified" }
-			const pages = targets.filter((target) => target.type === "page" && typeof target.id === "string")
+			const pages = targets.filter((target) =>
+				target.type === "page" && typeof target.id === "string"
+			)
 			if (pages.length === 0) {
 				if (attempt === 39) return { kind: "controlled_page_unavailable" }
 				await pause(100)
@@ -224,14 +236,31 @@ export const productionAdapter: WarmBrowserAdapter = {
 	findProfileProcesses: (profileRoot) => {
 		const plain = `--user-data-dir=${profileRoot}`
 		const quoted = `--user-data-dir="${profileRoot}"`
-		return processTable().filter(
-			(processIdentity) =>
-				processIdentity.executable === installedChrome &&
-				(processIdentity.commandLine.includes(plain) || processIdentity.commandLine.includes(quoted)),
-		)
+		const table = processTable()
+		if (table.kind === "unverifiable") return table
+		return {
+			kind: "verified",
+			processes: table.processes.filter(
+				(processIdentity) =>
+					processIdentity.executable === installedChrome &&
+					(commandHasArgument(processIdentity.commandLine, plain) ||
+						commandHasArgument(processIdentity.commandLine, quoted)),
+			),
+		}
+	},
+	findLaunchProcesses: (launchMarker) => {
+		const table = processTable()
+		if (table.kind === "unverifiable") return table
+		const marker = `--agent-browser-launch-marker=${launchMarker}`
+		return {
+			kind: "verified",
+			processes: table.processes.filter((processIdentity) =>
+				commandHasArgument(processIdentity.commandLine, marker)
+			),
+		}
 	},
 	inspectPort: inspectLoopbackPort,
-	spawnChrome: async ({ executable, profileRoot, port }) => {
+	spawnChrome: async ({ executable, profileRoot, port, launchMarker }) => {
 		const child = spawn(
 			executable,
 			[
@@ -239,50 +268,52 @@ export const productionAdapter: WarmBrowserAdapter = {
 				"--profile-directory=Default",
 				"--remote-debugging-address=127.0.0.1",
 				`--remote-debugging-port=${port}`,
+				`--agent-browser-launch-marker=${launchMarker}`,
+				"--password-store=basic",
+				"--use-mock-keychain",
 				"--no-first-run",
 				"--no-default-browser-check",
 			],
 			{ detached: true, stdio: "ignore" },
 		)
+		await new Promise<void>((resolve, reject) => {
+			child.once("error", reject)
+			child.once("spawn", resolve)
+		})
 		if (child.pid === undefined) throw new Error("Chrome returned no process identity")
 		child.unref()
 		for (let attempt = 0; attempt < 20; attempt += 1) {
-			const observed = processTable().find((processIdentity) => processIdentity.pid === child.pid)
+			const table = processTable()
+			if (table.kind === "unverifiable") break
+			const observed = table.processes.find((processIdentity) => processIdentity.pid === child.pid)
 			if (observed !== undefined && observed.processGroupId === child.pid) return observed
 			await pause(25)
 		}
-		if (!(await terminateSpawnedProcessGroup(child.pid))) {
+		if (!(await terminateProcessGroupWithEscalation(child.pid))) {
 			throw new SpawnCleanupUnverifiedError()
 		}
 		throw new Error("Chrome process identity could not be read")
 	},
-	inspectProcess: (pid) => processTable().find((processIdentity) => processIdentity.pid === pid),
+	inspectProcess: (pid) => {
+		const table = processTable()
+		if (table.kind === "unverifiable") return { kind: "unverifiable" }
+		const processIdentity = table.processes.find((candidate) => candidate.pid === pid)
+		return processIdentity === undefined
+			? { kind: "absent" }
+			: { kind: "found", process: processIdentity }
+	},
 	verifyEndpoint: async ({ port, process: expected }) => {
-		const observed = processTable().find((processIdentity) => processIdentity.pid === expected.pid)
+		const table = processTable()
+		if (table.kind === "unverifiable") return { kind: "process_unverifiable" }
+		const observed = table.processes.find((processIdentity) => processIdentity.pid === expected.pid)
 		if (!sameProcess(expected, observed)) return { kind: "browser_unverified" }
 		return readEndpoint(port, expected)
 	},
 	terminateProcessGroup: async (expected) => {
-		const observed = processTable().find((processIdentity) => processIdentity.pid === expected.pid)
+		const table = processTable()
+		if (table.kind === "unverifiable") return false
+		const observed = table.processes.find((processIdentity) => processIdentity.pid === expected.pid)
 		if (!sameProcess(expected, observed) || expected.processGroupId !== expected.pid) return false
-		try {
-			process.kill(-expected.processGroupId, "SIGTERM")
-		} catch {
-			return false
-		}
-		for (let attempt = 0; attempt < 40; attempt += 1) {
-			if (!processGroupExists(expected.processGroupId)) return true
-			await pause(50)
-		}
-		try {
-			process.kill(-expected.processGroupId, "SIGKILL")
-		} catch {
-			return false
-		}
-		for (let attempt = 0; attempt < 20; attempt += 1) {
-			if (!processGroupExists(expected.processGroupId)) return true
-			await pause(50)
-		}
-		return false
+		return terminateProcessGroupWithEscalation(expected.processGroupId)
 	},
 }

@@ -19,6 +19,7 @@ import { productionAdapter } from "../src/modules/warm-browser/production-adapte
 const packageRoot = resolve(import.meta.dir, "..")
 const productionEntry = resolve(packageRoot, "src/main.ts")
 const fixtureEntry = resolve(import.meta.dir, "fixtures/warm-browser-driver.ts")
+const productionChildProbe = resolve(import.meta.dir, "fixtures/production-adapter-child-probe.ts")
 const temporaryRoots: string[] = []
 
 interface Fixture {
@@ -58,7 +59,7 @@ function fixture(plan: Record<string, unknown> = {}): Fixture {
 		fakeRoot,
 		stateHome,
 		sessionRoot,
-		sessionPath: join(sessionRoot, "session.json"),
+		sessionPath: join(sessionRoot, "session.lock", "session.json"),
 		lockPath: join(sessionRoot, "session.lock"),
 		profileRoot: join(fakeRoot, ".agent-warm-profile"),
 		environment,
@@ -87,10 +88,10 @@ function actions(testFixture: Fixture): Array<Record<string, unknown>> {
 	const path = join(testFixture.fakeRoot, "actions.jsonl")
 	return existsSync(path)
 		? readFileSync(path, "utf8")
-				.trim()
-				.split("\n")
-				.filter(Boolean)
-				.map((line) => JSON.parse(line))
+			.trim()
+			.split("\n")
+			.filter(Boolean)
+			.map((line) => JSON.parse(line))
 		: []
 }
 
@@ -130,25 +131,27 @@ test("help is one literal agent-native success envelope", () => {
 
 	expect(result.exitCode).toBe(0)
 	expect(result.stdout.toString()).toBe(
-		`${JSON.stringify({
-			schemaVersion: 1,
-			status: "ok",
-			command: "help",
-			resultCode: "HELP",
-			runId: "help-run",
-			transactionState: "unchanged",
-			retrySafe: true,
-			nextAction: "Run warm-browser start --run-id ID to create the Browser Session.",
-			data: {
-				usage: "warm-browser <help|start|status|stop> [--run-id ID] [--port NUMBER]",
-				commands: [
-					{ name: "help", sideEffects: "none" },
-					{ name: "start", sideEffects: "starts one owned browser process group" },
-					{ name: "status", sideEffects: "may remove proved stale private state" },
-					{ name: "stop", sideEffects: "stops one verified owned browser process group" },
-				],
-			},
-		})}\n`,
+		`${
+			JSON.stringify({
+				schemaVersion: 1,
+				status: "ok",
+				command: "help",
+				resultCode: "HELP",
+				runId: "help-run",
+				transactionState: "unchanged",
+				retrySafe: true,
+				nextAction: "Run warm-browser start --run-id ID to create the Browser Session.",
+				data: {
+					usage: "warm-browser <help|start|status|stop> [--run-id ID] [--port NUMBER]",
+					commands: [
+						{ name: "help", sideEffects: "none" },
+						{ name: "start", sideEffects: "starts one owned browser process group" },
+						{ name: "status", sideEffects: "may remove proved stale private state" },
+						{ name: "stop", sideEffects: "stops one verified owned browser process group" },
+					],
+				},
+			})
+		}\n`,
 	)
 	expect(result.stderr.toString()).toBe("")
 })
@@ -161,6 +164,35 @@ test("production fixes the Agent Chrome Profile to HOME without predecessor over
 		"utf8",
 	)
 	expect(source).not.toContain("WARM_CHROME_PROFILE_DIR")
+	expect(source).toContain('if (result.status !== 0) return { kind: "unverifiable" }')
+	expect(source).toContain("commandHasArgument(processIdentity.commandLine, marker)")
+	expect(source).toContain('"--password-store=basic"')
+	expect(source).toContain('"--use-mock-keychain"')
+})
+
+test("production missing-executable spawn failure emits one redacted JSON line without a runtime stack", () => {
+	const testFixture = fixture()
+	const result = Bun.spawnSync({
+		cmd: [process.execPath, productionChildProbe],
+		cwd: packageRoot,
+		env: testFixture.environment,
+		stdout: "pipe",
+		stderr: "pipe",
+	})
+	expectError(result, 1, {
+		schemaVersion: 1,
+		status: "error",
+		command: "start",
+		resultCode: "UNEXPECTED_FAILURE",
+		runId: "missing-child",
+		transactionState: "rolled_back",
+		retrySafe: false,
+		nextAction: "Inspect private state and the owned process group before retrying.",
+		message: "Warm Browser start failed unexpectedly.",
+	})
+	expect(result.stderr.toString().trim().split("\n")).toHaveLength(1)
+	expect(result.stderr.toString()).not.toContain("ENOENT")
+	expect(existsSync(testFixture.lockPath)).toBe(false)
 })
 
 test("usage failure is one literal stderr envelope with exit 2", () => {
@@ -240,7 +272,8 @@ test("status and stop are idempotent when the Browser Session is absent", () => 
 test("start, status, and stop own one private Browser Session through literal public results", () => {
 	const testFixture = fixture()
 	const executable = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-	const commandLine = `${executable} --user-data-dir=${testFixture.profileRoot} --profile-directory=Default --remote-debugging-address=127.0.0.1 --remote-debugging-port=9242`
+	const commandLine =
+		`${executable} --user-data-dir=${testFixture.profileRoot} --profile-directory=Default --remote-debugging-address=127.0.0.1 --remote-debugging-port=9242 --agent-browser-launch-marker=session-1`
 
 	const started = run(testFixture, ["start", "--run-id", "start-run"])
 	expect(started.exitCode).toBe(0)
@@ -274,6 +307,7 @@ test("start, status, and stop own one private Browser Session through literal pu
 		phase: "running",
 		sessionId: "session-1",
 		startRunId: "start-run",
+		launchMarker: "session-1",
 		createdAtEpochMs: 1_800_000_000_000,
 		profileRoot: testFixture.profileRoot,
 		process: {
@@ -448,110 +482,122 @@ test("simultaneous starts deterministically leave one owner and one transient re
 	expect(statSync(testFixture.sessionPath).mode & 0o777).toBe(0o600)
 })
 
-test.each([
+test.each(
 	[
-		"unavailable installed Chrome",
-		{ chromeStatus: "unavailable" },
-		20,
-		"CHROME_UNAVAILABLE",
-		"The fixed installed Google Chrome executable is unavailable.",
-		"Install Google Chrome at the fixed macOS application path before retrying.",
-	],
-	[
-		"unsafe profile",
-		{ profileStatus: "unsafe" },
-		21,
-		"PROFILE_UNSAFE",
-		"The Agent Chrome Profile ownership or permissions are unsafe.",
-		"Repair the Agent Chrome Profile ownership and private permissions before retrying.",
-	],
-	[
-		"ambiguous profile processes",
-		{ profileProcessCount: 2 },
-		20,
-		"PROFILE_PROCESS_AMBIGUOUS",
-		"More than one live process claims the Agent Chrome Profile.",
-		"Inspect the profile process owners before retrying; Warm Browser will not signal them.",
-	],
-	[
-		"unowned profile process",
-		{ profileProcessCount: 1 },
-		21,
-		"PROFILE_IN_USE",
-		"An unowned process is using the Agent Chrome Profile.",
-		"Close the existing profile owner, then retry Warm Browser start.",
-	],
-] as const)("start refuses %s without signalling any process", (_name, plan, exitCode, resultCode, message, nextAction) => {
-	const testFixture = fixture(plan)
-	const result = run(testFixture, ["start", "--run-id", "profile-refusal"])
-	expectError(result, exitCode, {
-		schemaVersion: 1,
-		status: "error",
-		command: "start",
-		resultCode,
-		runId: "profile-refusal",
-		transactionState: "unchanged",
-		retrySafe: false,
-		nextAction,
-		message,
-	})
-	expect(actions(testFixture)).toEqual([])
-	expect(existsSync(testFixture.sessionPath)).toBe(false)
-})
+		[
+			"unavailable installed Chrome",
+			{ chromeStatus: "unavailable" },
+			20,
+			"CHROME_UNAVAILABLE",
+			"The fixed installed Google Chrome executable is unavailable.",
+			"Install Google Chrome at the fixed macOS application path before retrying.",
+		],
+		[
+			"unsafe profile",
+			{ profileStatus: "unsafe" },
+			21,
+			"PROFILE_UNSAFE",
+			"The Agent Chrome Profile ownership or permissions are unsafe.",
+			"Repair the Agent Chrome Profile ownership and private permissions before retrying.",
+		],
+		[
+			"ambiguous profile processes",
+			{ profileProcessCount: 2 },
+			20,
+			"PROFILE_PROCESS_AMBIGUOUS",
+			"More than one live process claims the Agent Chrome Profile.",
+			"Inspect the profile process owners before retrying; Warm Browser will not signal them.",
+		],
+		[
+			"unowned profile process",
+			{ profileProcessCount: 1 },
+			21,
+			"PROFILE_IN_USE",
+			"An unowned process is using the Agent Chrome Profile.",
+			"Close the existing profile owner, then retry Warm Browser start.",
+		],
+	] as const,
+)(
+	"start refuses %s without signalling any process",
+	(_name, plan, exitCode, resultCode, message, nextAction) => {
+		const testFixture = fixture(plan)
+		const result = run(testFixture, ["start", "--run-id", "profile-refusal"])
+		expectError(result, exitCode, {
+			schemaVersion: 1,
+			status: "error",
+			command: "start",
+			resultCode,
+			runId: "profile-refusal",
+			transactionState: "unchanged",
+			retrySafe: false,
+			nextAction,
+			message,
+		})
+		expect(actions(testFixture)).toEqual([])
+		expect(existsSync(testFixture.sessionPath)).toBe(false)
+	},
+)
 
-test.each([
+test.each(
 	[
-		"occupied",
-		"PORT_OCCUPIED",
-		"The requested loopback CDP port is already occupied.",
-		"Inspect the port owner or choose one free start --port override.",
-	],
-	[
-		"unverifiable",
-		"PORT_UNVERIFIABLE",
-		"Warm Browser could not prove that the requested CDP port is free.",
-		"Inspect loopback port state before retrying.",
-	],
-] as const)("start fails closed when the requested port is %s", (portStatus, resultCode, message, nextAction) => {
-	const testFixture = fixture({ portStatus })
-	const result = run(testFixture, ["start", "--port", "9444", "--run-id", "port-refusal"])
-	expectError(result, 20, {
-		schemaVersion: 1,
-		status: "error",
-		command: "start",
-		resultCode,
-		runId: "port-refusal",
-		transactionState: "unchanged",
-		retrySafe: false,
-		nextAction,
-		message,
-	})
-	expect(actions(testFixture)).toEqual([])
-	expect(existsSync(testFixture.lockPath)).toBe(false)
-})
+		[
+			"occupied",
+			"PORT_OCCUPIED",
+			"The requested loopback CDP port is already occupied.",
+			"Inspect the port owner or choose one free start --port override.",
+		],
+		[
+			"unverifiable",
+			"PORT_UNVERIFIABLE",
+			"Warm Browser could not prove that the requested CDP port is free.",
+			"Inspect loopback port state before retrying.",
+		],
+	] as const,
+)(
+	"start fails closed when the requested port is %s",
+	(portStatus, resultCode, message, nextAction) => {
+		const testFixture = fixture({ portStatus })
+		const result = run(testFixture, ["start", "--port", "9444", "--run-id", "port-refusal"])
+		expectError(result, 20, {
+			schemaVersion: 1,
+			status: "error",
+			command: "start",
+			resultCode,
+			runId: "port-refusal",
+			transactionState: "unchanged",
+			retrySafe: false,
+			nextAction,
+			message,
+		})
+		expect(actions(testFixture)).toEqual([])
+		expect(existsSync(testFixture.lockPath)).toBe(false)
+	},
+)
 
-test.each([
+test.each(
 	[
-		"browser_unverified",
-		"CDP_IDENTITY_UNVERIFIED",
-		"The launched Chrome CDP identity could not be verified.",
-	],
-	[
-		"listener_unverified",
-		"CDP_IDENTITY_UNVERIFIED",
-		"The launched Chrome CDP identity could not be verified.",
-	],
-	[
-		"controlled_page_unavailable",
-		"CONTROLLED_PAGE_UNAVAILABLE",
-		"The verified CDP endpoint exposes no Controlled Page.",
-	],
-	[
-		"controlled_page_ambiguous",
-		"CONTROLLED_PAGE_AMBIGUOUS",
-		"The verified CDP endpoint exposes more than one page.",
-	],
-] as const)("failed start rolls back process and state for %s", (endpointKind, resultCode, message) => {
+		[
+			"browser_unverified",
+			"CDP_IDENTITY_UNVERIFIED",
+			"The launched Chrome CDP identity could not be verified.",
+		],
+		[
+			"listener_unverified",
+			"CDP_IDENTITY_UNVERIFIED",
+			"The launched Chrome CDP identity could not be verified.",
+		],
+		[
+			"controlled_page_unavailable",
+			"CONTROLLED_PAGE_UNAVAILABLE",
+			"The verified CDP endpoint exposes no Controlled Page.",
+		],
+		[
+			"controlled_page_ambiguous",
+			"CONTROLLED_PAGE_AMBIGUOUS",
+			"The verified CDP endpoint exposes more than one page.",
+		],
+	] as const,
+)("failed start rolls back process and state for %s", (endpointKind, resultCode, message) => {
 	const testFixture = fixture({ endpointKind })
 	const result = run(testFixture, ["start", "--run-id", "endpoint-failure"])
 	expectError(result, 20, {
@@ -570,7 +616,11 @@ test.each([
 	expect(readJson(join(testFixture.fakeRoot, "processes.json"))).toMatchObject({
 		processes: [{ alive: false }],
 	})
-	expect(actions(testFixture).map((entry) => entry.action)).toEqual(["spawn", "verify", "terminate"])
+	expect(actions(testFixture).map((entry) => entry.action)).toEqual([
+		"spawn",
+		"verify",
+		"terminate",
+	])
 })
 
 test("browser crash before CDP acknowledgement cleans the failed start", () => {
@@ -687,13 +737,13 @@ test("an expired state-less lock is preserved because its process receipt cannot
 		retrySafe: false,
 		nextAction:
 			"Inspect the private lock and profile processes; Warm Browser will not remove or signal them.",
-		message: "An expired ownership lock has no process identity receipt.",
+		message: "An expired ownership lock has no durable launch intent.",
 	})
 	expect(existsSync(testFixture.lockPath)).toBe(true)
 	expect(actions(testFixture)).toEqual([])
 })
 
-test("unverified post-spawn cleanup preserves the state-less lock and live process for inspection", () => {
+test("unverified post-spawn cleanup preserves durable launch intent and live process for inspection", () => {
 	const testFixture = fixture({
 		postSpawnIdentityReadFailure: true,
 		postSpawnCleanupUnverified: true,
@@ -707,11 +757,15 @@ test("unverified post-spawn cleanup preserves the state-less lock and live proce
 		runId: "cleanup-unverified",
 		transactionState: "unchanged",
 		retrySafe: false,
-		nextAction: "Inspect private state and the owned process group before retrying.",
-		message: "Warm Browser start failed unexpectedly.",
+		nextAction: "Inspect the durable launch intent and marker-matched processes before retrying.",
+		message: "Warm Browser could not verify cleanup of its launched browser process group.",
 	})
 	expect(existsSync(testFixture.lockPath)).toBe(true)
-	expect(existsSync(testFixture.sessionPath)).toBe(false)
+	expect(readJson(testFixture.sessionPath)).toMatchObject({
+		phase: "launching",
+		sessionId: "session-1",
+		launchMarker: "session-1",
+	})
 	expect(readJson(join(testFixture.fakeRoot, "processes.json"))).toMatchObject({
 		processes: [{ alive: true }],
 	})
@@ -837,6 +891,271 @@ test("wrong live process identity is preserved for inspection and never signalle
 	expect(actions(testFixture).filter((entry) => entry.action === "terminate")).toEqual([])
 })
 
+test("process-table uncertainty preserves the owned receipt and performs no terminate or spawn", () => {
+	const testFixture = fixture()
+	const started = run(testFixture, ["start", "--run-id", "uncertain-owner-start"])
+	expect(started.exitCode).toBe(0)
+	const stateBefore = readFileSync(testFixture.sessionPath, "utf8")
+	const actionsBefore = actions(testFixture)
+	writePlan(testFixture, { processInspectionUnverifiable: true })
+
+	const result = run(testFixture, ["status", "--run-id", "uncertain-owner-status"])
+	expectError(result, 20, {
+		schemaVersion: 1,
+		status: "error",
+		command: "status",
+		resultCode: "PROCESS_INSPECTION_UNVERIFIED",
+		runId: "uncertain-owner-status",
+		transactionState: "unchanged",
+		retrySafe: false,
+		nextAction: "Inspect the host process table and private Warm Browser state before retrying.",
+		message: "Warm Browser could not verify the local process table.",
+	})
+	expect(readFileSync(testFixture.sessionPath, "utf8")).toBe(stateBefore)
+	expect(actions(testFixture)).toEqual(actionsBefore)
+})
+
+test("profile process-table uncertainty refuses start before lock, spawn, or signal", () => {
+	const testFixture = fixture({ profileProcessInspectionUnverifiable: true })
+	const result = run(testFixture, ["start", "--run-id", "profile-uncertain"])
+	expectError(result, 20, {
+		schemaVersion: 1,
+		status: "error",
+		command: "start",
+		resultCode: "PROCESS_INSPECTION_UNVERIFIED",
+		runId: "profile-uncertain",
+		transactionState: "unchanged",
+		retrySafe: false,
+		nextAction: "Inspect the host process table and private Warm Browser state before retrying.",
+		message: "Warm Browser could not verify the local process table.",
+	})
+	expect(existsSync(testFixture.lockPath)).toBe(false)
+	expect(actions(testFixture)).toEqual([])
+})
+
+test("a running receipt whose exact launch marker disappears is preserved and never signalled", () => {
+	const testFixture = fixture()
+	expect(run(testFixture, ["start", "--run-id", "marker-prime"]).exitCode).toBe(0)
+	const ledgerPath = join(testFixture.fakeRoot, "processes.json")
+	const ledger = readJson(ledgerPath) as unknown as { processes: Array<{ commandLine: string }> }
+	ledger.processes[0]!.commandLine = ledger.processes[0]!.commandLine.replace(
+		" --agent-browser-launch-marker=session-1",
+		"",
+	)
+	writeJson(ledgerPath, ledger)
+	const stateBefore = readFileSync(testFixture.sessionPath, "utf8")
+	const result = run(testFixture, ["stop", "--run-id", "marker-stop"])
+	expect(JSON.parse(result.stderr.toString())).toMatchObject({
+		resultCode: "PROCESS_IDENTITY_UNVERIFIED",
+		transactionState: "unchanged",
+	})
+	expect(result.exitCode).toBe(20)
+	expect(readFileSync(testFixture.sessionPath, "utf8")).toBe(stateBefore)
+	expect(actions(testFixture).filter(({ action }) => action === "terminate")).toEqual([])
+})
+
+test("SIGKILL after fake spawn leaves durable intent that recovers exactly one marked owner", async () => {
+	const barrier = join(tmpdir(), `warm-browser-never-release-${crypto.randomUUID()}`)
+	const testFixture = fixture({ holdSpawnReturnUntil: barrier })
+	const driver = Bun.spawn({
+		cmd: [process.execPath, fixtureEntry, "start", "--run-id", "sigkill-start"],
+		cwd: packageRoot,
+		env: testFixture.environment,
+		stdout: "pipe",
+		stderr: "pipe",
+	})
+	await waitFor(testFixture.sessionPath)
+	await waitFor(join(testFixture.fakeRoot, "processes.json"))
+	expect(readJson(testFixture.sessionPath)).toMatchObject({
+		phase: "launching",
+		sessionId: "session-1",
+		launchMarker: "session-1",
+	})
+	driver.kill(9)
+	await driver.exited
+
+	const state = readJson(testFixture.sessionPath)
+	state.createdAtEpochMs = 1_799_999_980_000
+	writeJson(testFixture.sessionPath, state)
+	chmodSync(testFixture.sessionPath, 0o600)
+	writePlan(testFixture, {})
+	const recovered = run(testFixture, ["status", "--run-id", "sigkill-recover"])
+	expect(recovered.exitCode).toBe(0)
+	expect(recovered.stdout.toString()).toBe(output({
+		schemaVersion: 1,
+		status: "ok",
+		command: "status",
+		resultCode: "STALE_SESSION_RECOVERED",
+		runId: "sigkill-recover",
+		transactionState: "recovered",
+		retrySafe: true,
+		nextAction: "Run warm-browser start --run-id ID to create a new Browser Session.",
+		data: {
+			trigger: "status",
+			postcondition: "absent",
+			removedState: true,
+			stoppedOwnedProcess: true,
+		},
+	}))
+	expect(recovered.stderr.toString()).toBe("")
+	expect(existsSync(testFixture.lockPath)).toBe(false)
+	expect(readJson(join(testFixture.fakeRoot, "processes.json"))).toMatchObject({
+		processes: [{ alive: false }],
+	})
+	expect(actions(testFixture).map(({ action }) => action)).toEqual(["spawn", "terminate"])
+})
+
+test("stale launch intent with confirmed absent marker cleans state without signalling", () => {
+	const testFixture = fixture({
+		postSpawnIdentityReadFailure: true,
+		postSpawnCleanupUnverified: true,
+	})
+	expect(run(testFixture, ["start", "--run-id", "absent-marker-start"]).exitCode).toBe(1)
+	const state = readJson(testFixture.sessionPath)
+	state.createdAtEpochMs = 1_799_999_980_000
+	writeJson(testFixture.sessionPath, state)
+	chmodSync(testFixture.sessionPath, 0o600)
+	const ledgerPath = join(testFixture.fakeRoot, "processes.json")
+	const processLedger = readJson(ledgerPath) as unknown as { processes: Array<{ alive: boolean }> }
+	processLedger.processes[0]!.alive = false
+	writeJson(ledgerPath, processLedger)
+	writePlan(testFixture, {})
+	const result = run(testFixture, ["status", "--run-id", "absent-marker-status"])
+	expect(result.exitCode).toBe(0)
+	expect(JSON.parse(result.stdout.toString())).toMatchObject({
+		resultCode: "STALE_SESSION_RECOVERED",
+		transactionState: "recovered",
+		data: { trigger: "status", postcondition: "absent", stoppedOwnedProcess: false },
+	})
+	expect(actions(testFixture).filter(({ action }) => action === "terminate")).toEqual([])
+	expect(existsSync(testFixture.lockPath)).toBe(false)
+})
+
+test("stale launch marker query uncertainty preserves intent and performs no signal", () => {
+	const testFixture = fixture({
+		postSpawnIdentityReadFailure: true,
+		postSpawnCleanupUnverified: true,
+	})
+	expect(run(testFixture, ["start", "--run-id", "launch-query-start"]).exitCode).toBe(1)
+	const state = readJson(testFixture.sessionPath)
+	state.createdAtEpochMs = 1_799_999_980_000
+	writeJson(testFixture.sessionPath, state)
+	chmodSync(testFixture.sessionPath, 0o600)
+	writePlan(testFixture, { launchProcessInspectionUnverifiable: true })
+	const stateBefore = readFileSync(testFixture.sessionPath, "utf8")
+	const result = run(testFixture, ["status", "--run-id", "launch-query-status"])
+	expect(JSON.parse(result.stderr.toString())).toMatchObject({
+		resultCode: "PROCESS_INSPECTION_UNVERIFIED",
+		transactionState: "unchanged",
+	})
+	expect(result.exitCode).toBe(20)
+	expect(readFileSync(testFixture.sessionPath, "utf8")).toBe(stateBefore)
+	expect(actions(testFixture).filter(({ action }) => action === "terminate")).toEqual([])
+})
+
+test("stale launch recovery re-scans the exact marker immediately before signalling", () => {
+	const testFixture = fixture({
+		postSpawnIdentityReadFailure: true,
+		postSpawnCleanupUnverified: true,
+		launchProcessSecondQueryCount: 2,
+	})
+	expect(run(testFixture, ["start", "--run-id", "rescan-start"]).exitCode).toBe(1)
+	const state = readJson(testFixture.sessionPath)
+	state.createdAtEpochMs = 1_799_999_980_000
+	writeJson(testFixture.sessionPath, state)
+	chmodSync(testFixture.sessionPath, 0o600)
+	const stateBefore = readFileSync(testFixture.sessionPath, "utf8")
+	const result = run(testFixture, ["status", "--run-id", "rescan-status"])
+	expect(JSON.parse(result.stderr.toString())).toMatchObject({
+		resultCode: "LAUNCH_PROCESS_AMBIGUOUS",
+		message: "The stale launch marker changed before cleanup.",
+	})
+	expect(result.exitCode).toBe(20)
+	expect(readFileSync(testFixture.sessionPath, "utf8")).toBe(stateBefore)
+	expect(actions(testFixture).filter(({ action }) => action === "terminate")).toEqual([])
+})
+
+test("malformed stale launch intent is preserved as unsafe state without process inspection", () => {
+	const testFixture = fixture({
+		postSpawnIdentityReadFailure: true,
+		postSpawnCleanupUnverified: true,
+	})
+	expect(run(testFixture, ["start", "--run-id", "malformed-start"]).exitCode).toBe(1)
+	const state = readJson(testFixture.sessionPath)
+	state.createdAtEpochMs = 1_799_999_980_000
+	state.launchMarker = "invalid marker with spaces"
+	writeJson(testFixture.sessionPath, state)
+	chmodSync(testFixture.sessionPath, 0o600)
+	const actionsBefore = actions(testFixture)
+	const result = run(testFixture, ["status", "--run-id", "malformed-status"])
+	expect(JSON.parse(result.stderr.toString())).toMatchObject({ resultCode: "STATE_UNSAFE" })
+	expect(result.exitCode).toBe(20)
+	expect(existsSync(testFixture.sessionPath)).toBe(true)
+	expect(actions(testFixture)).toEqual(actionsBefore)
+})
+
+test.each(["ambiguous", "mismatched"] as const)(
+	"stale launch intent with %s marked identity is preserved without signalling",
+	(shape) => {
+		const testFixture = fixture({
+			postSpawnIdentityReadFailure: true,
+			postSpawnCleanupUnverified: true,
+		})
+		expect(run(testFixture, ["start", "--run-id", `${shape}-launch-start`]).exitCode).toBe(1)
+		const state = readJson(testFixture.sessionPath)
+		state.createdAtEpochMs = 1_799_999_980_000
+		writeJson(testFixture.sessionPath, state)
+		chmodSync(testFixture.sessionPath, 0o600)
+		if (shape === "ambiguous") {
+			writePlan(testFixture, { launchProcessCountOverride: 2 })
+		} else {
+			const ledgerPath = join(testFixture.fakeRoot, "processes.json")
+			const processLedger = readJson(ledgerPath) as unknown as {
+				processes: Array<{ commandLine: string }>
+			}
+			processLedger.processes[0]!.commandLine = processLedger.processes[0]!.commandLine.replace(
+				testFixture.profileRoot,
+				`${testFixture.profileRoot}-wrong`,
+			)
+			writeJson(ledgerPath, processLedger)
+			writePlan(testFixture, {})
+		}
+		const stateBefore = readFileSync(testFixture.sessionPath, "utf8")
+		const result = run(testFixture, ["status", "--run-id", `${shape}-launch-status`])
+		expect(result.exitCode).toBe(20)
+		expect(JSON.parse(result.stderr.toString())).toMatchObject({
+			status: "error",
+			command: "status",
+			resultCode: shape === "ambiguous"
+				? "LAUNCH_PROCESS_AMBIGUOUS"
+				: "PROCESS_IDENTITY_UNVERIFIED",
+			transactionState: "unchanged",
+		})
+		expect(readFileSync(testFixture.sessionPath, "utf8")).toBe(stateBefore)
+		expect(actions(testFixture).filter(({ action }) => action === "terminate")).toEqual([])
+	},
+)
+
+test("start reports recovered transaction when later occupied-port inspection refuses", () => {
+	const testFixture = fixture()
+	expect(run(testFixture, ["start", "--run-id", "recovered-port-prime"]).exitCode).toBe(0)
+	const ledgerPath = join(testFixture.fakeRoot, "processes.json")
+	const processLedger = readJson(ledgerPath) as unknown as { processes: Array<{ alive: boolean }> }
+	processLedger.processes[0]!.alive = false
+	writeJson(ledgerPath, processLedger)
+	writePlan(testFixture, { portStatus: "occupied" })
+	const result = run(testFixture, ["start", "--run-id", "recovered-port-start"])
+	expect(JSON.parse(result.stderr.toString())).toMatchObject({
+		status: "error",
+		command: "start",
+		resultCode: "PORT_OCCUPIED",
+		runId: "recovered-port-start",
+		transactionState: "recovered",
+	})
+	expect(result.exitCode).toBe(20)
+	expect(existsSync(testFixture.lockPath)).toBe(false)
+})
+
 test("unverifiable running CDP identity preserves the exact owned process for inspection", () => {
 	const testFixture = fixture()
 	expect(run(testFixture, ["start", "--run-id", "identity-start"]).exitCode).toBe(0)
@@ -881,6 +1200,19 @@ test("unsafe private state fails closed without browser effects", () => {
 	expect(actions(testFixture)).toEqual([])
 })
 
+test.each([0o500, 0o1700] as const)(
+	"state root mode %o is rejected because private directories require exact 0700",
+	(mode) => {
+		const testFixture = fixture()
+		expect(run(testFixture, ["status", "--run-id", "state-mode-prime"]).exitCode).toBe(0)
+		chmodSync(testFixture.sessionRoot, mode)
+		const result = run(testFixture, ["status", "--run-id", `state-mode-${mode}`])
+		expect(JSON.parse(result.stderr.toString())).toMatchObject({ resultCode: "STATE_UNSAFE" })
+		expect(result.exitCode).toBe(20)
+		expect(actions(testFixture)).toEqual([])
+	},
+)
+
 test.each(["file", "symlink", "permissive-directory"] as const)(
 	"an unsafe %s ownership lock is preserved and rejected before browser effects",
 	(lockShape) => {
@@ -913,6 +1245,44 @@ test.each(["file", "symlink", "permissive-directory"] as const)(
 	},
 )
 
+test.each([0o500, 0o1700] as const)(
+	"ownership lock mode %o is preserved and rejected because exact 0700 is required",
+	(mode) => {
+		const testFixture = fixture()
+		mkdirSync(testFixture.sessionRoot, { recursive: true, mode: 0o700 })
+		chmodSync(testFixture.sessionRoot, 0o700)
+		mkdirSync(testFixture.lockPath, { mode: 0o700 })
+		chmodSync(testFixture.lockPath, mode)
+		const result = run(testFixture, ["status", "--run-id", `lock-mode-${mode}`])
+		expect(JSON.parse(result.stderr.toString())).toMatchObject({ resultCode: "STATE_UNSAFE" })
+		expect(result.exitCode).toBe(20)
+		expect(statSync(testFixture.lockPath).mode & 0o7777).toBe(mode)
+		expect(actions(testFixture)).toEqual([])
+	},
+)
+
+test.each(["0400", "04600", "symlink"] as const)(
+	"session receipt shape %s is preserved and rejected because exact regular 0600 is required",
+	(shape) => {
+		const testFixture = fixture()
+		expect(run(testFixture, ["start", "--run-id", `receipt-${shape}-prime`]).exitCode).toBe(0)
+		if (shape === "symlink") {
+			const target = join(testFixture.root, "receipt-target")
+			writeFileSync(target, readFileSync(testFixture.sessionPath), { mode: 0o600 })
+			rmSync(testFixture.sessionPath)
+			symlinkSync(target, testFixture.sessionPath)
+		} else {
+			chmodSync(testFixture.sessionPath, shape === "0400" ? 0o400 : 0o4600)
+		}
+		const actionsBefore = actions(testFixture)
+		const result = run(testFixture, ["status", "--run-id", `receipt-${shape}-status`])
+		expect(JSON.parse(result.stderr.toString())).toMatchObject({ resultCode: "STATE_UNSAFE" })
+		expect(result.exitCode).toBe(20)
+		expect(existsSync(testFixture.sessionPath)).toBe(true)
+		expect(actions(testFixture)).toEqual(actionsBefore)
+	},
+)
+
 test("lock-removal failure preserves the process identity receipt after stopping the exact owner", () => {
 	const testFixture = fixture()
 	expect(run(testFixture, ["start", "--run-id", "cleanup-start"]).exitCode).toBe(0)
@@ -932,8 +1302,10 @@ test("lock-removal failure preserves the process identity receipt after stopping
 		nextAction: "Inspect private Warm Browser state before retrying.",
 		message: "Warm Browser failed unexpectedly.",
 	})
-	expect(readFileSync(testFixture.sessionPath, "utf8")).toBe(stateBefore)
-	expect(existsSync(testFixture.lockPath)).toBe(true)
+	const tombstone = join(testFixture.sessionRoot, ".cleanup-session-1")
+	expect(readFileSync(join(tombstone, "session.json"), "utf8")).toBe(stateBefore)
+	expect(existsSync(testFixture.lockPath)).toBe(false)
+	expect(statSync(join(tombstone, "session.json")).mode & 0o7777).toBe(0o600)
 	expect(readJson(join(testFixture.fakeRoot, "processes.json"))).toMatchObject({
 		processes: [{ alive: false }],
 	})

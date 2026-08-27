@@ -1,10 +1,11 @@
 import {
-	schemaVersion,
 	type BrowserProcessIdentity,
 	type CliCommand,
 	type CliOutcome,
+	commandVocabulary,
 	type ErrorEnvelope,
 	type ResultCode,
+	schemaVersion,
 	type SliceCommand,
 	SpawnCleanupUnverifiedError,
 	type SuccessEnvelope,
@@ -13,13 +14,15 @@ import {
 } from "./contract"
 import {
 	acquireSessionLock,
+	type BrowserSessionState,
 	ensurePrivateState,
 	lockAgeMs,
 	readSessionState,
+	removeNewEmptyLock,
 	removeOwnedState,
 	resolveStatePaths,
+	type RunningBrowserSessionState,
 	runningState,
-	type BrowserSessionState,
 	type StatePaths,
 	UnsafeStateError,
 	validateSessionLock,
@@ -27,10 +30,9 @@ import {
 } from "./state"
 
 const defaultPort = 9242
-const minimumPort = 1024
-const maximumPort = 65_535
-const startingStateTimeoutMs = 15_000
+const startingTimeoutMs = 15_000
 const runIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
+const commandNames = new Set<string>(commandVocabulary.map(({ name }) => name))
 
 interface ParsedCommand {
 	readonly command: CliCommand
@@ -48,14 +50,14 @@ class WarmBrowserFailure extends Error {
 	readonly nextAction: string
 
 	constructor(options: {
-		readonly command: CliCommand | "unknown"
-		readonly resultCode: ResultCode
-		readonly exitCode: 1 | 2 | 20 | 21 | 22
-		readonly runId: string
-		readonly transactionState?: TransactionState
-		readonly retrySafe: boolean
-		readonly nextAction: string
-		readonly message: string
+		command: CliCommand | "unknown"
+		resultCode: ResultCode
+		exitCode: 1 | 2 | 20 | 21 | 22
+		runId: string
+		transactionState?: TransactionState
+		retrySafe: boolean
+		nextAction: string
+		message: string
 	}) {
 		super(options.message)
 		this.name = "WarmBrowserFailure"
@@ -94,8 +96,12 @@ function candidateRunId(arguments_: readonly string[], adapter: WarmBrowserAdapt
 	return value !== undefined && runIdPattern.test(value) ? value : adapter.createRunId()
 }
 
+function raise(options: ConstructorParameters<typeof WarmBrowserFailure>[0]): never {
+	throw new WarmBrowserFailure(options)
+}
+
 function usage(runId: string, command: CliCommand | "unknown", message: string): never {
-	throw new WarmBrowserFailure({
+	raise({
 		command,
 		resultCode: "USAGE_ERROR",
 		exitCode: 2,
@@ -110,19 +116,17 @@ function parseArguments(arguments_: readonly string[], adapter: WarmBrowserAdapt
 	const generatedRunId = candidateRunId(arguments_, adapter)
 	const first = arguments_[0]
 	const command: CliCommand | "unknown" =
-		first === undefined || first === "help" || first === "--help" || first === "-h"
+		first === undefined || first === "--help" || first === "-h"
 			? "help"
-			: first === "start" || first === "status" || first === "stop"
-				? first
-				: "unknown"
+			: commandNames.has(first)
+			? (first as CliCommand)
+			: "unknown"
 	if (command === "unknown") usage(generatedRunId, command, "Unknown Warm Browser command.")
-
 	let runId = generatedRunId
 	let port: number | undefined
 	let runIdSeen = false
 	let portSeen = false
-	const startIndex = first === undefined ? 0 : 1
-	for (let index = startIndex; index < arguments_.length; index += 1) {
+	for (let index = first === undefined ? 0 : 1; index < arguments_.length; index += 1) {
 		const argument = arguments_[index]
 		if (argument === "--run-id") {
 			if (runIdSeen) usage(runId, command, "The --run-id flag may appear only once.")
@@ -143,7 +147,7 @@ function parseArguments(arguments_: readonly string[], adapter: WarmBrowserAdapt
 				usage(runId, command, "The --port value must be a decimal port number.")
 			}
 			port = Number(value)
-			if (!Number.isSafeInteger(port) || port < minimumPort || port > maximumPort) {
+			if (!Number.isSafeInteger(port) || port < 1024 || port > 65_535) {
 				usage(runId, command, "The --port value must be between 1024 and 65535.")
 			}
 			portSeen = true
@@ -152,21 +156,7 @@ function parseArguments(arguments_: readonly string[], adapter: WarmBrowserAdapt
 		}
 		usage(runId, command, "Warm Browser received an unsupported argument.")
 	}
-
 	return { command, runId, ...(port === undefined ? {} : { port }) }
-}
-
-function requireMacOs(command: CliCommand, runId: string, adapter: WarmBrowserAdapter): void {
-	if (adapter.platform() === "darwin") return
-	throw new WarmBrowserFailure({
-		command,
-		resultCode: "PLATFORM_UNSUPPORTED",
-		exitCode: 21,
-		runId,
-		retrySafe: false,
-		nextAction: "Run Warm Browser on a supported macOS host.",
-		message: "Warm Browser supports macOS only.",
-	})
 }
 
 function staticFailure(
@@ -179,16 +169,56 @@ function staticFailure(
 	retrySafe = false,
 	transactionState: TransactionState = "unchanged",
 ): never {
-	throw new WarmBrowserFailure({
+	raise({ command, resultCode, exitCode, runId, retrySafe, nextAction, message, transactionState })
+}
+
+function inspectionFailure(
+	command: SliceCommand,
+	runId: string,
+	tx: TransactionState = "unchanged",
+): never {
+	staticFailure(
 		command,
-		resultCode,
-		exitCode,
 		runId,
-		retrySafe,
-		nextAction,
-		message,
-		transactionState,
-	})
+		"PROCESS_INSPECTION_UNVERIFIED",
+		20,
+		"Warm Browser could not verify the local process table.",
+		"Inspect the host process table and private Warm Browser state before retrying.",
+		false,
+		tx,
+	)
+}
+
+function identityFailure(command: SliceCommand, runId: string): never {
+	staticFailure(
+		command,
+		runId,
+		"PROCESS_IDENTITY_UNVERIFIED",
+		20,
+		"The stored browser process identity does not match the live process.",
+		"Inspect the live process and private Warm Browser state; do not signal the stored process id.",
+	)
+}
+
+function hasLaunchContract(
+	observed: BrowserProcessIdentity,
+	executable: string,
+	profileRoot: string,
+	port: number,
+	marker: string,
+): boolean {
+	const hasArgument = (argument: string): boolean =>
+		` ${observed.commandLine} `.includes(` ${argument} `)
+	return (
+		observed.processGroupId === observed.pid &&
+		observed.executable === executable &&
+		observed.commandLine.startsWith(executable) &&
+		(hasArgument(`--user-data-dir=${profileRoot}`) ||
+			hasArgument(`--user-data-dir="${profileRoot}"`)) &&
+		hasArgument("--remote-debugging-address=127.0.0.1") &&
+		hasArgument(`--remote-debugging-port=${port}`) &&
+		hasArgument(`--agent-browser-launch-marker=${marker}`)
+	)
 }
 
 function identityMatches(
@@ -196,36 +226,102 @@ function identityMatches(
 	observed: BrowserProcessIdentity,
 	profileRoot: string,
 	port: number,
+	marker: string,
 ): boolean {
-	const userDataFlag = `--user-data-dir=${profileRoot}`
-	const quotedUserDataFlag = `--user-data-dir="${profileRoot}"`
 	return (
 		observed.pid === expected.pid &&
 		observed.processGroupId === expected.processGroupId &&
-		observed.processGroupId === observed.pid &&
 		observed.startedAtToken === expected.startedAtToken &&
-		observed.executable === expected.executable &&
-		observed.commandLine.startsWith(expected.executable) &&
-		(observed.commandLine.includes(userDataFlag) || observed.commandLine.includes(quotedUserDataFlag)) &&
-		observed.commandLine.includes("--remote-debugging-address=127.0.0.1") &&
-		observed.commandLine.includes(`--remote-debugging-port=${port}`)
+		hasLaunchContract(observed, expected.executable, profileRoot, port, marker)
 	)
 }
 
-function canonicalProcess(processIdentity: BrowserProcessIdentity): BrowserProcessIdentity {
+function canonicalProcess(value: BrowserProcessIdentity): BrowserProcessIdentity {
 	return {
-		pid: processIdentity.pid,
-		processGroupId: processIdentity.processGroupId,
-		startedAtToken: processIdentity.startedAtToken,
-		executable: processIdentity.executable,
-		commandLine: processIdentity.commandLine,
+		pid: value.pid,
+		processGroupId: value.processGroupId,
+		startedAtToken: value.startedAtToken,
+		executable: value.executable,
+		commandLine: value.commandLine,
 	}
 }
 
 interface SessionInspection {
 	readonly kind: "absent" | "running" | "recovered"
-	readonly state?: BrowserSessionState
+	readonly state?: RunningBrowserSessionState
 	readonly stoppedOwnedProcess?: boolean
+}
+
+async function recoverLaunching(
+	command: SliceCommand,
+	runId: string,
+	paths: StatePaths,
+	state: Extract<BrowserSessionState, { phase: "launching" }>,
+	adapter: WarmBrowserAdapter,
+): Promise<SessionInspection> {
+	const first = adapter.findLaunchProcesses(state.launchMarker)
+	if (first.kind === "unverifiable") inspectionFailure(command, runId)
+	if (first.processes.length === 0) {
+		removeOwnedState(paths, state.sessionId)
+		return { kind: "recovered", stoppedOwnedProcess: false }
+	}
+	if (first.processes.length !== 1) {
+		staticFailure(
+			command,
+			runId,
+			"LAUNCH_PROCESS_AMBIGUOUS",
+			20,
+			"The stale launch marker does not identify exactly one browser leader.",
+			"Inspect the marker-matched processes and private state; Warm Browser did not signal them.",
+		)
+	}
+	const candidate = first.processes[0]!
+	if (
+		!hasLaunchContract(
+			candidate,
+			adapter.chromeExecutable(),
+			state.profileRoot,
+			state.endpoint.port,
+			state.launchMarker,
+		)
+	) identityFailure(command, runId)
+	const second = adapter.findLaunchProcesses(state.launchMarker)
+	if (second.kind === "unverifiable") inspectionFailure(command, runId)
+	if (second.processes.length === 0) {
+		removeOwnedState(paths, state.sessionId)
+		return { kind: "recovered", stoppedOwnedProcess: false }
+	}
+	if (
+		second.processes.length !== 1 ||
+		!identityMatches(
+			candidate,
+			second.processes[0]!,
+			state.profileRoot,
+			state.endpoint.port,
+			state.launchMarker,
+		)
+	) {
+		staticFailure(
+			command,
+			runId,
+			"LAUNCH_PROCESS_AMBIGUOUS",
+			20,
+			"The stale launch marker changed before cleanup.",
+			"Inspect the marker-matched processes and private state; Warm Browser did not signal them.",
+		)
+	}
+	if (!(await adapter.terminateProcessGroup(second.processes[0]!))) {
+		staticFailure(
+			command,
+			runId,
+			"UNEXPECTED_FAILURE",
+			1,
+			"Warm Browser could not clean up its stale marked process group.",
+			"Inspect the owned process group and private state before retrying.",
+		)
+	}
+	removeOwnedState(paths, state.sessionId)
+	return { kind: "recovered", stoppedOwnedProcess: true }
 }
 
 async function inspectSession(
@@ -248,7 +344,7 @@ async function inspectSession(
 	}
 	if (state === undefined) {
 		if (!lockExists) return { kind: "absent" }
-		if (lockAgeMs(paths, adapter.nowEpochMs()) <= startingStateTimeoutMs) {
+		if (lockAgeMs(paths, adapter.nowEpochMs()) <= startingTimeoutMs) {
 			staticFailure(
 				command,
 				runId,
@@ -264,29 +360,41 @@ async function inspectSession(
 			runId,
 			"PROCESS_IDENTITY_UNVERIFIED",
 			20,
-			"An expired ownership lock has no process identity receipt.",
+			"An expired ownership lock has no durable launch intent.",
 			"Inspect the private lock and profile processes; Warm Browser will not remove or signal them.",
 		)
 	}
-
-	const observed = adapter.inspectProcess(state.process.pid)
-	if (observed === undefined) {
-		removeOwnedState(paths)
+	if (state.phase === "launching") {
+		if (adapter.nowEpochMs() - state.createdAtEpochMs <= startingTimeoutMs) {
+			staticFailure(
+				command,
+				runId,
+				"START_IN_PROGRESS",
+				22,
+				"The owned Warm Browser launch transaction has not completed.",
+				"Wait briefly, then run warm-browser status --run-id ID.",
+				true,
+			)
+		}
+		return recoverLaunching(command, runId, paths, state, adapter)
+	}
+	const first = adapter.inspectProcess(state.process.pid)
+	if (first.kind === "unverifiable") inspectionFailure(command, runId)
+	if (first.kind === "absent") {
+		removeOwnedState(paths, state.sessionId)
 		return { kind: "recovered", stoppedOwnedProcess: false }
 	}
-	if (!identityMatches(state.process, observed, state.profileRoot, state.endpoint.port)) {
-		staticFailure(
-			command,
-			runId,
-			"PROCESS_IDENTITY_UNVERIFIED",
-			20,
-			"The stored browser process identity does not match the live process.",
-			"Inspect the live process and private Warm Browser state; do not signal the stored process id.",
+	if (
+		!identityMatches(
+			state.process,
+			first.process,
+			state.profileRoot,
+			state.endpoint.port,
+			state.launchMarker,
 		)
-	}
-
+	) identityFailure(command, runId)
 	if (state.phase === "starting") {
-		if (adapter.nowEpochMs() - state.createdAtEpochMs <= startingStateTimeoutMs) {
+		if (adapter.nowEpochMs() - state.createdAtEpochMs <= startingTimeoutMs) {
 			staticFailure(
 				command,
 				runId,
@@ -297,7 +405,22 @@ async function inspectSession(
 				true,
 			)
 		}
-		if (!(await adapter.terminateProcessGroup(observed))) {
+		const second = adapter.inspectProcess(state.process.pid)
+		if (second.kind === "unverifiable") inspectionFailure(command, runId)
+		if (second.kind === "absent") {
+			removeOwnedState(paths, state.sessionId)
+			return { kind: "recovered", stoppedOwnedProcess: false }
+		}
+		if (
+			!identityMatches(
+				state.process,
+				second.process,
+				state.profileRoot,
+				state.endpoint.port,
+				state.launchMarker,
+			)
+		) identityFailure(command, runId)
+		if (!(await adapter.terminateProcessGroup(second.process))) {
 			staticFailure(
 				command,
 				runId,
@@ -307,15 +430,15 @@ async function inspectSession(
 				"Inspect the owned process group and private state before retrying.",
 			)
 		}
-		removeOwnedState(paths)
+		removeOwnedState(paths, state.sessionId)
 		return { kind: "recovered", stoppedOwnedProcess: true }
 	}
-
 	const verification = await adapter.verifyEndpoint({
 		host: "127.0.0.1",
 		port: state.endpoint.port,
-		process: observed,
+		process: first.process,
 	})
+	if (verification.kind === "process_unverifiable") inspectionFailure(command, runId)
 	if (
 		verification.kind !== "verified" ||
 		verification.endpoint.browserVersion !== state.endpoint.browserVersion ||
@@ -333,7 +456,7 @@ async function inspectSession(
 	return { kind: "running", state }
 }
 
-function sessionData(state: BrowserSessionState, postcondition: "running" | "absent") {
+function sessionData(state: RunningBrowserSessionState, postcondition: "running" | "absent") {
 	return {
 		sessionId: state.sessionId,
 		startRunId: state.startRunId,
@@ -348,12 +471,27 @@ function recoveredData(trigger: SliceCommand, stoppedOwnedProcess: boolean) {
 	return { trigger, postcondition: "absent", removedState: true, stoppedOwnedProcess }
 }
 
+function recoveredStop(parsed: ParsedCommand, stoppedOwnedProcess: boolean): CliOutcome {
+	return success({
+		schemaVersion,
+		status: "ok",
+		command: "stop",
+		resultCode: "STALE_SESSION_RECOVERED",
+		runId: parsed.runId,
+		transactionState: "recovered",
+		retrySafe: true,
+		nextAction: "Run warm-browser start --run-id ID when another Browser Session is needed.",
+		data: recoveredData("stop", stoppedOwnedProcess),
+	})
+}
+
 async function start(
 	parsed: ParsedCommand,
 	paths: StatePaths,
 	adapter: WarmBrowserAdapter,
 ): Promise<CliOutcome> {
 	const inspection = await inspectSession("start", parsed.runId, paths, adapter)
+	const priorTx: TransactionState = inspection.kind === "recovered" ? "recovered" : "unchanged"
 	if (inspection.kind === "running") {
 		staticFailure(
 			"start",
@@ -364,9 +502,8 @@ async function start(
 			"Run warm-browser status --run-id ID or warm-browser stop --run-id ID.",
 		)
 	}
-	const recovered = inspection.kind === "recovered"
-	const chromeExecutable = adapter.chromeExecutable()
-	if (adapter.inspectChrome(chromeExecutable) !== "installed") {
+	const executable = adapter.chromeExecutable()
+	if (adapter.inspectChrome(executable) !== "installed") {
 		staticFailure(
 			"start",
 			parsed.runId,
@@ -374,6 +511,8 @@ async function start(
 			20,
 			"The fixed installed Google Chrome executable is unavailable.",
 			"Install Google Chrome at the fixed macOS application path before retrying.",
+			false,
+			priorTx,
 		)
 	}
 	const profileRoot = adapter.profileRoot()
@@ -385,10 +524,13 @@ async function start(
 			21,
 			"The Agent Chrome Profile ownership or permissions are unsafe.",
 			"Repair the Agent Chrome Profile ownership and private permissions before retrying.",
+			false,
+			priorTx,
 		)
 	}
-	const profileProcesses = adapter.findProfileProcesses(profileRoot)
-	if (profileProcesses.length > 1) {
+	const profile = adapter.findProfileProcesses(profileRoot)
+	if (profile.kind === "unverifiable") inspectionFailure("start", parsed.runId, priorTx)
+	if (profile.processes.length > 1) {
 		staticFailure(
 			"start",
 			parsed.runId,
@@ -396,9 +538,11 @@ async function start(
 			20,
 			"More than one live process claims the Agent Chrome Profile.",
 			"Inspect the profile process owners before retrying; Warm Browser will not signal them.",
+			false,
+			priorTx,
 		)
 	}
-	if (profileProcesses.length === 1) {
+	if (profile.processes.length === 1) {
 		staticFailure(
 			"start",
 			parsed.runId,
@@ -406,9 +550,10 @@ async function start(
 			21,
 			"An unowned process is using the Agent Chrome Profile.",
 			"Close the existing profile owner, then retry Warm Browser start.",
+			false,
+			priorTx,
 		)
 	}
-
 	const port = parsed.port ?? defaultPort
 	const portStatus = await adapter.inspectPort(port)
 	if (portStatus === "occupied") {
@@ -419,6 +564,8 @@ async function start(
 			20,
 			"The requested loopback CDP port is already occupied.",
 			"Inspect the port owner or choose one free start --port override.",
+			false,
+			priorTx,
 		)
 	}
 	if (portStatus === "unverifiable") {
@@ -429,6 +576,8 @@ async function start(
 			20,
 			"Warm Browser could not prove that the requested CDP port is free.",
 			"Inspect loopback port state before retrying.",
+			false,
+			priorTx,
 		)
 	}
 	if (!acquireSessionLock(paths)) {
@@ -440,39 +589,61 @@ async function start(
 			"Another start transaction acquired Browser Session ownership.",
 			"Wait briefly, then run warm-browser status --run-id ID.",
 			true,
+			priorTx,
 		)
 	}
 
+	const sessionId = adapter.createSessionId()
+	const launching: Extract<BrowserSessionState, { phase: "launching" }> = {
+		schemaVersion: 1,
+		phase: "launching",
+		sessionId,
+		startRunId: parsed.runId,
+		launchMarker: sessionId,
+		createdAtEpochMs: adapter.nowEpochMs(),
+		profileRoot,
+		endpoint: { host: "127.0.0.1", port },
+	}
+	let intentWritten = false
 	let spawned: BrowserProcessIdentity | undefined
 	try {
+		writeSessionState(paths, launching)
+		intentWritten = true
 		spawned = await adapter.spawnChrome({
-			executable: chromeExecutable,
+			executable,
 			profileRoot,
 			port,
+			launchMarker: launching.launchMarker,
 		})
-		const startingState: BrowserSessionState = {
-			schemaVersion: 1,
+		const starting: Extract<BrowserSessionState, { phase: "starting" }> = {
+			...launching,
 			phase: "starting",
-			sessionId: adapter.createSessionId(),
-			startRunId: parsed.runId,
-			createdAtEpochMs: adapter.nowEpochMs(),
-			profileRoot,
 			process: canonicalProcess(spawned),
-			endpoint: { host: "127.0.0.1", port },
 		}
-		writeSessionState(paths, startingState)
+		writeSessionState(paths, starting)
 		const verification = await adapter.verifyEndpoint({
 			host: "127.0.0.1",
 			port,
 			process: spawned,
 		})
+		if (verification.kind === "process_unverifiable") {
+			inspectionFailure("start", parsed.runId, priorTx)
+		}
 		if (verification.kind !== "verified") {
-			const mapped =
-				verification.kind === "controlled_page_unavailable"
-					? (["CONTROLLED_PAGE_UNAVAILABLE", "The verified CDP endpoint exposes no Controlled Page."] as const)
-					: verification.kind === "controlled_page_ambiguous"
-						? (["CONTROLLED_PAGE_AMBIGUOUS", "The verified CDP endpoint exposes more than one page."] as const)
-						: (["CDP_IDENTITY_UNVERIFIED", "The launched Chrome CDP identity could not be verified."] as const)
+			const mapped = verification.kind === "controlled_page_unavailable"
+				? ([
+					"CONTROLLED_PAGE_UNAVAILABLE",
+					"The verified CDP endpoint exposes no Controlled Page.",
+				] as const)
+				: verification.kind === "controlled_page_ambiguous"
+				? ([
+					"CONTROLLED_PAGE_AMBIGUOUS",
+					"The verified CDP endpoint exposes more than one page.",
+				] as const)
+				: ([
+					"CDP_IDENTITY_UNVERIFIED",
+					"The launched Chrome CDP identity could not be verified.",
+				] as const)
 			if (!(await adapter.terminateProcessGroup(spawned))) {
 				staticFailure(
 					"start",
@@ -483,11 +654,11 @@ async function start(
 					"Inspect the owned process group and private state before retrying.",
 				)
 			}
-			removeOwnedState(paths)
+			removeOwnedState(paths, sessionId)
 			staticFailure(
 				"start",
 				parsed.runId,
-				mapped[0],
+				mapped[0] as ResultCode,
 				20,
 				mapped[1],
 				"Inspect installed Chrome and the explicit CDP endpoint before retrying.",
@@ -495,7 +666,7 @@ async function start(
 				"rolled_back",
 			)
 		}
-		const state = runningState(startingState, verification.endpoint)
+		const state = runningState(starting, verification.endpoint)
 		writeSessionState(paths, state)
 		return success({
 			schemaVersion,
@@ -508,17 +679,29 @@ async function start(
 			nextAction: "Run warm-browser status --run-id ID to inspect the Browser Session.",
 			data: {
 				...sessionData(state, "running"),
-				recoveredFrom: recovered ? "stale_session" : null,
+				recoveredFrom: inspection.kind === "recovered" ? "stale_session" : null,
 			},
 		})
 	} catch (error) {
 		if (error instanceof WarmBrowserFailure) throw error
-		const cleanupUnverified = error instanceof SpawnCleanupUnverifiedError
+		if (error instanceof SpawnCleanupUnverifiedError) {
+			staticFailure(
+				"start",
+				parsed.runId,
+				"UNEXPECTED_FAILURE",
+				1,
+				"Warm Browser could not verify cleanup of its launched browser process group.",
+				"Inspect the durable launch intent and marker-matched processes before retrying.",
+				false,
+				priorTx,
+			)
+		}
 		if (spawned !== undefined) {
-			const terminated = await adapter.terminateProcessGroup(spawned)
-			if (terminated) removeOwnedState(paths)
-		} else if (!(error instanceof SpawnCleanupUnverifiedError)) {
-			removeOwnedState(paths)
+			if (await adapter.terminateProcessGroup(spawned)) removeOwnedState(paths, sessionId)
+		} else if (intentWritten) {
+			removeOwnedState(paths, sessionId)
+		} else {
+			removeNewEmptyLock(paths)
 		}
 		staticFailure(
 			"start",
@@ -528,7 +711,7 @@ async function start(
 			"Warm Browser start failed unexpectedly.",
 			"Inspect private state and the owned process group before retrying.",
 			false,
-			spawned === undefined && !cleanupUnverified ? "rolled_back" : "unchanged",
+			"rolled_back",
 		)
 	}
 }
@@ -548,7 +731,8 @@ async function status(
 			runId: parsed.runId,
 			transactionState: "unchanged",
 			retrySafe: true,
-			nextAction: "Continue with an implemented Agent Browser command or run warm-browser stop --run-id ID.",
+			nextAction:
+				"Continue with an implemented Agent Browser command or run warm-browser stop --run-id ID.",
 			data: sessionData(inspection.state!, "running"),
 		})
 	}
@@ -585,17 +769,7 @@ async function stop(
 ): Promise<CliOutcome> {
 	const inspection = await inspectSession("stop", parsed.runId, paths, adapter)
 	if (inspection.kind === "recovered") {
-		return success({
-			schemaVersion,
-			status: "ok",
-			command: "stop",
-			resultCode: "STALE_SESSION_RECOVERED",
-			runId: parsed.runId,
-			transactionState: "recovered",
-			retrySafe: true,
-			nextAction: "Run warm-browser start --run-id ID when another Browser Session is needed.",
-			data: recoveredData("stop", inspection.stoppedOwnedProcess ?? false),
-		})
+		return recoveredStop(parsed, inspection.stoppedOwnedProcess ?? false)
 	}
 	if (inspection.kind === "absent") {
 		return success({
@@ -612,21 +786,21 @@ async function stop(
 	}
 	const state = inspection.state!
 	const observed = adapter.inspectProcess(state.process.pid)
-	if (
-		observed === undefined ||
-		!identityMatches(state.process, observed, state.profileRoot, state.endpoint.port)
-	) {
-		staticFailure(
-			"stop",
-			parsed.runId,
-			"PROCESS_IDENTITY_UNVERIFIED",
-
-			20,
-			"The owned browser process identity changed before stop.",
-			"Inspect the live process and private state; Warm Browser did not signal it.",
-		)
+	if (observed.kind === "unverifiable") inspectionFailure("stop", parsed.runId)
+	if (observed.kind === "absent") {
+		removeOwnedState(paths, state.sessionId)
+		return recoveredStop(parsed, false)
 	}
-	if (!(await adapter.terminateProcessGroup(observed))) {
+	if (
+		!identityMatches(
+			state.process,
+			observed.process,
+			state.profileRoot,
+			state.endpoint.port,
+			state.launchMarker,
+		)
+	) identityFailure("stop", parsed.runId)
+	if (!(await adapter.terminateProcessGroup(observed.process))) {
 		staticFailure(
 			"stop",
 			parsed.runId,
@@ -636,7 +810,7 @@ async function stop(
 			"Inspect the owned process group and private state before retrying.",
 		)
 	}
-	removeOwnedState(paths)
+	removeOwnedState(paths, state.sessionId)
 	return success({
 		schemaVersion,
 		status: "ok",
@@ -654,10 +828,7 @@ async function stop(
 	})
 }
 
-async function execute(
-	parsed: ParsedCommand,
-	adapter: WarmBrowserAdapter,
-): Promise<CliOutcome> {
+async function execute(parsed: ParsedCommand, adapter: WarmBrowserAdapter): Promise<CliOutcome> {
 	if (parsed.command === "help") {
 		return success({
 			schemaVersion,
@@ -670,16 +841,20 @@ async function execute(
 			nextAction: "Run warm-browser start --run-id ID to create the Browser Session.",
 			data: {
 				usage: "warm-browser <help|start|status|stop> [--run-id ID] [--port NUMBER]",
-				commands: [
-					{ name: "help", sideEffects: "none" },
-					{ name: "start", sideEffects: "starts one owned browser process group" },
-					{ name: "status", sideEffects: "may remove proved stale private state" },
-					{ name: "stop", sideEffects: "stops one verified owned browser process group" },
-				],
+				commands: commandVocabulary.map(({ name, sideEffects }) => ({ name, sideEffects })),
 			},
 		})
 	}
-	requireMacOs(parsed.command, parsed.runId, adapter)
+	if (adapter.platform() !== "darwin") {
+		staticFailure(
+			parsed.command,
+			parsed.runId,
+			"PLATFORM_UNSUPPORTED",
+			21,
+			"Warm Browser supports macOS only.",
+			"Run Warm Browser on a supported macOS host.",
+		)
+	}
 	let paths: StatePaths
 	try {
 		paths = resolveStatePaths()
@@ -724,7 +899,6 @@ export async function runWarmBrowserCli(
 					resultCode: "STATE_UNSAFE",
 					exitCode: 20,
 					runId,
-					transactionState: "unchanged",
 					retrySafe: false,
 					nextAction: "Repair the private XDG state ownership and permissions before retrying.",
 					message: "Warm Browser private state is unsafe or unreadable.",
@@ -737,7 +911,6 @@ export async function runWarmBrowserCli(
 				resultCode: "UNEXPECTED_FAILURE",
 				exitCode: 1,
 				runId,
-				transactionState: "unchanged",
 				retrySafe: false,
 				nextAction: "Inspect private Warm Browser state before retrying.",
 				message: "Warm Browser failed unexpectedly.",

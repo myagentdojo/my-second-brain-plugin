@@ -21,15 +21,23 @@ Page. This is the implementation contract only: Profile Cutover has not
 happened, so this ticket does not claim exclusive profile ownership or prove a
 real-profile launch.
 
+Before spawn, Warm Browser durably records a unique launch marker and passes it
+as `--agent-browser-launch-marker=...`. Recovery requires an exact marker,
+profile, port, executable, leader PID, and process-group match, then repeats the
+marker query immediately before signalling. Fake-process crash proofs cover
+that ownership algorithm. Whether installed Google Chrome retains this unknown
+marker flag in its process-table command line still requires the separately
+acknowledged real-Chrome qualification; this ticket does not claim that proof.
+
 Private one-owner state lives at
 `$XDG_STATE_HOME/my-second-brain/warm-browser/` (falling back to
 `$HOME/.local/state/my-second-brain/warm-browser/`). Directories and the durable
-lock are `0700`; the atomic session document is `0600`. Mismatched live process
+lock are exactly `0700`; the receipt inside that lock is exactly `0600`.
+Mismatched live process
 identity or unverified CDP identity is preserved for inspection and never
 signalled. Proved dead state and an expired exact owned starting process are
-cleaned with a typed recovery result. A lock with no process receipt is never
-auto-recovered, even after expiry, because it may represent the crash window
-after spawn; it remains intact for inspection.
+cleaned with a typed recovery result. A lock with no durable launch intent is
+never auto-recovered, even after expiry; it remains intact for inspection.
 
 Results are one schema-versioned JSON envelope. Success writes one stdout line
 and no stderr; refusal or failure writes no stdout and one redacted stderr line.
@@ -43,7 +51,8 @@ The closed transaction vocabulary is `unchanged`, `started`, `stopped`,
 `SESSION_STOPPED`, `STALE_SESSION_RECOVERED`, `USAGE_ERROR`,
 `PLATFORM_UNSUPPORTED`, `STATE_UNSAFE`, `CHROME_UNAVAILABLE`,
 `PROFILE_UNSAFE`, `PROFILE_PROCESS_AMBIGUOUS`, `PROFILE_IN_USE`,
-`PROCESS_IDENTITY_UNVERIFIED`, `CDP_IDENTITY_UNVERIFIED`,
+`PROCESS_INSPECTION_UNVERIFIED`, `PROCESS_IDENTITY_UNVERIFIED`,
+`LAUNCH_PROCESS_AMBIGUOUS`, `CDP_IDENTITY_UNVERIFIED`,
 `CONTROLLED_PAGE_UNAVAILABLE`, `CONTROLLED_PAGE_AMBIGUOUS`,
 `SESSION_ALREADY_RUNNING`, `PORT_OCCUPIED`, `PORT_UNVERIFIABLE`,
 `START_IN_PROGRESS`, and `UNEXPECTED_FAILURE`.
