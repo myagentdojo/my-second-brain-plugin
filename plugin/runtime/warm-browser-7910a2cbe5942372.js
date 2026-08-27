@@ -1298,7 +1298,7 @@ function parseArguments(arguments_, adapter) {
   const command = first === undefined || first === "--help" || first === "-h" ? "help" : commandNames.has(first) ? first : "unknown";
   if (command === "unknown") {
     if (first !== undefined && selectorFlags.has(first)) {
-      selectorRefusal(generatedRunId, "help", first);
+      selectorRefusal(generatedRunId, command, first);
     }
     usage(generatedRunId, command, "Unknown Warm Browser command.");
   }

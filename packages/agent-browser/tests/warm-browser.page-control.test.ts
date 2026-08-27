@@ -1046,3 +1046,21 @@ test("an element whose node identity a receipt could not carry is left out", asy
 	expect(clicked.stderr).toBe("")
 	expect(clicked.exitCode).toBe(0)
 })
+
+test("a selector where a command belongs names no command it did not run", async () => {
+	const probe = productionCliProbe({ processTable: verifiedReading(systemRows) })
+
+	const result = await runProductionCliAsync(probe, ["--selector", "#sign-in", "--run-id", "no-command"])
+
+	expectError(result, 21, {
+		schemaVersion: 1,
+		status: "error",
+		command: "unknown",
+		resultCode: "SELECTOR_UNSUPPORTED",
+		runId: "no-command",
+		transactionState: "unchanged",
+		retrySafe: false,
+		nextAction: "Run warm-browser snapshot --run-id ID and act through the references it issues.",
+		message: "Warm Browser acts through Snapshot References, not the --selector selector.",
+	})
+})

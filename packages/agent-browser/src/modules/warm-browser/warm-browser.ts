@@ -166,7 +166,7 @@ function usage(runId: string, command: CliCommand | "unknown", message: string):
  * one, so the caller is told that rather than being told its argument was
  * unrecognised.
  */
-function selectorRefusal(runId: string, command: CliCommand, flag: string): never {
+function selectorRefusal(runId: string, command: CliCommand | "unknown", flag: string): never {
 	raise({
 		command,
 		resultCode: "SELECTOR_UNSUPPORTED",
@@ -280,8 +280,11 @@ function parseArguments(arguments_: readonly string[], adapter: WarmBrowserAdapt
 			? (first as CliCommand)
 			: "unknown"
 	if (command === "unknown") {
+		// A selector in the command position is still a selector, and this caller
+		// named no command at all, so the refusal says so rather than answering on
+		// behalf of a command it never ran.
 		if (first !== undefined && selectorFlags.has(first)) {
-			selectorRefusal(generatedRunId, "help", first)
+			selectorRefusal(generatedRunId, command, first)
 		}
 		usage(generatedRunId, command, "Unknown Warm Browser command.")
 	}
