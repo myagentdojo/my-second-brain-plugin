@@ -21,13 +21,22 @@ test("Agent Browser lifecycle source follows the repository discovery contract",
 		"packages/agent-browser/scripts/prove-cdp-compatibility.ts",
 		"packages/agent-browser/scripts/prove-cdp-compatibility.test.ts",
 		"packages/agent-browser/src/main.ts",
+		"packages/agent-browser/src/modules/private-delivery/README.md",
+		"packages/agent-browser/src/modules/warm-browser/README.md",
 		"packages/agent-browser/src/modules/warm-browser/contract.ts",
+		"packages/agent-browser/src/modules/warm-browser/host-effects.ts",
 		"packages/agent-browser/src/modules/warm-browser/process-table.ts",
 		"packages/agent-browser/src/modules/warm-browser/production-adapter.ts",
 		"packages/agent-browser/src/modules/warm-browser/state.ts",
 		"packages/agent-browser/src/modules/warm-browser/warm-browser.ts",
+		"packages/agent-browser/tests/fixtures/host-effects-preload.ts",
+		"packages/agent-browser/tests/fixtures/production-cli-harness.ts",
+		"packages/agent-browser/tests/fixtures/warm-browser-driver.ts",
+		"packages/agent-browser/tests/warm-browser.production-launch.test.ts",
 		"packages/agent-browser/tests/warm-browser.production-process-table.test.ts",
 		"packages/agent-browser/tests/warm-browser.public-process.test.ts",
+		"packages/agent-browser/tests/warm-browser.state.test.ts",
+		"plugin/bin/warm-browser",
 		"scripts/agent-browser.test.ts",
 	] as const
 
@@ -92,6 +101,7 @@ test("Agent Browser has the approved lifecycle workspace and generated activatio
 	expect(warmBrowser).toContain("SHA-256 metadata")
 	expect(warmBrowser).toContain("refuses arbitrary output paths")
 	expect(warmBrowser).toContain("production Adapter is fixed")
+	expect(warmBrowser).toContain("no factory, no injected dependency")
 	const privateDelivery = readFileSync(join(moduleRoot, "private-delivery", "README.md"), "utf8")
 	expect(privateDelivery).toContain("exactly two future Agent Browser Modules")
 	expect(privateDelivery).toContain("exact-origin unique-match and revalidation")

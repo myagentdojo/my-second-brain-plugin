@@ -33,6 +33,10 @@ const defaultPort = 9242
 const startingTimeoutMs = 15_000
 const runIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
 const commandNames = new Set<string>(commandVocabulary.map(({ name }) => name))
+/** Generated from the single Command Vocabulary owner; never restated. */
+const usageLine = `warm-browser <${
+	commandVocabulary.map(({ name }) => name).join("|")
+}> [--run-id ID] [--port NUMBER]`
 
 interface ParsedCommand {
 	readonly command: CliCommand
@@ -213,6 +217,33 @@ function launchCleanupUnverified(runId: string, transactionState: TransactionSta
 	)
 }
 
+/**
+ * Removes the durable receipt for a process group Warm Browser has just proved
+ * stopped. A cleanup failure keeps the retained repairable state and reports
+ * the stop that already happened; it never claims the transaction unchanged.
+ */
+function removeStateAfterStop(
+	command: SliceCommand,
+	runId: string,
+	paths: StatePaths,
+	sessionId: string,
+): void {
+	try {
+		removeOwnedState(paths, sessionId)
+	} catch {
+		staticFailure(
+			command,
+			runId,
+			"STATE_UNSAFE",
+			20,
+			"Warm Browser stopped the owned browser process group but could not remove its private session state.",
+			"Repair the retained private Warm Browser session state; the owned browser process group is already stopped.",
+			false,
+			"stopped",
+		)
+	}
+}
+
 function hasLaunchContract(
 	observed: BrowserProcessIdentity,
 	executable: string,
@@ -225,7 +256,8 @@ function hasLaunchContract(
 	return (
 		observed.processGroupId === observed.pid &&
 		observed.executable === executable &&
-		observed.commandLine.startsWith(executable) &&
+		(observed.commandLine === executable ||
+			observed.commandLine.startsWith(`${executable} `)) &&
 		(hasArgument(`--user-data-dir=${profileRoot}`) ||
 			hasArgument(`--user-data-dir="${profileRoot}"`)) &&
 		hasArgument("--remote-debugging-address=127.0.0.1") &&
@@ -234,6 +266,11 @@ function hasLaunchContract(
 	)
 }
 
+/**
+ * Proves the observed process is the exact saved one. The whole command line
+ * must match the saved expectation, so an unrecognised argument on a reused
+ * process id is never judged owned, never signalled, and never cleaned up.
+ */
 function identityMatches(
 	expected: BrowserProcessIdentity,
 	observed: BrowserProcessIdentity,
@@ -245,6 +282,8 @@ function identityMatches(
 		observed.pid === expected.pid &&
 		observed.processGroupId === expected.processGroupId &&
 		observed.startedAtToken === expected.startedAtToken &&
+		observed.executable === expected.executable &&
+		observed.commandLine === expected.commandLine &&
 		hasLaunchContract(observed, expected.executable, profileRoot, port, marker)
 	)
 }
@@ -333,7 +372,7 @@ async function recoverLaunching(
 			"Inspect the owned process group and private state before retrying.",
 		)
 	}
-	removeOwnedState(paths, state.sessionId)
+	removeStateAfterStop(command, runId, paths, state.sessionId)
 	return { kind: "recovered", stoppedOwnedProcess: true }
 }
 
@@ -443,7 +482,7 @@ async function inspectSession(
 				"Inspect the owned process group and private state before retrying.",
 			)
 		}
-		removeOwnedState(paths, state.sessionId)
+		removeStateAfterStop(command, runId, paths, state.sessionId)
 		return { kind: "recovered", stoppedOwnedProcess: true }
 	}
 	const verification = await adapter.verifyEndpoint({
@@ -817,7 +856,7 @@ async function stop(
 			"Inspect the owned process group and private state before retrying.",
 		)
 	}
-	removeOwnedState(paths, state.sessionId)
+	removeStateAfterStop("stop", parsed.runId, paths, state.sessionId)
 	return success({
 		schemaVersion,
 		status: "ok",
@@ -847,7 +886,7 @@ async function execute(parsed: ParsedCommand, adapter: WarmBrowserAdapter): Prom
 			retrySafe: true,
 			nextAction: "Run warm-browser start --run-id ID to create the Browser Session.",
 			data: {
-				usage: "warm-browser <help|start|status|stop> [--run-id ID] [--port NUMBER]",
+				usage: usageLine,
 				commands: commandVocabulary.map(({ name, sideEffects }) => ({ name, sideEffects })),
 			},
 		})

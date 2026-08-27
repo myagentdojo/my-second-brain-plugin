@@ -23,14 +23,21 @@ real-profile launch.
 
 Before spawn, Warm Browser durably records a unique launch marker and passes it
 as `--agent-browser-launch-marker=...`. Recovery requires an exact marker,
-profile, port, executable, leader PID, and process-group match, then repeats the
-marker query immediately before signalling. Fake-process crash proofs cover
+profile, port, executable, leader PID, process-group, and whole command-line
+match against the saved receipt, then repeats the
+marker query immediately before signalling. A live process whose command line
+gained, lost, or changed one argument is never judged owned, so it is never
+signalled and its state is never cleaned. Fake-process crash proofs cover
 that ownership algorithm. Whether installed Google Chrome retains this unknown
 marker flag in its process-table command line still requires the separately
 acknowledged real-Chrome qualification; this ticket does not claim that proof.
 
-Every process decision reads one local process table through a single owner,
-`src/modules/warm-browser/process-table.ts`. That observation is all or nothing.
+Every process decision reads one local process table through a single reader,
+`src/modules/warm-browser/host-effects.ts`, and interprets it through a single
+owner, `src/modules/warm-browser/process-table.ts`. A row's executable is
+classified only at a whole-token boundary, so a neighbouring path that merely
+begins with the installed Chrome path never classifies as installed Chrome.
+That observation is all or nothing.
 A failed or signalled read, empty or truncated output, any nonempty row that does
 not parse, any row carrying a control character, any process identity outside the
 canonical safe-integer range, and any repeated process identity make the whole
@@ -43,6 +50,11 @@ A launched process group that Warm Browser cannot prove it stopped is never
 reported as a rollback. That failure keeps the durable intent, keeps the live
 process, and returns the unverified-cleanup result so recovery can inspect the
 exact marker.
+
+A proved stop whose durable cleanup then fails is never reported as unchanged.
+The result records `stopped`, names the retained repairable state, and asks for
+its repair; the retained receipt fails the next run closed with `STATE_UNSAFE`
+and no further signal.
 
 Private one-owner state lives at
 `$XDG_STATE_HOME/my-second-brain/warm-browser/` (falling back to
@@ -94,6 +106,12 @@ filter and requires the same environment acknowledgment:
 AGENT_BROWSER_CDP_FIXTURE_ACKNOWLEDGED=1 bun test packages/agent-browser/scripts/prove-cdp-compatibility.test.ts --test-name-pattern close-before-connect
 ```
 
-Lifecycle contract tests use the private fake driver under `tests/fixtures`.
-The fixture environment is not read by the production entry or exported as a
-public adapter.
+The production Adapter is one fixed value. It takes no injected dependency and
+exports no factory, so no test can replace it. Lifecycle policy tests use the
+private fake driver under `tests/fixtures`. Production tests run the real entry
+`src/main.ts` and substitute only the Module's private `host-effects` seam
+through a test preload, so the production argument list, process-table
+observation, private state rules, Agent Chrome Profile check, and result
+vocabulary all stay real while nothing is launched, signalled, or dialled. The
+fixture environment is not read by the production entry or exported as a public
+adapter.

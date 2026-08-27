@@ -7,7 +7,8 @@
   Session, Controlled Page, Snapshot Generation, Snapshot Reference validity,
   and Screenshot ownership remain internal to Warm Browser.
 - Keep the production Adapter fixed and every mock internal. Do not introduce
-  a public or general seam.
+  a public or general seam, and do not give production code a test parameter;
+  substitute a private internal seam from a test preload instead.
 - Use the canonical terms in `CONTEXT.md` across the skill, package, CLI, tests,
   and Formation Packet. Update the glossary and `CONTEXT-MAP.md` together when
   domain language changes.

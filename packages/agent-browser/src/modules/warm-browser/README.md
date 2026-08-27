@@ -8,14 +8,19 @@ commands. The remaining accepted product commands are not callable yet.
 Browser Session, Controlled Page, Snapshot Generation, Snapshot Reference
 validity, and Screenshot lifecycle remain internal to this Module.
 
-The production Adapter is fixed. Tests inject the internal Adapter through a
-private test-only driver; no environment variable selects a fake in production.
+The production Adapter is fixed: one value, no factory, no injected dependency.
+Tests inject the internal Adapter through a private test-only driver, or
+substitute the Module's private `host-effects` seam through a test preload; no
+environment variable selects a fake in production.
 The lifecycle contract fails closed on unsupported platforms, unsafe profile or
 state, ambiguous ownership, occupied or unverifiable ports, process mismatch,
-and CDP or Controlled Page identity failure. One Module file owns the local
+and CDP or Controlled Page identity failure. Ownership requires the whole
+observed command line to equal the saved one, so an unrecognised argument is
+never signalled or cleaned. One Module file owns the local
 process-table observation, and any unparsed, forged, repeated, or otherwise
 ambiguous row makes that whole observation unverifiable instead of proved
-absence.
+absence. A proved stop whose durable cleanup fails reports the stop it
+performed and keeps the retained state repairable.
 
 A Screenshot is a private session-owned PNG of the Controlled Page, distinct
 from the structured interaction snapshot. Warm Browser returns only its owned

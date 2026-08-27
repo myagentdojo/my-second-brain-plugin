@@ -3,9 +3,9 @@
 runtime_inventory_select_bundle() {
 	case "$1" in
 	'agent-browser')
-		RUNTIME_BUNDLE_PATH='runtime/warm-browser-cba061ff8fcb776d.js'
-		RUNTIME_BUNDLE_BYTES='43468'
-		RUNTIME_BUNDLE_SHA256='cba061ff8fcb776d451263167c247887f1f4dcda085b62976995800855df1ef7'
+		RUNTIME_BUNDLE_PATH='runtime/warm-browser-92b85990ea31cf9f.js'
+		RUNTIME_BUNDLE_BYTES='44639'
+		RUNTIME_BUNDLE_SHA256='92b85990ea31cf9f8d09110352d5be3c984daa23bebaa82d544db9862e6d4435'
 		;;
 	'frontier-runner')
 		RUNTIME_BUNDLE_PATH='runtime/frontier-runner-659b5dedecb84722.js'

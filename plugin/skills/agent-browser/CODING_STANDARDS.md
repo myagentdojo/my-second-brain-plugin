@@ -1,8 +1,9 @@
 # Agent Browser Coding Standards
 
-Repository-wide [`CODING_STANDARDS.md`](../../../CODING_STANDARDS.md) governs
-first. These skill-local standards preserve only the accepted Agent Browser
-idioms witnessed in the Agent Plugin Kit maintenance command contract.
+Repository-wide [`AGENTS.md`](../../../AGENTS.md) and the governing coding
+standards it routes to come first. These skill-local standards preserve only
+the accepted Agent Browser idioms witnessed in the Agent Plugin Kit maintenance
+command contract.
 
 ## One vocabulary owner
 
@@ -34,7 +35,8 @@ idioms witnessed in the Agent Plugin Kit maintenance command contract.
 - Keep the production Adapter fixed. Test doubles may replace browser,
   credential-wrapper, clock, process, or filesystem effects only inside tests.
 - Do not publish a general adapter or dependency-injection surface merely to
-  make tests convenient.
+  make tests convenient. Prefer a private internal seam a test preload
+  substitutes, so the production interface never grows a test parameter.
 - Use real installed Chrome over an explicit CDP endpoint for bounded browser
   compatibility proof. Use local fixtures for deterministic interaction and
   Screenshot proof.

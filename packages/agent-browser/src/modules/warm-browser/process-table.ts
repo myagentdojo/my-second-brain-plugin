@@ -1,5 +1,3 @@
-import { spawnSync } from "node:child_process"
-
 import type { BrowserProcessIdentity, ProcessListInspection } from "./contract"
 
 /**
@@ -29,24 +27,16 @@ function safeIdentifier(digits: string): number | undefined {
 	return Number.isSafeInteger(value) ? value : undefined
 }
 
-function executableOf(commandLine: string, knownExecutable: string): string {
+/**
+ * Classifies a row's executable at a whole-token boundary. A known executable
+ * claims the row only when the row is exactly that path or that path followed
+ * by an argument separator, so a neighbouring path that merely begins with it,
+ * such as one suffixed `-evil`, never classifies as the known executable.
+ */
+function classifyExecutable(commandLine: string, knownExecutable: string): string {
 	return commandLine === knownExecutable || commandLine.startsWith(`${knownExecutable} `)
 		? knownExecutable
 		: commandLine.split(" ")[0]!
-}
-
-/** Reads the local process table without interpreting its bytes. */
-export function readHostProcessTable(): ProcessTableReading {
-	const result = spawnSync("/bin/ps", ["-axo", "pid=,pgid=,lstart=,command="], {
-		encoding: "utf8",
-		stdio: ["ignore", "pipe", "ignore"],
-	})
-	return {
-		status: result.status,
-		signal: result.signal,
-		failed: result.error !== undefined,
-		stdout: typeof result.stdout === "string" ? result.stdout : null,
-	}
 }
 
 /**
@@ -81,7 +71,7 @@ export function observeProcessTable(
 			pid,
 			processGroupId,
 			startedAtToken: match[3]!,
-			executable: executableOf(commandLine, knownExecutable),
+			executable: classifyExecutable(commandLine, knownExecutable),
 			commandLine,
 		})
 	}
