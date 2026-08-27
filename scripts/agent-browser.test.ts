@@ -156,6 +156,9 @@ test("Agent Browser has the approved lifecycle workspace and generated activatio
 	expect(packageReadme).toContain("## Deterministic Controlled Page proof")
 	expect(packageReadme).toMatch(/`e<ordinal>@<generation>`/)
 	expect(packageReadme).toContain("CONTROLLED_PAGE_REPLACED")
+	expect(packageReadme).toMatch(
+		/`SNAPSHOT_ABSENT`,\s+`ELEMENT_NOT_ACTIONABLE`,\s+`SNAPSHOT_REFERENCE_INVALID`/,
+	)
 	expect(packageReadme).toContain("independent CDP target reader")
 	expect(packageReadme).toContain("`invalidated`")
 	expect(packageReadme).toMatch(/A navigation succeeds only on the document it asked for/)
