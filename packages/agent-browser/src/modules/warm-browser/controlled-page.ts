@@ -368,6 +368,26 @@ async function typeIntoNode(
 }
 
 /**
+ * What the page identity after an act means for the act that just happened.
+ *
+ * An unchanged page is the ordinary answer. A page that moved is the act working
+ * when the act was a click on something that navigates, and in every other case
+ * it is another document arriving, which is never reported as this act
+ * succeeding.
+ */
+function outcomeAfterAct(input: {
+	readonly action: ControlledPageAction
+	readonly description: DomNodeDescription
+	readonly atDispatch: ControlledPageBasis
+	readonly after: ControlledPageBasis
+}): PageActionOutcome {
+	if (sameBasis(input.after, input.atDispatch)) return { kind: "acted", basis: input.after }
+	return input.action.kind === "click" && mayNavigate(input.description)
+		? { kind: "acted", basis: input.after }
+		: { kind: "superseded" }
+}
+
+/**
  * Acts on one element of the Controlled Page, having proved twice over that it
  * is acting on what the caller named: the page identity still equals the one
  * the reference was issued against, and the live element is still described the
@@ -412,13 +432,7 @@ export async function actOnControlledPage(input: {
 			if (step !== "acted") return { kind: step }
 			const after = await readBasis(channel, input.targetId)
 			if (after === undefined) return { kind: "unverified" }
-			if (sameBasis(after, atDispatch)) return { kind: "acted", basis: after }
-			// The page moved. That is the act working when the act was a click on
-			// something that navigates, and it is another document arriving in every
-			// other case, which is never reported as this act succeeding.
-			return input.action.kind === "click" && mayNavigate(description)
-				? { kind: "acted", basis: after }
-				: { kind: "superseded" }
+			return outcomeAfterAct({ action: input.action, description, atDispatch, after })
 		},
 	)
 }

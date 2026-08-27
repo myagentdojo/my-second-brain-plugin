@@ -446,6 +446,11 @@ async function typeIntoNode(channel, backendNodeId, value) {
     return "element_absent";
   return (await channel.call("Input.insertText", { text: value })).ok ? "acted" : "unverified";
 }
+function outcomeAfterAct(input) {
+  if (sameBasis(input.after, input.atDispatch))
+    return { kind: "acted", basis: input.after };
+  return input.action.kind === "click" && mayNavigate(input.description) ? { kind: "acted", basis: input.after } : { kind: "superseded" };
+}
 async function actOnControlledPage(input) {
   return await withControlledPage(input.port, input.targetId, { kind: "unverified" }, async (channel) => {
     for (const method of ["Page.enable", "DOM.enable"]) {
@@ -479,9 +484,7 @@ async function actOnControlledPage(input) {
     const after = await readBasis(channel, input.targetId);
     if (after === undefined)
       return { kind: "unverified" };
-    if (sameBasis(after, atDispatch))
-      return { kind: "acted", basis: after };
-    return input.action.kind === "click" && mayNavigate(description) ? { kind: "acted", basis: after } : { kind: "superseded" };
+    return outcomeAfterAct({ action: input.action, description, atDispatch, after });
   });
 }
 

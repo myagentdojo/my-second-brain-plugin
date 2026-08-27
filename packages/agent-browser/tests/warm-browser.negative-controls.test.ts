@@ -338,8 +338,8 @@ test("removing the post-dispatch binding reports a stolen document as a click th
 		await scenario(mutatedPackage({
 			file: "src/modules/warm-browser/controlled-page.ts",
 			find:
-				'\t\t\treturn input.action.kind === "click" && mayNavigate(description)\n\t\t\t\t? { kind: "acted", basis: after }\n\t\t\t\t: { kind: "superseded" }',
-			replace: '\t\t\treturn { kind: "acted", basis: after }',
+				'\treturn input.action.kind === "click" && mayNavigate(input.description)\n\t\t? { kind: "acted", basis: input.after }\n\t\t: { kind: "superseded" }',
+			replace: '\treturn { kind: "acted", basis: input.after }',
 		})),
 	).toEqual({ resultCode: "ELEMENT_CLICKED", exitCode: 0, landed: "https://fixture.test/stolen" })
 })
