@@ -251,11 +251,20 @@ export async function openControlledPage(input: {
 			if (!(await channel.call("Page.enable", {})).ok) return { kind: "unverified" }
 			const navigation = await channel.call("Page.navigate", { url: input.url })
 			if (!navigation.ok) return { kind: "unverified" }
-			if (nonEmptyText(record(navigation.result)?.errorText) !== undefined) {
-				return { kind: "refused" }
-			}
+			const accepted = record(navigation.result)
+			if (nonEmptyText(accepted?.errorText) !== undefined) return { kind: "refused" }
+			// The browser names the frame and the document load it started. Success
+			// is bound to that identity and to nothing else, so a navigation that
+			// another document wins in the meantime is never reported as this one:
+			// the page would be somewhere the caller never asked to go.
+			const frameId = nonEmptyText(accepted?.frameId)
+			const loaderId = nonEmptyText(accepted?.loaderId)
+			if (frameId === undefined || loaderId === undefined) return { kind: "unverified" }
 			const basis = await readBasis(channel, input.targetId)
-			return basis === undefined ? { kind: "unverified" } : { kind: "navigated", basis }
+			if (basis === undefined) return { kind: "unverified" }
+			return basis.frameId === frameId && basis.loaderId === loaderId
+				? { kind: "navigated", basis }
+				: { kind: "superseded" }
 		},
 	)
 }
@@ -300,6 +309,27 @@ export type ControlledPageAction =
 
 /** What one act on one element did, before the page identity is read again. */
 type ActionStep = "acted" | "element_absent" | "unverified"
+
+/**
+ * Whether a navigation this element caused is one the caller asked for.
+ *
+ * Clicking a link or a submit control navigates the page, and that is the act
+ * working. Nothing else on a page navigates it by being clicked, and typing
+ * never does, so a page that moved after any other act moved for a reason this
+ * command cannot account for. The rule is deliberately narrow: an element whose
+ * navigation cannot be explained is refused, and a refusal is recoverable.
+ */
+function mayNavigate(description: DomNodeDescription): boolean {
+	const attributes = description.attributes
+	const nodeName = description.nodeName.toUpperCase()
+	const type = (attributes.type ?? "").trim().toLowerCase()
+	if ((nodeName === "A" || nodeName === "AREA") && nonEmptyText(attributes.href) !== undefined) {
+		return true
+	}
+	if (type === "submit" || type === "image") return true
+	// A button with no type is a submit button, which is what HTML says it is.
+	return nodeName === "BUTTON" && attributes.type === undefined
+}
 
 /** Clicks the centre of the element's box, or says why it could not. */
 async function clickNode(channel: CdpChannel, backendNodeId: number): Promise<ActionStep> {
@@ -370,12 +400,25 @@ export async function actOnControlledPage(input: {
 			if (input.action.kind === "fill" && isCredentialField(description)) {
 				return { kind: "credential_field" }
 			}
+			// The page identity is proved once more immediately before the act. The
+			// reads above take time, and a navigation that landed during them would
+			// otherwise receive input meant for the document that is gone.
+			const atDispatch = await readBasis(channel, input.targetId)
+			if (atDispatch === undefined) return { kind: "unverified" }
+			if (!sameBasis(atDispatch, input.basis)) return { kind: "identity_changed" }
 			const step = input.action.kind === "click"
 				? await clickNode(channel, input.backendNodeId)
 				: await typeIntoNode(channel, input.backendNodeId, input.action.value)
 			if (step !== "acted") return { kind: step }
 			const after = await readBasis(channel, input.targetId)
-			return after === undefined ? { kind: "unverified" } : { kind: "acted", basis: after }
+			if (after === undefined) return { kind: "unverified" }
+			if (sameBasis(after, atDispatch)) return { kind: "acted", basis: after }
+			// The page moved. That is the act working when the act was a click on
+			// something that navigates, and it is another document arriving in every
+			// other case, which is never reported as this act succeeding.
+			return input.action.kind === "click" && mayNavigate(description)
+				? { kind: "acted", basis: after }
+				: { kind: "superseded" }
 		},
 	)
 }

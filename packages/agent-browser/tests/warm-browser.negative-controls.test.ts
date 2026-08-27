@@ -178,8 +178,8 @@ test("removing the page binding changes which layer refuses a wrong-page referen
 	).toEqual({ resultCode: "PAGE_IDENTITY_CHANGED", exitCode: 21 })
 })
 
-test("removing the identity re-proof lets a click land on a page that has moved", async () => {
-	const scenario = async (root: string): Promise<Reading> => {
+test("removing the first identity proof describes an element to a page that has moved", async () => {
+	const scenario = async (root: string): Promise<Reading & { described: boolean; clicks: number }> => {
 		const { fixture, probe } = await pageProbe(
 			{ url: "https://fixture.test/sign-in", elements: signInPage },
 			root,
@@ -193,20 +193,155 @@ test("removing the identity re-proof lets a click land on a page that has moved"
 				root,
 			),
 		)
-		// What the fixture recorded is the evidence: a guard that is gone lets a
-		// real click reach a page the reference never described.
-		expect(fixture.clicks().length, root).toBe(root === packageRoot ? 0 : 1)
-		return result
+		return {
+			...result,
+			described: fixture.cdpMethods().includes("DOM.describeNode"),
+			clicks: fixture.clicks().length,
+		}
 	}
 
-	expect(await scenario(packageRoot)).toEqual({ resultCode: "PAGE_IDENTITY_CHANGED", exitCode: 21 })
+	// The page is proved twice, so removing the first proof does not let the click
+	// through. What that proof owns is silence: with it gone, the command asks the
+	// page it no longer owns about an element belonging to the page that is gone.
+	expect(await scenario(packageRoot)).toEqual({
+		resultCode: "PAGE_IDENTITY_CHANGED",
+		exitCode: 21,
+		described: false,
+		clicks: 0,
+	})
 	expect(
 		await scenario(mutatedPackage({
 			file: "src/modules/warm-browser/controlled-page.ts",
 			find: '\t\t\tif (!sameBasis(before, input.basis)) return { kind: "identity_changed" }',
 			replace: removed,
 		})),
-	).toEqual({ resultCode: "ELEMENT_CLICKED", exitCode: 0 })
+	).toEqual({
+		resultCode: "PAGE_IDENTITY_CHANGED",
+		exitCode: 21,
+		described: true,
+		clicks: 0,
+	})
+})
+
+test("removing the proof before the dispatch lets a late navigation receive the input", async () => {
+	const scenario = async (root: string): Promise<Reading & { clicks: number }> => {
+		const { fixture, probe } = await pageProbe(
+			{
+				url: "https://fixture.test/sign-in",
+				elements: signInPage,
+				// The page moves after the element is described, which is exactly the
+				// window the proof before the dispatch exists to close.
+				navigateAfterMethod: { method: "DOM.describeNode", url: "https://fixture.test/late" },
+			},
+			root,
+		)
+		const snapshot = await takeSnapshot(probe, "control-late", root)
+		const result = reading(
+			await runProductionCliAsync(
+				probe,
+				["click", "--ref", snapshot.elements[3]!.ref, "--run-id", "control-click"],
+				root,
+			),
+		)
+		return { ...result, clicks: fixture.clicks().length }
+	}
+
+	expect(await scenario(packageRoot)).toEqual({
+		resultCode: "PAGE_IDENTITY_CHANGED",
+		exitCode: 21,
+		clicks: 0,
+	})
+	// With the proof gone, a real click lands on a document that arrived after
+	// the reference was resolved and that the caller never named.
+	expect(
+		await scenario(mutatedPackage({
+			file: "src/modules/warm-browser/controlled-page.ts",
+			find: '\t\t\tif (!sameBasis(atDispatch, input.basis)) return { kind: "identity_changed" }',
+			replace: removed,
+		})),
+	).toEqual({ resultCode: "ELEMENT_CLICKED", exitCode: 0, clicks: 1 })
+})
+
+test("removing the navigation binding reports a document the caller never asked for", async () => {
+	const scenario = async (root: string): Promise<Reading & { landed: string }> => {
+		const { fixture, probe } = await pageProbe(
+			{
+				url: "https://fixture.test/sign-in",
+				elements: signInPage,
+				navigateAfterMethod: { method: "Page.navigate", url: "https://fixture.test/competing" },
+			},
+			root,
+		)
+		const result = reading(
+			await runProductionCliAsync(
+				probe,
+				["open", "--url", "https://fixture.test/next", "--run-id", "control-open"],
+				root,
+			),
+		)
+		return { ...result, landed: fixture.pageUrl() }
+	}
+
+	expect(await scenario(packageRoot)).toEqual({
+		resultCode: "PAGE_IDENTITY_CHANGED",
+		exitCode: 21,
+		landed: "https://fixture.test/competing",
+	})
+	expect(
+		await scenario(mutatedPackage({
+			file: "src/modules/warm-browser/controlled-page.ts",
+			find:
+				"\t\t\treturn basis.frameId === frameId && basis.loaderId === loaderId\n\t\t\t\t? { kind: \"navigated\", basis }\n\t\t\t\t: { kind: \"superseded\" }",
+			replace: '\t\t\treturn { kind: "navigated", basis }',
+		})),
+	).toEqual({
+		resultCode: "PAGE_OPENED",
+		exitCode: 0,
+		landed: "https://fixture.test/competing",
+	})
+})
+
+test("removing the post-dispatch binding reports a stolen document as a click that worked", async () => {
+	const scenario = async (root: string): Promise<Reading & { landed: string }> => {
+		const { fixture, probe } = await pageProbe(
+			{
+				url: "https://fixture.test/sign-in",
+				elements: [{
+					backendNodeId: 51,
+					role: "button",
+					name: "Toggle",
+					nodeName: "BUTTON",
+					attributes: { type: "button" },
+					box: [10, 10, 80, 24],
+				}],
+				navigateAfterMethod: { method: "DOM.getBoxModel", url: "https://fixture.test/stolen" },
+			},
+			root,
+		)
+		const snapshot = await takeSnapshot(probe, "control-stolen", root)
+		const result = reading(
+			await runProductionCliAsync(
+				probe,
+				["click", "--ref", snapshot.elements[0]!.ref, "--run-id", "control-click"],
+				root,
+			),
+		)
+		return { ...result, landed: fixture.pageUrl() }
+	}
+
+	expect(await scenario(packageRoot)).toEqual({
+		resultCode: "PAGE_IDENTITY_CHANGED",
+		exitCode: 21,
+		landed: "https://fixture.test/stolen",
+	})
+	expect(
+		await scenario(mutatedPackage({
+			file: "src/modules/warm-browser/controlled-page.ts",
+			find:
+				'\t\t\treturn input.action.kind === "click" && mayNavigate(description)\n\t\t\t\t? { kind: "acted", basis: after }\n\t\t\t\t: { kind: "superseded" }',
+			replace: '\t\t\treturn { kind: "acted", basis: after }',
+		})),
+	).toEqual({ resultCode: "ELEMENT_CLICKED", exitCode: 0, landed: "https://fixture.test/stolen" })
 })
 
 test("removing the post-read re-proof issues references for a page that moved while read", async () => {
@@ -320,7 +455,7 @@ test("removing the live credential refusal types into a field that became one", 
 					nodeName: "INPUT",
 					attributes: { type: "text", name: "code" },
 					box: [10, 10, 100, 20],
-					becomesCredentialField: true,
+					becomesAttributes: { type: "password" },
 				}],
 			},
 			root,
@@ -377,7 +512,7 @@ test("removing the open invalidation keeps references the navigation left behind
 	expect(
 		await scenario(mutatedPackage({
 			file: "src/modules/warm-browser/warm-browser.ts",
-			find: '\tconst state = invalidateReferences("open", parsed.runId, paths, session.state)',
+			find: '\tconst state = invalidateReferences("open", parsed.runId, paths, session.state, "acted")',
 			replace: "\tconst state = session.state",
 		})),
 	).toEqual({ resultCode: "PAGE_IDENTITY_CHANGED", exitCode: 21, retained: true })
@@ -389,11 +524,12 @@ test("removing the post-action invalidation keeps references a navigation destro
 			{
 				url: "https://fixture.test/sign-in",
 				elements: [...signInPage, {
-					backendNodeId: 16,
+					backendNodeId: 17,
 					role: "link",
 					name: "Leave",
 					nodeName: "A",
-					box: [10, 200, 60, 20],
+					attributes: { href: "/left" },
+					box: [10, 240, 60, 20],
 					navigatesTo: "https://fixture.test/left",
 				}],
 			},
@@ -402,7 +538,7 @@ test("removing the post-action invalidation keeps references a navigation destro
 		const snapshot = await takeSnapshot(probe, "control-navigating", root)
 		const result = await runProductionCliAsync(
 			probe,
-			["click", "--ref", snapshot.elements[4]!.ref, "--run-id", "control-click"],
+			["click", "--ref", snapshot.elements[5]!.ref, "--run-id", "control-click"],
 			root,
 		)
 		return { ...reading(result), retained: readReceipt(probe).snapshot !== undefined }
@@ -416,8 +552,129 @@ test("removing the post-action invalidation keeps references a navigation destro
 	expect(
 		await scenario(mutatedPackage({
 			file: "src/modules/warm-browser/warm-browser.ts",
-			find: "\tif (invalidatedReferences) invalidateReferences(command, parsed.runId, paths, state)",
+			find:
+				'\tif (invalidatedReferences) invalidateReferences(command, parsed.runId, paths, state, "acted")',
 			replace: "\t// negative control: the guard under proof is gone",
 		})),
 	).toEqual({ resultCode: "ELEMENT_CLICKED", exitCode: 0, retained: true })
 })
+
+test("removing the login identifier signals lets a public fill of a username field proceed", async () => {
+	const scenario = async (root: string): Promise<Reading & { typed: readonly string[] }> => {
+		const { fixture, probe } = await pageProbe(
+			{
+				url: "https://fixture.test/sign-in",
+				elements: [{
+					backendNodeId: 41,
+					role: "textbox",
+					name: "Who are you",
+					nodeName: "INPUT",
+					attributes: { type: "text", name: "user_name" },
+					box: [10, 10, 100, 20],
+				}],
+			},
+			root,
+		)
+		const snapshot = await takeSnapshot(probe, "control-username", root)
+		const result = await runProductionCliAsync(
+			probe,
+			[
+				"fill",
+				"--ref",
+				snapshot.elements[0]!.ref,
+				"--value",
+				"someone",
+				"--run-id",
+				"control-fill",
+			],
+			root,
+		)
+		return { ...reading(result), typed: fixture.insertedText() }
+	}
+
+	expect(await scenario(packageRoot)).toEqual({
+		resultCode: "CREDENTIAL_FIELD_REFUSED",
+		exitCode: 21,
+		typed: [],
+	})
+	expect(
+		await scenario(mutatedPackage({
+			file: "src/modules/warm-browser/credential-fields.ts",
+			find: '\t"username",\n\t"userid",\n\t"login",\n\t"email",\n] as const',
+			replace: "] as const",
+		})),
+	).toEqual({ resultCode: "FIELD_FILLED", exitCode: 0, typed: ["someone"] })
+})
+
+/** What one refusal answered, and whether the session still holds a generation. */
+interface RefusalWithState extends Reading {
+	readonly retained: boolean
+}
+
+test.each([
+	[
+		"a detected page replacement",
+		"src/modules/warm-browser/warm-browser.ts",
+		'\t\t\tinvalidateReferences(command, runId, paths, state, "invalidated")',
+		"CONTROLLED_PAGE_REPLACED",
+		20,
+	],
+	[
+		"a page that moved while it was read",
+		"src/modules/warm-browser/warm-browser.ts",
+		'\t\tinvalidateReferences("snapshot", parsed.runId, paths, state, "invalidated")',
+		"PAGE_IDENTITY_CHANGED",
+		21,
+	],
+	[
+		"a page that moved before the act",
+		"src/modules/warm-browser/warm-browser.ts",
+		'\t\tinvalidateReferences(command, parsed.runId, paths, state, "invalidated")',
+		"PAGE_IDENTITY_CHANGED",
+		21,
+	],
+] as const)(
+	"removing the invalidation for %s keeps references the page no longer has",
+	async (name, file, find, resultCode, exitCode) => {
+		const scenario = async (root: string): Promise<RefusalWithState> => {
+			const { fixture, probe } = await pageProbe(
+				{
+					url: "https://fixture.test/sign-in",
+					elements: signInPage,
+					// The page moves the second time it is read, so the first snapshot
+					// succeeds and whatever follows it races.
+					...(name === "a page that moved while it was read"
+						? {
+							navigateAfterMethod: {
+								method: "Accessibility.getFullAXTree",
+								url: "https://fixture.test/moved",
+								occurrence: 2,
+							},
+						}
+						: {}),
+				},
+				root,
+			)
+			const snapshot = await takeSnapshot(probe, "control-invalidation", root)
+			if (name === "a detected page replacement") fixture.replacePage("page-2")
+			if (name === "a page that moved before the act") {
+				fixture.navigate("https://fixture.test/elsewhere")
+			}
+			const argv = name === "a page that moved while it was read"
+				? ["snapshot"]
+				: ["click", "--ref", snapshot.elements[3]!.ref]
+			const result = await runProductionCliAsync(
+				probe,
+				[...argv, "--run-id", "control-invalidation-run"],
+				root,
+			)
+			return { ...reading(result), retained: readReceipt(probe).snapshot !== undefined }
+		}
+
+		// The refusal is the same either way. What the guard owns is the state it
+		// leaves behind, so that is what these two rows disagree about.
+		expect(await scenario(packageRoot)).toEqual({ resultCode, exitCode, retained: false })
+		expect(await scenario(mutatedPackage({ file, find, replace: removed.trimStart() })))
+			.toEqual({ resultCode, exitCode, retained: true })
+	},
+)

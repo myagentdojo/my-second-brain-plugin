@@ -720,6 +720,12 @@ async function inspectSession(
 	// reference this session issued belongs to the page that is gone.
 	if (verification.endpoint.controlledPageTargetId !== state.endpoint.controlledPageTargetId) {
 		if (pageReplacement === "refuse") {
+			// The refusal comes after the invalidation, not instead of it. Every
+			// reference this session issued belongs to a page that is gone, so it
+			// stops existing here whether or not the caller ever adopts the
+			// replacement, and a later command reloading this receipt cannot find
+			// one to resolve.
+			invalidateReferences(command, runId, paths, state, "invalidated")
 			staticFailure(
 				command,
 				runId,
@@ -727,6 +733,8 @@ async function inspectSession(
 				20,
 				"The Browser Session's Controlled Page was replaced by another page.",
 				"Run warm-browser open --url URL --adopt-page --run-id ID to bind the replacement Controlled Page.",
+				false,
+				"invalidated",
 			)
 		}
 		const adopted = adoptControlledPage(state, verification.endpoint.controlledPageTargetId)
@@ -1148,10 +1156,11 @@ async function requireControlledPage(
  * not be written; it names the state that needs repairing instead.
  */
 function recordAfterAction(
-	command: PageCommand,
+	command: SliceCommand,
 	runId: string,
 	paths: StatePaths,
 	state: RunningBrowserSessionState,
+	transactionState: Extract<TransactionState, "acted" | "invalidated">,
 ): void {
 	try {
 		writeSessionState(paths, state)
@@ -1161,10 +1170,10 @@ function recordAfterAction(
 			runId,
 			"STATE_UNSAFE",
 			20,
-			"Warm Browser acted on the Controlled Page but could not record the Snapshot Generation it left behind.",
-			"Repair the private Warm Browser session state; the Controlled Page has already changed.",
+			"Warm Browser could not record the Snapshot Generation its Controlled Page left behind.",
+			"Repair the private Warm Browser session state; the Snapshot References it holds are already dead.",
 			false,
-			"acted",
+			transactionState,
 		)
 	}
 }
@@ -1179,16 +1188,22 @@ function withoutSnapshot(state: RunningBrowserSessionState): RunningBrowserSessi
  * Drops every reference this session issued. Invalidation is durable and it is
  * total: there is no list of dead references to consult later, because the
  * generation they name stops existing.
+ *
+ * The transaction the caller will report is passed in rather than guessed here.
+ * `acted` says the command had already reached the Controlled Page when it
+ * dropped the references; `invalidated` says it had not, and that only the
+ * references are gone.
  */
 function invalidateReferences(
-	command: PageCommand,
+	command: SliceCommand,
 	runId: string,
 	paths: StatePaths,
 	state: RunningBrowserSessionState,
+	transactionState: Extract<TransactionState, "acted" | "invalidated">,
 ): RunningBrowserSessionState {
 	if (state.snapshot === undefined) return state
 	const cleared = withoutSnapshot(state)
-	recordAfterAction(command, runId, paths, cleared)
+	recordAfterAction(command, runId, paths, cleared, transactionState)
 	return cleared
 }
 
@@ -1276,7 +1291,7 @@ async function open(
 	// Every open invalidates first. A navigation that the browser refuses, and
 	// one whose outcome cannot be verified, both leave a page nobody has re-read,
 	// so no reference issued before it may survive either outcome.
-	const state = invalidateReferences("open", parsed.runId, paths, session.state)
+	const state = invalidateReferences("open", parsed.runId, paths, session.state, "acted")
 	const navigation = await openControlledPage({
 		port: state.endpoint.port,
 		targetId: state.endpoint.controlledPageTargetId,
@@ -1290,6 +1305,18 @@ async function open(
 			20,
 			"The Controlled Page did not complete the requested navigation.",
 			"Run warm-browser snapshot --run-id ID to read where the Controlled Page actually is.",
+			false,
+			"acted",
+		)
+	}
+	if (navigation.kind === "superseded") {
+		staticFailure(
+			"open",
+			parsed.runId,
+			"PAGE_IDENTITY_CHANGED",
+			21,
+			"The Controlled Page is showing a document this navigation did not request.",
+			freshSnapshotAction,
 			false,
 			"acted",
 		)
@@ -1332,6 +1359,10 @@ async function snapshot(
 		targetId: state.endpoint.controlledPageTargetId,
 	})
 	if (reading.kind === "identity_changed") {
+		// The page moved, so the generation this session was still holding
+		// described a page that is gone. No new reference was issued and none of
+		// the old ones survives the reading that proved the page moved.
+		invalidateReferences("snapshot", parsed.runId, paths, state, "invalidated")
 		staticFailure(
 			"snapshot",
 			parsed.runId,
@@ -1339,6 +1370,8 @@ async function snapshot(
 			21,
 			"The Controlled Page moved while it was being read, so no Snapshot Reference was issued.",
 			freshSnapshotAction,
+			false,
+			"invalidated",
 		)
 	}
 	if (reading.kind === "unverified") {
@@ -1356,7 +1389,7 @@ async function snapshot(
 		truncated: reading.truncated,
 		elements: reading.elements,
 	}
-	recordAfterAction("snapshot", parsed.runId, paths, { ...state, snapshot: generation })
+	recordAfterAction("snapshot", parsed.runId, paths, { ...state, snapshot: generation }, "acted")
 	return success({
 		schemaVersion,
 		status: "ok",
@@ -1410,6 +1443,9 @@ async function actOnPage(
 		action,
 	})
 	if (outcome.kind === "identity_changed") {
+		// Nothing was dispatched, and nothing survives either: the references were
+		// issued against a page this command has just proved is gone.
+		invalidateReferences(command, parsed.runId, paths, state, "invalidated")
 		staticFailure(
 			command,
 			parsed.runId,
@@ -1417,6 +1453,8 @@ async function actOnPage(
 			21,
 			"The Controlled Page is no longer the page this Snapshot Reference was issued against.",
 			freshSnapshotAction,
+			false,
+			"invalidated",
 		)
 	}
 	if (outcome.kind === "element_absent") {
@@ -1429,12 +1467,28 @@ async function actOnPage(
 			freshSnapshotAction,
 		)
 	}
+	if (outcome.kind === "superseded") {
+		// The act reached the page and the page then moved somewhere the act could
+		// not have sent it. Nothing about that document is reported as success, and
+		// the references that described the one before it do not survive.
+		invalidateReferences(command, parsed.runId, paths, state, "acted")
+		staticFailure(
+			command,
+			parsed.runId,
+			"PAGE_IDENTITY_CHANGED",
+			21,
+			"The Controlled Page moved to a document this action did not ask for.",
+			freshSnapshotAction,
+			false,
+			"acted",
+		)
+	}
 	if (outcome.kind === "credential_field") credentialRefusal(command, parsed.runId)
 	if (outcome.kind === "unverified") {
 		// The conversation stopped without an answer, so what reached the page is
 		// unknown. Unknown is never reported as unchanged, and the references that
 		// described the page before it are not kept.
-		invalidateReferences(command, parsed.runId, paths, state)
+		invalidateReferences(command, parsed.runId, paths, state, "acted")
 		pageControlUnverified(
 			command,
 			parsed.runId,
@@ -1443,7 +1497,7 @@ async function actOnPage(
 		)
 	}
 	const invalidatedReferences = !sameBasis(outcome.basis, generation.basis)
-	if (invalidatedReferences) invalidateReferences(command, parsed.runId, paths, state)
+	if (invalidatedReferences) invalidateReferences(command, parsed.runId, paths, state, "acted")
 	return success({
 		schemaVersion,
 		status: "ok",

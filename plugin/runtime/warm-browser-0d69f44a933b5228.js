@@ -166,7 +166,8 @@ var credentialInputTypes = ["password"];
 var credentialAutocompleteTokens = [
   "current-password",
   "new-password",
-  "one-time-code"
+  "one-time-code",
+  "username"
 ];
 var credentialIdentifierFragments = [
   "password",
@@ -179,7 +180,11 @@ var credentialIdentifierFragments = [
   "2fa",
   "mfa",
   "securitycode",
-  "verificationcode"
+  "verificationcode",
+  "username",
+  "userid",
+  "login",
+  "email"
 ];
 var identifierAttributes = ["name", "id", "autocomplete", "aria-label", "placeholder"];
 function normalise(value) {
@@ -355,11 +360,17 @@ async function openControlledPage(input) {
     const navigation = await channel.call("Page.navigate", { url: input.url });
     if (!navigation.ok)
       return { kind: "unverified" };
-    if (nonEmptyText(record(navigation.result)?.errorText) !== undefined) {
+    const accepted = record(navigation.result);
+    if (nonEmptyText(accepted?.errorText) !== undefined)
       return { kind: "refused" };
-    }
+    const frameId = nonEmptyText(accepted?.frameId);
+    const loaderId = nonEmptyText(accepted?.loaderId);
+    if (frameId === undefined || loaderId === undefined)
+      return { kind: "unverified" };
     const basis = await readBasis(channel, input.targetId);
-    return basis === undefined ? { kind: "unverified" } : { kind: "navigated", basis };
+    if (basis === undefined)
+      return { kind: "unverified" };
+    return basis.frameId === frameId && basis.loaderId === loaderId ? { kind: "navigated", basis } : { kind: "superseded" };
   });
 }
 async function readControlledPageSnapshot(input) {
@@ -391,6 +402,17 @@ async function readControlledPageSnapshot(input) {
     const { elements, truncated } = interpretElements(nodes, descriptions);
     return { kind: "observed", basis: after, elements, truncated };
   });
+}
+function mayNavigate(description) {
+  const attributes = description.attributes;
+  const nodeName = description.nodeName.toUpperCase();
+  const type = (attributes.type ?? "").trim().toLowerCase();
+  if ((nodeName === "A" || nodeName === "AREA") && nonEmptyText(attributes.href) !== undefined) {
+    return true;
+  }
+  if (type === "submit" || type === "image")
+    return true;
+  return nodeName === "BUTTON" && attributes.type === undefined;
 }
 async function clickNode(channel, backendNodeId) {
   const box = await channel.call("DOM.getBoxModel", { backendNodeId });
@@ -446,11 +468,20 @@ async function actOnControlledPage(input) {
     if (input.action.kind === "fill" && isCredentialField(description)) {
       return { kind: "credential_field" };
     }
+    const atDispatch = await readBasis(channel, input.targetId);
+    if (atDispatch === undefined)
+      return { kind: "unverified" };
+    if (!sameBasis(atDispatch, input.basis))
+      return { kind: "identity_changed" };
     const step = input.action.kind === "click" ? await clickNode(channel, input.backendNodeId) : await typeIntoNode(channel, input.backendNodeId, input.action.value);
     if (step !== "acted")
       return { kind: step };
     const after = await readBasis(channel, input.targetId);
-    return after === undefined ? { kind: "unverified" } : { kind: "acted", basis: after };
+    if (after === undefined)
+      return { kind: "unverified" };
+    if (sameBasis(after, atDispatch))
+      return { kind: "acted", basis: after };
+    return input.action.kind === "click" && mayNavigate(description) ? { kind: "acted", basis: after } : { kind: "superseded" };
   });
 }
 
@@ -1490,7 +1521,8 @@ async function inspectSession(command, runId, paths, adapter, pageReplacement = 
   }
   if (verification.endpoint.controlledPageTargetId !== state.endpoint.controlledPageTargetId) {
     if (pageReplacement === "refuse") {
-      staticFailure(command, runId, "CONTROLLED_PAGE_REPLACED", 20, "The Browser Session's Controlled Page was replaced by another page.", "Run warm-browser open --url URL --adopt-page --run-id ID to bind the replacement Controlled Page.");
+      invalidateReferences(command, runId, paths, state, "invalidated");
+      staticFailure(command, runId, "CONTROLLED_PAGE_REPLACED", 20, "The Browser Session's Controlled Page was replaced by another page.", "Run warm-browser open --url URL --adopt-page --run-id ID to bind the replacement Controlled Page.", false, "invalidated");
     }
     const adopted = adoptControlledPage(state, verification.endpoint.controlledPageTargetId);
     writeSessionState(paths, adopted);
@@ -1742,22 +1774,22 @@ async function requireControlledPage(parsed, command, paths, adapter) {
   }
   staticFailure(command, parsed.runId, "SESSION_ABSENT", 21, "No verified Browser Session owns a Controlled Page.", "Run warm-browser start --run-id ID to create a Browser Session.", false, inspection.kind === "recovered" ? "recovered" : "unchanged");
 }
-function recordAfterAction(command, runId, paths, state) {
+function recordAfterAction(command, runId, paths, state, transactionState) {
   try {
     writeSessionState(paths, state);
   } catch {
-    staticFailure(command, runId, "STATE_UNSAFE", 20, "Warm Browser acted on the Controlled Page but could not record the Snapshot Generation it left behind.", "Repair the private Warm Browser session state; the Controlled Page has already changed.", false, "acted");
+    staticFailure(command, runId, "STATE_UNSAFE", 20, "Warm Browser could not record the Snapshot Generation its Controlled Page left behind.", "Repair the private Warm Browser session state; the Snapshot References it holds are already dead.", false, transactionState);
   }
 }
 function withoutSnapshot(state) {
   const { snapshot: _invalidated, ...rest } = state;
   return rest;
 }
-function invalidateReferences(command, runId, paths, state) {
+function invalidateReferences(command, runId, paths, state, transactionState) {
   if (state.snapshot === undefined)
     return state;
   const cleared = withoutSnapshot(state);
-  recordAfterAction(command, runId, paths, cleared);
+  recordAfterAction(command, runId, paths, cleared, transactionState);
   return cleared;
 }
 function controlledPageData(basis) {
@@ -1788,7 +1820,7 @@ function credentialRefusal(command, runId) {
 }
 async function open(parsed, paths, adapter) {
   const session = await requireControlledPage(parsed, "open", paths, adapter);
-  const state = invalidateReferences("open", parsed.runId, paths, session.state);
+  const state = invalidateReferences("open", parsed.runId, paths, session.state, "acted");
   const navigation = await openControlledPage({
     port: state.endpoint.port,
     targetId: state.endpoint.controlledPageTargetId,
@@ -1796,6 +1828,9 @@ async function open(parsed, paths, adapter) {
   });
   if (navigation.kind === "refused") {
     staticFailure("open", parsed.runId, "NAVIGATION_FAILED", 20, "The Controlled Page did not complete the requested navigation.", "Run warm-browser snapshot --run-id ID to read where the Controlled Page actually is.", false, "acted");
+  }
+  if (navigation.kind === "superseded") {
+    staticFailure("open", parsed.runId, "PAGE_IDENTITY_CHANGED", 21, "The Controlled Page is showing a document this navigation did not request.", freshSnapshotAction, false, "acted");
   }
   if (navigation.kind === "unverified") {
     pageControlUnverified("open", parsed.runId, "Warm Browser could not verify what its Controlled Page did with the navigation.", "acted");
@@ -1825,7 +1860,8 @@ async function snapshot(parsed, paths, adapter) {
     targetId: state.endpoint.controlledPageTargetId
   });
   if (reading.kind === "identity_changed") {
-    staticFailure("snapshot", parsed.runId, "PAGE_IDENTITY_CHANGED", 21, "The Controlled Page moved while it was being read, so no Snapshot Reference was issued.", freshSnapshotAction);
+    invalidateReferences("snapshot", parsed.runId, paths, state, "invalidated");
+    staticFailure("snapshot", parsed.runId, "PAGE_IDENTITY_CHANGED", 21, "The Controlled Page moved while it was being read, so no Snapshot Reference was issued.", freshSnapshotAction, false, "invalidated");
   }
   if (reading.kind === "unverified") {
     pageControlUnverified("snapshot", parsed.runId, "Warm Browser could not read the Controlled Page.", "unchanged");
@@ -1837,7 +1873,7 @@ async function snapshot(parsed, paths, adapter) {
     truncated: reading.truncated,
     elements: reading.elements
   };
-  recordAfterAction("snapshot", parsed.runId, paths, { ...state, snapshot: generation });
+  recordAfterAction("snapshot", parsed.runId, paths, { ...state, snapshot: generation }, "acted");
   return success({
     schemaVersion,
     status: "ok",
@@ -1882,20 +1918,25 @@ async function actOnPage(parsed, command, paths, adapter) {
     action
   });
   if (outcome.kind === "identity_changed") {
-    staticFailure(command, parsed.runId, "PAGE_IDENTITY_CHANGED", 21, "The Controlled Page is no longer the page this Snapshot Reference was issued against.", freshSnapshotAction);
+    invalidateReferences(command, parsed.runId, paths, state, "invalidated");
+    staticFailure(command, parsed.runId, "PAGE_IDENTITY_CHANGED", 21, "The Controlled Page is no longer the page this Snapshot Reference was issued against.", freshSnapshotAction, false, "invalidated");
   }
   if (outcome.kind === "element_absent") {
     staticFailure(command, parsed.runId, "SNAPSHOT_REFERENCE_STALE", 21, "The referenced element is no longer part of the Controlled Page.", freshSnapshotAction);
   }
+  if (outcome.kind === "superseded") {
+    invalidateReferences(command, parsed.runId, paths, state, "acted");
+    staticFailure(command, parsed.runId, "PAGE_IDENTITY_CHANGED", 21, "The Controlled Page moved to a document this action did not ask for.", freshSnapshotAction, false, "acted");
+  }
   if (outcome.kind === "credential_field")
     credentialRefusal(command, parsed.runId);
   if (outcome.kind === "unverified") {
-    invalidateReferences(command, parsed.runId, paths, state);
+    invalidateReferences(command, parsed.runId, paths, state, "acted");
     pageControlUnverified(command, parsed.runId, "Warm Browser could not verify what its Controlled Page did with the action.", "acted");
   }
   const invalidatedReferences = !sameBasis(outcome.basis, generation.basis);
   if (invalidatedReferences)
-    invalidateReferences(command, parsed.runId, paths, state);
+    invalidateReferences(command, parsed.runId, paths, state, "acted");
   return success({
     schemaVersion,
     status: "ok",

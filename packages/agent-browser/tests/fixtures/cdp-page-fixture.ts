@@ -27,8 +27,8 @@ export interface FixtureElement {
 	readonly box?: readonly [number, number, number, number]
 	/** Clicking this element navigates the Controlled Page to this URL. */
 	readonly navigatesTo?: string
-	/** The live description flips to a password field after the snapshot was taken. */
-	readonly becomesCredentialField?: boolean
+	/** The attributes the live description carries once the snapshot has been read. */
+	readonly becomesAttributes?: Readonly<Record<string, string>>
 }
 
 export interface FixtureTarget {
@@ -49,6 +49,17 @@ export interface CdpPageFixtureOptions {
 	readonly refuseNavigationTo?: string
 	/** The page identity moves the moment the accessibility tree is answered. */
 	readonly driftDuringSnapshot?: boolean
+	/**
+	 * Moves the page identity immediately after the named method is answered, on
+	 * the given occurrence of it. This is how a navigation that lands part-way
+	 * through one conversation is modelled: delayed, or competing with whatever
+	 * the caller asked for.
+	 */
+	readonly navigateAfterMethod?: {
+		readonly method: string
+		readonly url: string
+		readonly occurrence?: number
+	}
 	/** The socket path the target list declares, when it should name another one. */
 	readonly declaredPagePath?: string
 }
@@ -144,6 +155,7 @@ export function startCdpPageFixture(options: CdpPageFixtureOptions = {}): CdpPag
 	const clicks: { x: number; y: number }[] = []
 	const focusedNodes: number[] = []
 	let describedAfterSnapshot = false
+	const methodCounts = new Map<string, number>()
 
 	function boundPort(): number {
 		return server.port ?? 0
@@ -225,8 +237,8 @@ export function startCdpPageFixture(options: CdpPageFixtureOptions = {}): CdpPag
 		if (method === "DOM.describeNode") {
 			const element = findElement(parameters.backendNodeId)
 			if (element === undefined) throw new Error("no such node")
-			const attributes = element.becomesCredentialField === true && describedAfterSnapshot
-				? { ...element.attributes, type: "password" }
+			const attributes = element.becomesAttributes !== undefined && describedAfterSnapshot
+				? { ...element.attributes, ...element.becomesAttributes }
 				: element.attributes
 			return { node: { ...domNode(element, 0), attributes: attributeList(attributes) } }
 		}
@@ -310,7 +322,17 @@ export function startCdpPageFixture(options: CdpPageFixtureOptions = {}): CdpPag
 					return
 				}
 				try {
-					socket.send(JSON.stringify({ id: request.id, result: reply(method, request.params ?? {}) }))
+					const result = reply(method, request.params ?? {})
+					// The reply describes the page as it was when the method was
+					// answered. A scripted navigation lands after that, so the next
+					// reading in the same conversation sees a different page.
+					const scripted = options.navigateAfterMethod
+					if (scripted !== undefined && scripted.method === method) {
+						const seen = (methodCounts.get(method) ?? 0) + 1
+						methodCounts.set(method, seen)
+						if (seen === (scripted.occurrence ?? 1)) moveIdentity(scripted.url)
+					}
+					socket.send(JSON.stringify({ id: request.id, result }))
 				} catch (error) {
 					socket.send(JSON.stringify({
 						id: request.id,

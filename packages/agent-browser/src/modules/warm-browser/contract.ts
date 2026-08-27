@@ -76,6 +76,13 @@ export type TransactionState =
 	| "recovered"
 	| "rolled_back"
 	| "acted"
+	/**
+	 * The Browser Session is intact and nothing reached the Controlled Page, but
+	 * the Snapshot References it held are gone. It is distinct from `unchanged`,
+	 * which would deny that durable state moved, and from `acted`, which would
+	 * claim the page was touched.
+	 */
+	| "invalidated"
 
 export type ResultCode =
 	| "HELP"
@@ -209,6 +216,8 @@ export type PageNavigation =
 	| { readonly kind: "navigated"; readonly basis: ControlledPageBasis }
 	/** The browser answered the navigation with its own error. */
 	| { readonly kind: "refused" }
+	/** Another document reached the Controlled Page instead of this one. */
+	| { readonly kind: "superseded" }
 	| { readonly kind: "unverified" }
 
 export type PageSnapshotReading =
@@ -226,6 +235,11 @@ export type PageActionOutcome =
 	| { readonly kind: "acted"; readonly basis: ControlledPageBasis }
 	/** The page was not the one the reference was issued against. */
 	| { readonly kind: "identity_changed" }
+	/**
+	 * The act reached the page, and the page then moved to a document the act
+	 * could not have asked for. Success is never claimed about that document.
+	 */
+	| { readonly kind: "superseded" }
 	/** The referenced element is no longer a thing this page can be acted on. */
 	| { readonly kind: "element_absent" }
 	/** The live element is a credential field, whatever the snapshot recorded. */

@@ -7,6 +7,13 @@
  * rule is deliberately wide. A field wrongly named a credential is refused, and
  * a refusal is recoverable; a credential field wrongly named ordinary would put
  * a secret into an argument list.
+ *
+ * A login identifier is credential material, not a lesser thing beside the
+ * password. It is half of the pair `login` resolves and delivers, it is the half
+ * that names the account, and typing it through the public interface would put
+ * it in an argument list exactly as a password would. So the username side is
+ * classified here on the same footing, and an address that could be the account
+ * name is treated as one.
  */
 
 export interface DomNodeDescription {
@@ -22,6 +29,7 @@ const credentialAutocompleteTokens = [
 	"current-password",
 	"new-password",
 	"one-time-code",
+	"username",
 ] as const
 
 /**
@@ -41,6 +49,10 @@ const credentialIdentifierFragments = [
 	"mfa",
 	"securitycode",
 	"verificationcode",
+	"username",
+	"userid",
+	"login",
+	"email",
 ] as const
 
 /** The attributes an identifier fragment is looked for in. */

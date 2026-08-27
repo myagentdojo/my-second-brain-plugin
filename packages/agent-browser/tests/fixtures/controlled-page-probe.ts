@@ -24,9 +24,10 @@ import {
  */
 
 /**
- * One page carrying a link, an ordinary field, a credential field, a button,
- * and one node that is neither focusable nor actionable. It is fixture input,
- * not an expected value: every expectation about it is restated by its test.
+ * One sign-in page carrying a link, a login identifier field, a password field,
+ * a submit button, one node that is neither focusable nor actionable, and one
+ * field that carries no login signal at all. It is fixture input, not an
+ * expected value: every expectation about it is restated by its test.
  */
 export const signInPage: readonly FixtureElement[] = [
 	{
@@ -67,6 +68,14 @@ export const signInPage: readonly FixtureElement[] = [
 		nodeName: "P",
 		focusable: false,
 	},
+	{
+		backendNodeId: 16,
+		role: "searchbox",
+		name: "Search",
+		nodeName: "INPUT",
+		attributes: { type: "search", name: "q" },
+		box: [10, 200, 200, 24],
+	},
 ]
 
 /**
@@ -92,25 +101,37 @@ export function stopControlledPageFixtures(): void {
 	for (const fixture of runningFixtures.splice(0)) fixture.stop()
 }
 
-/**
- * One started Browser Session bound to the fixture endpoint. The process table,
- * the launch, the loopback listener and the port probe are the harness's
- * private substitutes, because no browser is launched; every loopback document
- * and every CDP message is real.
- */
-export async function pageProbe(
-	options: CdpPageFixtureOptions = {},
-	root: string = packageRoot,
-): Promise<PageProbe> {
+/** One Controlled Page fixture, registered so the suite always stops it. */
+export function controlledPageFixture(options: CdpPageFixtureOptions = {}): CdpPageFixture {
 	const fixture = startCdpPageFixture(options)
 	runningFixtures.push(fixture)
-	const probe = productionCliProbe({
+	return fixture
+}
+
+/**
+ * The harness plan that binds a Browser Session to one fixture endpoint. The
+ * process table, the launch, the loopback listener and the port probe are the
+ * harness's private substitutes, because no browser is launched; every loopback
+ * document and every CDP message is real.
+ */
+export function pageProbePlan(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+	return {
 		processTable: verifiedReading(systemRows),
 		spawnOutcome: "leader",
 		spawnedPid: 4242,
 		listenerOwner: "spawned",
 		loopbackJsonPassthrough: true,
-	})
+		...overrides,
+	}
+}
+
+/** One started Browser Session bound to the fixture endpoint. */
+export async function pageProbe(
+	options: CdpPageFixtureOptions = {},
+	root: string = packageRoot,
+): Promise<PageProbe> {
+	const fixture = controlledPageFixture(options)
+	const probe = productionCliProbe(pageProbePlan())
 	const started = await runProductionCliAsync(
 		probe,
 		["start", "--port", String(fixture.port), "--run-id", "page-start"],
