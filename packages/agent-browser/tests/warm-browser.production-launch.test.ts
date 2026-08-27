@@ -585,10 +585,13 @@ test("a start that passed the tombstone precheck refuses once a cleanup detaches
  * durable state. The stop already happened, so the transaction is stopped and
  * the retained state is what needs repair. Restated by hand.
  */
-function expectStoppedButRetained(result: { exitCode: number; stdout: string; stderr: string }): void {
+function expectStoppedButRetained(
+	probe: ProductionCliProbe,
+	result: Bun.ReadableSyncSubprocess,
+): void {
 	expect(result.exitCode).toBe(20)
-	expect(result.stdout).toBe("")
-	expect(JSON.parse(result.stderr)).toMatchObject({
+	expect(result.stdout.toString()).toBe("")
+	expect(JSON.parse(result.stderr.toString())).toMatchObject({
 		status: "error",
 		command: "start",
 		resultCode: "STATE_UNSAFE",
@@ -599,6 +602,13 @@ function expectStoppedButRetained(result: { exitCode: number; stdout: string; st
 		message:
 			"Warm Browser stopped the owned browser process group but could not remove its private session state.",
 	})
+	// Exactly one termination sequence: an already-stopped group is never
+	// signalled a second time by the cleanup that failed after it.
+	expect(hostEffects(probe).filter(({ action }) => action === "signal")).toEqual([
+		{ action: "signal", processGroupId: 4242, signal: "SIGTERM" },
+	])
+	// The receipt is retained where a repair can find it.
+	expect(readdirSync(probe.sessionRoot).some((entry) => entry.startsWith(".cleanup-"))).toBe(true)
 }
 
 test("an endpoint rollback whose cleanup fails reports the stop and never signals twice", () => {
@@ -611,18 +621,7 @@ test("an endpoint rollback whose cleanup fails reports the stop and never signal
 
 	const result = runProductionCli(probe, ["start", "--run-id", "rollback-cleanup"])
 
-	expectStoppedButRetained({
-		exitCode: result.exitCode ?? -1,
-		stdout: result.stdout.toString(),
-		stderr: result.stderr.toString(),
-	})
-	// Exactly one termination sequence: the group is never signalled again.
-	expect(hostEffects(probe).filter(({ action }) => action === "signal")).toEqual([
-		{ action: "signal", processGroupId: 4242, signal: "SIGTERM" },
-	])
-	// The receipt is retained where a repair can find it.
-	expect(existsSync(join(probe.sessionRoot, ".cleanup-session-1", "session.json"))).toBe(false)
-	expect(readdirSync(probe.sessionRoot).some((entry) => entry.startsWith(".cleanup-"))).toBe(true)
+	expectStoppedButRetained(probe, result)
 })
 
 test("an unexpected post-spawn rollback whose cleanup fails reports the stop and signals once", () => {
@@ -636,13 +635,5 @@ test("an unexpected post-spawn rollback whose cleanup fails reports the stop and
 
 	const result = runProductionCli(probe, ["start", "--run-id", "unexpected-cleanup"])
 
-	expectStoppedButRetained({
-		exitCode: result.exitCode ?? -1,
-		stdout: result.stdout.toString(),
-		stderr: result.stderr.toString(),
-	})
-	expect(hostEffects(probe).filter(({ action }) => action === "signal")).toEqual([
-		{ action: "signal", processGroupId: 4242, signal: "SIGTERM" },
-	])
-	expect(readdirSync(probe.sessionRoot).some((entry) => entry.startsWith(".cleanup-"))).toBe(true)
+	expectStoppedButRetained(probe, result)
 })

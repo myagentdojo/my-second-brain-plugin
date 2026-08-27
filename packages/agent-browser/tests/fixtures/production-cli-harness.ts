@@ -7,7 +7,6 @@ import {
 	rmSync,
 	writeFileSync,
 } from "node:fs"
-import { expect } from "bun:test"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 
@@ -125,31 +124,4 @@ export function verifiedReading(stdout: string): Record<string, unknown> {
 	return { status: 0, signal: null, failed: false, stdout }
 }
 
-function output(value: Record<string, unknown>): string {
-	return `${JSON.stringify(value)}\n`
-}
-
-/**
- * The exact refusal: one exit class, no stdout, and this literal envelope. The
- * envelope always comes from the calling test, so no oracle lives here.
- */
-export function expectError(
-	result: Bun.ReadableSyncSubprocess,
-	exitCode: 1 | 2 | 20 | 21 | 22,
-	envelope: Record<string, unknown>,
-): void {
-	expect(result.exitCode).toBe(exitCode)
-	expect(result.stdout.toString()).toBe("")
-	expect(result.stderr.toString()).toBe(output(envelope))
-}
-
-/** The same refusal narrowed to the envelope fields one test names. */
-export function expectRefusal(
-	result: Bun.ReadableSyncSubprocess,
-	exitCode: 1 | 2 | 20 | 21 | 22,
-	envelope: Record<string, unknown>,
-): void {
-	expect(result.exitCode).toBe(exitCode)
-	expect(result.stdout.toString()).toBe("")
-	expect(JSON.parse(result.stderr.toString())).toMatchObject(envelope)
-}
+export { expectError, expectRefusal } from "./cli-refusals"

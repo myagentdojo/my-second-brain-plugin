@@ -16,6 +16,7 @@ import { homedir, tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 
 import * as contractModule from "../src/modules/warm-browser/contract"
+import { expectError, expectRefusal } from "./fixtures/cli-refusals"
 import { commandVocabulary } from "../src/modules/warm-browser/contract"
 import { productionAdapter } from "../src/modules/warm-browser/production-adapter"
 import { runWarmBrowserCli } from "../src/modules/warm-browser/warm-browser"
@@ -171,26 +172,6 @@ function expectSoleProcessAlive(testFixture: Fixture, alive: boolean): void {
 /** No owned browser process group was signalled. */
 function expectNoTerminate(testFixture: Fixture): void {
 	expect(actions(testFixture).filter(({ action }) => action === "terminate")).toEqual([])
-}
-
-function expectError(
-	result: Bun.ReadableSyncSubprocess,
-	exitCode: 1 | 2 | 20 | 21 | 22,
-	envelope: Record<string, unknown>,
-): void {
-	expect(result.exitCode).toBe(exitCode)
-	expect(result.stdout.toString()).toBe("")
-	expect(result.stderr.toString()).toBe(output(envelope))
-}
-
-/** The same refusal narrowed to the envelope fields one test names. */
-function expectRefusal(
-	result: Bun.ReadableSyncSubprocess,
-	exitCode: 1 | 2 | 20 | 21 | 22,
-	envelope: Record<string, unknown>,
-): void {
-	expect(result.exitCode).toBe(exitCode)
-	expect(JSON.parse(result.stderr.toString())).toMatchObject(envelope)
 }
 
 async function waitFor(path: string): Promise<void> {
