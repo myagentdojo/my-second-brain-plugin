@@ -626,6 +626,77 @@ test.each(invalidReceipts)("a durable receipt carrying %s is unsafe state", (_na
 	expect(hostEffects(probe)).toEqual([])
 })
 
+/**
+ * Independent oracle: live installed Chrome owning the exact Agent Chrome
+ * Profile and port, whose launch marker no longer identifies it. A marker can
+ * be lost or rewritten while the browser it named is still running, so a marker
+ * that matches nothing never proves the launch gone.
+ */
+const unprovedLaunchAbsence = [
+	[
+		"a changed launch marker",
+		(profileRoot: string) => chromeCommand(profileRoot, "session-other"),
+	],
+	[
+		"a missing launch marker",
+		(profileRoot: string) =>
+			chromeCommand(profileRoot).replace(" --agent-browser-launch-marker=session-probe", ""),
+	],
+] as const
+
+test.each(unprovedLaunchAbsence)(
+	"a stale launch is never proved absent by %s while a profile owner is live",
+	(_name, build) => {
+		const probe = productionCliProbe()
+		seedSessionState(probe, launchingState(probe))
+		const stateBefore = readFileSync(probe.sessionPath, "utf8")
+		writeHostEffectsPlan(probe, {
+			processTable: verifiedReading(
+				`${systemRows}${processRow("4242", "4242", build(probe.profileRoot))}`,
+			),
+		})
+
+		const result = runProductionCli(probe, ["status", "--run-id", "unproved-absence"])
+
+		expectError(result, 20, {
+			schemaVersion: 1,
+			status: "error",
+			command: "status",
+			resultCode: "PROCESS_IDENTITY_UNVERIFIED",
+			runId: "unproved-absence",
+			transactionState: "unchanged",
+			retrySafe: false,
+			nextAction:
+				"Inspect the live process and private Warm Browser state; do not signal the stored process id.",
+			message: "The stored browser process identity does not match the live process.",
+		})
+		// The receipt still names the browser nobody else is accounting for.
+		expect(readFileSync(probe.sessionPath, "utf8")).toBe(stateBefore)
+		expect(existsSync(probe.lockPath)).toBe(true)
+		expect(hostEffects(probe)).toEqual([])
+	},
+)
+
+test("a stale launch with no marker and no profile owner is cleaned without signalling", () => {
+	const probe = productionCliProbe()
+	seedSessionState(probe, launchingState(probe))
+	// Nothing carries the marker and nothing owns the profile: absence is proved
+	// twice over, which is the only way this receipt may be removed.
+	writeHostEffectsPlan(probe, { processTable: verifiedReading(systemRows) })
+
+	const result = runProductionCli(probe, ["status", "--run-id", "launch-absent"])
+
+	expect(result.exitCode).toBe(0)
+	expect(result.stderr.toString()).toBe("")
+	expect(JSON.parse(result.stdout.toString())).toMatchObject({
+		resultCode: "STALE_SESSION_RECOVERED",
+		transactionState: "recovered",
+		data: { trigger: "status", postcondition: "absent", stoppedOwnedProcess: false },
+	})
+	expect(existsSync(probe.lockPath)).toBe(false)
+	expect(hostEffects(probe)).toEqual([])
+})
+
 // Independent oracle: the raw host commands Warm Browser is allowed to run.
 test.each(["/bin/ps", "/usr/sbin/lsof"] as const)(
 	"the %s host reading has exactly one production reader",

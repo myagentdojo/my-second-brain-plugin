@@ -273,6 +273,30 @@ type SessionInspection =
 	| { readonly kind: "running"; readonly state: RunningBrowserSessionState }
 	| { readonly kind: "recovered"; readonly stoppedOwnedProcess: boolean }
 
+/**
+ * Removes a stale launch receipt only when its absence is proved twice over: no
+ * process still carries the launch marker, and no process still owns the Agent
+ * Chrome Profile.
+ *
+ * A marker is one argument on a command line. It can be lost or rewritten while
+ * the browser it named is still running, so a marker that matches nothing does
+ * not prove the launch gone. Removing the receipt on that alone would leave a
+ * live browser holding the Agent Chrome Profile with nothing accounting for it.
+ */
+function recoverAbsentLaunch(
+	command: SliceCommand,
+	runId: string,
+	paths: StatePaths,
+	state: Extract<BrowserSessionState, { phase: "launching" }>,
+	adapter: WarmBrowserAdapter,
+): SessionInspection {
+	const owners = adapter.findProfileProcesses(state.profileRoot)
+	if (owners.kind === "unverifiable") inspectionFailure(command, runId)
+	if (owners.processes.length > 0) identityFailure(command, runId)
+	removeOwnedState(paths, state.sessionId)
+	return { kind: "recovered", stoppedOwnedProcess: false }
+}
+
 async function recoverLaunching(
 	command: SliceCommand,
 	runId: string,
@@ -283,8 +307,7 @@ async function recoverLaunching(
 	const first = adapter.findLaunchProcesses(state.launchMarker)
 	if (first.kind === "unverifiable") inspectionFailure(command, runId)
 	if (first.processes.length === 0) {
-		removeOwnedState(paths, state.sessionId)
-		return { kind: "recovered", stoppedOwnedProcess: false }
+		return recoverAbsentLaunch(command, runId, paths, state, adapter)
 	}
 	if (first.processes.length !== 1) {
 		staticFailure(
@@ -301,8 +324,7 @@ async function recoverLaunching(
 	const second = adapter.findLaunchProcesses(state.launchMarker)
 	if (second.kind === "unverifiable") inspectionFailure(command, runId)
 	if (second.processes.length === 0) {
-		removeOwnedState(paths, state.sessionId)
-		return { kind: "recovered", stoppedOwnedProcess: false }
+		return recoverAbsentLaunch(command, runId, paths, state, adapter)
 	}
 	if (
 		second.processes.length !== 1 ||

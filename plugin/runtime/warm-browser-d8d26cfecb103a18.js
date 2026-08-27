@@ -768,13 +768,21 @@ function canonicalProcess(value) {
     commandLine: value.commandLine
   };
 }
+function recoverAbsentLaunch(command, runId, paths, state, adapter) {
+  const owners = adapter.findProfileProcesses(state.profileRoot);
+  if (owners.kind === "unverifiable")
+    inspectionFailure(command, runId);
+  if (owners.processes.length > 0)
+    identityFailure(command, runId);
+  removeOwnedState(paths, state.sessionId);
+  return { kind: "recovered", stoppedOwnedProcess: false };
+}
 async function recoverLaunching(command, runId, paths, state, adapter) {
   const first = adapter.findLaunchProcesses(state.launchMarker);
   if (first.kind === "unverifiable")
     inspectionFailure(command, runId);
   if (first.processes.length === 0) {
-    removeOwnedState(paths, state.sessionId);
-    return { kind: "recovered", stoppedOwnedProcess: false };
+    return recoverAbsentLaunch(command, runId, paths, state, adapter);
   }
   if (first.processes.length !== 1) {
     staticFailure(command, runId, "LAUNCH_PROCESS_AMBIGUOUS", 20, "The stale launch marker does not identify exactly one browser leader.", "Inspect the marker-matched processes and private state; Warm Browser did not signal them.");
@@ -786,8 +794,7 @@ async function recoverLaunching(command, runId, paths, state, adapter) {
   if (second.kind === "unverifiable")
     inspectionFailure(command, runId);
   if (second.processes.length === 0) {
-    removeOwnedState(paths, state.sessionId);
-    return { kind: "recovered", stoppedOwnedProcess: false };
+    return recoverAbsentLaunch(command, runId, paths, state, adapter);
   }
   if (second.processes.length !== 1 || !isSameProcess(candidate, second.processes[0]) || !isOwnedLaunch(second.processes[0], state.launch)) {
     staticFailure(command, runId, "LAUNCH_PROCESS_AMBIGUOUS", 20, "The stale launch marker changed before cleanup.", "Inspect the marker-matched processes and private state; Warm Browser did not signal them.");
