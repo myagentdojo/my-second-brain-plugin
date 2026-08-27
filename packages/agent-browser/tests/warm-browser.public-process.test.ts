@@ -419,6 +419,26 @@ test("start applies one port override without creating a durable preference", ()
 		{ action: "spawn", pid: 4101, processGroupId: 4101, port: 9333 },
 		{ action: "verify", pid: 4101, port: 9333 },
 	])
+
+	expect(run(testFixture, ["stop", "--run-id", "override-stop"]).exitCode).toBe(0)
+	const restarted = run(testFixture, ["start", "--run-id", "default-run"])
+	expect(restarted.exitCode).toBe(0)
+	expect(restarted.stderr.toString()).toBe("")
+	expect(JSON.parse(restarted.stdout.toString())).toMatchObject({
+		command: "start",
+		resultCode: "SESSION_STARTED",
+		runId: "default-run",
+		data: { sessionId: "session-2", endpoint: { host: "127.0.0.1", port: 9242 } },
+	})
+	expect(readJson(testFixture.sessionPath)).toMatchObject({ endpoint: { port: 9242 } })
+	expect(actions(testFixture)).toEqual([
+		{ action: "spawn", pid: 4101, processGroupId: 4101, port: 9333 },
+		{ action: "verify", pid: 4101, port: 9333 },
+		{ action: "verify", pid: 4101, port: 9333 },
+		{ action: "terminate", pid: 4101, processGroupId: 4101 },
+		{ action: "spawn", pid: 4102, processGroupId: 4102, port: 9242 },
+		{ action: "verify", pid: 4102, port: 9242 },
+	])
 })
 
 test("a verified owner refuses a concurrent start without another process", () => {
