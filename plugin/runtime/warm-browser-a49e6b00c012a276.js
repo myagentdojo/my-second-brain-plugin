@@ -21,6 +21,20 @@ class SpawnCleanupUnverifiedError extends Error {
   }
 }
 
+// packages/agent-browser/src/modules/warm-browser/bounds.ts
+var portProbeTimeoutMs = 300;
+var spawnConfirmationAttempts = 20;
+var spawnConfirmationPauseMs = 25;
+var endpointAttempts = 40;
+var endpointPauseMs = 100;
+var loopbackReadTimeoutMs = 500;
+var loopbackReadsPerAttempt = 2;
+var groupAbsenceAttempts = 40;
+var groupAbsencePauseMs = 50;
+var escalatedAbsenceAttempts = 20;
+var startBudgetMs = portProbeTimeoutMs + spawnConfirmationAttempts * spawnConfirmationPauseMs + endpointAttempts * (loopbackReadsPerAttempt * loopbackReadTimeoutMs + endpointPauseMs) + (groupAbsenceAttempts + escalatedAbsenceAttempts) * groupAbsencePauseMs;
+var startingTimeoutMs = startBudgetMs * 2;
+
 // packages/agent-browser/src/modules/warm-browser/ownership.ts
 function chromeArgumentList(input) {
   return [
@@ -251,7 +265,7 @@ async function awaitProcessGroupAbsence(processGroupId, attempts) {
     const observed = observeProcessGroup(processGroupId);
     if (observed !== "present")
       return observed;
-    await pause(50);
+    await pause(groupAbsencePauseMs);
   }
   return "present";
 }
@@ -262,7 +276,7 @@ async function terminateProcessGroupWithEscalation(expected, ownership) {
     return true;
   if (requested !== "delivered")
     return false;
-  const afterTermination = await awaitProcessGroupAbsence(processGroupId, 40);
+  const afterTermination = await awaitProcessGroupAbsence(processGroupId, groupAbsenceAttempts);
   if (afterTermination !== "present")
     return afterTermination === "absent";
   const table = processTable();
@@ -279,10 +293,10 @@ async function terminateProcessGroupWithEscalation(expected, ownership) {
     return true;
   if (escalated !== "delivered")
     return false;
-  return await awaitProcessGroupAbsence(processGroupId, 20) === "absent";
+  return await awaitProcessGroupAbsence(processGroupId, escalatedAbsenceAttempts) === "absent";
 }
 async function readEndpoint(port, expected) {
-  for (let attempt = 0;attempt < 40; attempt += 1) {
+  for (let attempt = 0;attempt < endpointAttempts; attempt += 1) {
     const table = processTable();
     if (table.kind === "unverifiable")
       return { kind: "process_unverifiable" };
@@ -294,9 +308,9 @@ async function readEndpoint(port, expected) {
       return { kind: "listener_unverified" };
     }
     if (owner === "absent") {
-      if (attempt === 39)
+      if (attempt === endpointAttempts - 1)
         return { kind: "listener_unverified" };
-      await pause(100);
+      await pause(endpointPauseMs);
       continue;
     }
     try {
@@ -315,9 +329,9 @@ async function readEndpoint(port, expected) {
         return { kind: "browser_unverified" };
       const pages = targets.filter((target) => target.type === "page" && typeof target.id === "string" && target.id.trim() !== "");
       if (pages.length === 0) {
-        if (attempt === 39)
+        if (attempt === endpointAttempts - 1)
           return { kind: "controlled_page_unavailable" };
-        await pause(100);
+        await pause(endpointPauseMs);
         continue;
       }
       if (pages.length !== 1)
@@ -338,9 +352,9 @@ async function readEndpoint(port, expected) {
         }
       };
     } catch {
-      if (attempt === 39)
+      if (attempt === endpointAttempts - 1)
         return { kind: "browser_unverified" };
-      await pause(100);
+      await pause(endpointPauseMs);
     }
   }
   return { kind: "browser_unverified" };
@@ -378,7 +392,7 @@ var productionAdapter = {
   inspectPort: connectLoopbackPort,
   spawnChrome: async ({ executable, argumentList, ownership }) => {
     const launchedPid = await startDetachedProcess(executable, argumentList);
-    for (let attempt = 0;attempt < 20; attempt += 1) {
+    for (let attempt = 0;attempt < spawnConfirmationAttempts; attempt += 1) {
       const table = processTable();
       if (table.kind === "unverifiable")
         throw new SpawnCleanupUnverifiedError;
@@ -388,7 +402,7 @@ var productionAdapter = {
           throw new SpawnCleanupUnverifiedError;
         return observed;
       }
-      await pause(25);
+      await pause(spawnConfirmationPauseMs);
     }
     throw new SpawnCleanupUnverifiedError;
   },
@@ -640,7 +654,6 @@ function removeOwnedState(paths, sessionId) {
 
 // packages/agent-browser/src/modules/warm-browser/warm-browser.ts
 var defaultPort = 9242;
-var startingTimeoutMs = 15000;
 var runIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 var commandNames = new Set(commandVocabulary.map(({ name }) => name));
 var usageLine = `warm-browser <${commandVocabulary.map(({ name }) => name).join("|")}> [--run-id ID] [--port NUMBER]`;

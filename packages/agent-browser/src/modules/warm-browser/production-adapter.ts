@@ -21,6 +21,15 @@ import {
 	startDetachedProcess,
 } from "./host-effects"
 import { observeLoopbackListener } from "./listener-table"
+import {
+	endpointAttempts,
+	endpointPauseMs,
+	escalatedAbsenceAttempts,
+	groupAbsenceAttempts,
+	groupAbsencePauseMs,
+	spawnConfirmationAttempts,
+	spawnConfirmationPauseMs,
+} from "./bounds"
 import { observeProcessTable } from "./process-table"
 import {
 	commandHasArgument,
@@ -83,7 +92,7 @@ async function awaitProcessGroupAbsence(
 	for (let attempt = 0; attempt < attempts; attempt += 1) {
 		const observed = observeProcessGroup(processGroupId)
 		if (observed !== "present") return observed
-		await pause(50)
+		await pause(groupAbsencePauseMs)
 	}
 	return "present"
 }
@@ -102,7 +111,7 @@ async function terminateProcessGroupWithEscalation(
 	const requested = signalProcessGroup(processGroupId, "SIGTERM")
 	if (requested === "absent") return true
 	if (requested !== "delivered") return false
-	const afterTermination = await awaitProcessGroupAbsence(processGroupId, 40)
+	const afterTermination = await awaitProcessGroupAbsence(processGroupId, groupAbsenceAttempts)
 	if (afterTermination !== "present") return afterTermination === "absent"
 	// The bounded probes only proved that something answers to this process
 	// group. Between the request and now the identity may have exited and its
@@ -127,14 +136,14 @@ async function terminateProcessGroupWithEscalation(
 	const escalated = signalProcessGroup(processGroupId, "SIGKILL")
 	if (escalated === "absent") return true
 	if (escalated !== "delivered") return false
-	return (await awaitProcessGroupAbsence(processGroupId, 20)) === "absent"
+	return (await awaitProcessGroupAbsence(processGroupId, escalatedAbsenceAttempts)) === "absent"
 }
 
 async function readEndpoint(
 	port: number,
 	expected: BrowserProcessIdentity,
 ): Promise<EndpointVerification> {
-	for (let attempt = 0; attempt < 40; attempt += 1) {
+	for (let attempt = 0; attempt < endpointAttempts; attempt += 1) {
 		const table = processTable()
 		if (table.kind === "unverifiable") return { kind: "process_unverifiable" }
 		const observed = table.processes.find((processIdentity) => processIdentity.pid === expected.pid)
@@ -144,8 +153,8 @@ async function readEndpoint(
 			return { kind: "listener_unverified" }
 		}
 		if (owner === "absent") {
-			if (attempt === 39) return { kind: "listener_unverified" }
-			await pause(100)
+			if (attempt === endpointAttempts - 1) return { kind: "listener_unverified" }
+			await pause(endpointPauseMs)
 			continue
 		}
 		try {
@@ -180,8 +189,8 @@ async function readEndpoint(
 				target.type === "page" && typeof target.id === "string" && target.id.trim() !== ""
 			)
 			if (pages.length === 0) {
-				if (attempt === 39) return { kind: "controlled_page_unavailable" }
-				await pause(100)
+				if (attempt === endpointAttempts - 1) return { kind: "controlled_page_unavailable" }
+				await pause(endpointPauseMs)
 				continue
 			}
 			if (pages.length !== 1) return { kind: "controlled_page_ambiguous" }
@@ -209,8 +218,8 @@ async function readEndpoint(
 				},
 			}
 		} catch {
-			if (attempt === 39) return { kind: "browser_unverified" }
-			await pause(100)
+			if (attempt === endpointAttempts - 1) return { kind: "browser_unverified" }
+			await pause(endpointPauseMs)
 		}
 	}
 	return { kind: "browser_unverified" }
@@ -262,7 +271,7 @@ export const productionAdapter: WarmBrowserAdapter = {
 	inspectPort: connectLoopbackPort,
 	spawnChrome: async ({ executable, argumentList, ownership }) => {
 		const launchedPid = await startDetachedProcess(executable, argumentList)
-		for (let attempt = 0; attempt < 20; attempt += 1) {
+		for (let attempt = 0; attempt < spawnConfirmationAttempts; attempt += 1) {
 			const table = processTable()
 			// An unverifiable table cannot say what this process identity now
 			// names, so nothing is signalled: the durable launch marker is left
@@ -278,7 +287,7 @@ export const productionAdapter: WarmBrowserAdapter = {
 				if (!isOwnedLaunch(observed, ownership)) throw new SpawnCleanupUnverifiedError()
 				return observed
 			}
-			await pause(25)
+			await pause(spawnConfirmationPauseMs)
 		}
 		// The launched identity never appeared within its bound. It is neither
 		// proved live nor proved gone, so it is never signalled either.

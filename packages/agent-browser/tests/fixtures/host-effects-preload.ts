@@ -74,6 +74,11 @@ interface HostEffectsPlan {
 	 */
 	readonly holdPortInspectionUntil?: string
 	/**
+	 * Blocks the loopback JSON read until this path appears, holding a real start
+	 * inside endpoint verification with its durable receipt already written.
+	 */
+	readonly holdEndpointVerificationUntil?: string
+	/**
 	 * Throws once from the process-table read, at the moment the launch has been
 	 * recorded as starting. That is after the spawn is confirmed and before the
 	 * endpoint is verified, so it models one unexpected host failure with an
@@ -231,6 +236,8 @@ const fake: typeof import("../../src/modules/warm-browser/host-effects") = {
 	readLoopbackJson: async (url) => {
 		action({ action: "http", url })
 		loopbackReadsServed += 1
+		const held = plan().holdEndpointVerificationUntil
+		if (held !== undefined) await waitForBarrier(held)
 		const document = plan().loopbackJson?.[new URL(url).pathname]
 		if (document === undefined) throw new Error("the private host-effects fake serves no document")
 		return document

@@ -12,6 +12,7 @@ import {
 	type TransactionState,
 } from "./contract"
 import type { WarmBrowserAdapter } from "./adapter"
+import { startingTimeoutMs } from "./bounds"
 import {
 	chromeArgumentList,
 	isOwnedLaunch,
@@ -37,7 +38,6 @@ import {
 } from "./state"
 
 const defaultPort = 9242
-const startingTimeoutMs = 15_000
 const runIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
 const commandNames = new Set<string>(commandVocabulary.map(({ name }) => name))
 /** Generated from the single Command Vocabulary owner; never restated. */

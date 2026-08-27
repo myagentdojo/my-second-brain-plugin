@@ -3,6 +3,7 @@ import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, 
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
+import { startBudgetMs, startingTimeoutMs } from "../src/modules/warm-browser/bounds"
 import * as productionAdapterModule from "../src/modules/warm-browser/production-adapter"
 import {
 	hostEffects,
@@ -541,6 +542,61 @@ test.each([
 	expect(existsSync(probe.sessionPath)).toBe(false)
 	expect(existsSync(probe.lockPath)).toBe(false)
 })
+
+test("the staleness bound dominates everything one start can legally still be doing", () => {
+	// Independent oracle: a start is only judged abandoned once it has outlived
+	// every bounded step it is allowed to take, with margin.
+	expect(startingTimeoutMs).toBeGreaterThan(startBudgetMs)
+	expect(startBudgetMs).toBeGreaterThan(15_000)
+})
+
+test(
+	"a second command never terminates a start that is still verifying its endpoint",
+	async () => {
+		const barrier = join(tmpdir(), `warm-browser-verify-${crypto.randomUUID()}`)
+		const probe = productionCliProbe({
+			...launchPlan(),
+			holdEndpointVerificationUntil: barrier,
+		})
+
+		// A real start reaches endpoint verification and stays there, with its
+		// durable receipt already written.
+		const started = spawnProductionCli(probe, ["start", "--run-id", "held-start"])
+		for (let attempt = 0; attempt < 2_000; attempt += 1) {
+			if (hostEffects(probe).some(({ action }) => action === "http")) break
+			await new Promise((resolve) => setTimeout(resolve, 5))
+		}
+		expect(JSON.parse(readFileSync(probe.sessionPath, "utf8"))).toMatchObject({
+			phase: "starting",
+		})
+		const receiptWhileWorking = readFileSync(probe.sessionPath, "utf8")
+
+		// Wait past the bound this code used to treat as abandonment.
+		await new Promise((resolve) => setTimeout(resolve, 15_500))
+
+		const second = runProductionCli(probe, ["status", "--run-id", "second-command"])
+
+		// The start is still legally working, so the second command waits for it.
+		expect(second.exitCode).toBe(22)
+		expect(JSON.parse(second.stderr.toString())).toMatchObject({
+			resultCode: "START_IN_PROGRESS",
+			transactionState: "unchanged",
+		})
+		// It signalled nothing and removed nothing; the first start still owns it.
+		expect(hostEffects(probe).filter(({ action }) => action === "signal")).toEqual([])
+		expect(readFileSync(probe.sessionPath, "utf8")).toBe(receiptWhileWorking)
+		expect(existsSync(probe.lockPath)).toBe(true)
+
+		writeFileSync(barrier, "release\n")
+		const [exitCode, stdout] = await Promise.all([
+			started.exited,
+			new Response(started.stdout).text(),
+		])
+		expect(exitCode).toBe(0)
+		expect(JSON.parse(stdout)).toMatchObject({ resultCode: "SESSION_STARTED" })
+	},
+	40_000,
+)
 
 test("an unsafe Agent Chrome Profile refuses the launch before any host effect", () => {
 	const probe = productionCliProbe(launchPlan())
