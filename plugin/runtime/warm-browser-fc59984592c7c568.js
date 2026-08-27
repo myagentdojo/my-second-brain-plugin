@@ -454,25 +454,31 @@ function resolveStatePaths(environment = process.env) {
   const lock = join2(root, "session.lock");
   return { root, lock, session: join2(lock, "session.json") };
 }
+function detachedCleanupExists(paths) {
+  return readdirSync(paths.root).some((entry) => entry.startsWith(".cleanup-"));
+}
 function ensurePrivateState(paths) {
   mkdirSync(dirname(paths.root), { recursive: true, mode: 448 });
   exactPrivateDirectory(dirname(paths.root));
   exactPrivateDirectory(paths.root);
-  if (readdirSync(paths.root).some((entry) => entry.startsWith(".cleanup-"))) {
+  if (detachedCleanupExists(paths))
     throw new UnsafeStateError;
-  }
 }
 function acquireSessionLock(paths) {
   try {
     mkdirSync(paths.lock, { mode: 448 });
     chmodSync(paths.lock, 448);
-    return true;
   } catch (error) {
     if (error.code !== "EEXIST")
       throw error;
     validateSessionLock(paths);
     return false;
   }
+  if (detachedCleanupExists(paths)) {
+    rmdirSync(paths.lock);
+    throw new UnsafeStateError;
+  }
+  return true;
 }
 function validateSessionLock(paths) {
   let metadata;
@@ -966,7 +972,7 @@ async function start(parsed, paths, adapter) {
       if (!await adapter.terminateProcessGroup(spawned, launching.launch)) {
         staticFailure("start", parsed.runId, "UNEXPECTED_FAILURE", 1, "Warm Browser could not roll back its unverified browser process group.", "Inspect the owned process group and private state before retrying.");
       }
-      removeOwnedState(paths, sessionId);
+      removeStateAfterStop("start", parsed.runId, paths, sessionId);
       staticFailure("start", parsed.runId, mapped[0], 20, mapped[1], "Inspect installed Chrome and the explicit CDP endpoint before retrying.", false, "rolled_back");
     }
     const state = runningState(starting, verification.endpoint);
@@ -995,7 +1001,7 @@ async function start(parsed, paths, adapter) {
       if (!await adapter.terminateProcessGroup(spawned, launching.launch)) {
         launchCleanupUnverified(parsed.runId, priorTx);
       }
-      removeOwnedState(paths, sessionId);
+      removeStateAfterStop("start", parsed.runId, paths, sessionId);
     } else if (intentWritten) {
       removeOwnedState(paths, sessionId);
     } else {

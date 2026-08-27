@@ -96,25 +96,44 @@ export function resolveStatePaths(environment: NodeJS.ProcessEnv = process.env):
 	return { root, lock, session: join(lock, "session.json") }
 }
 
+/** A cleanup that detached its lock and has not finished repairing it. */
+function detachedCleanupExists(paths: StatePaths): boolean {
+	return readdirSync(paths.root).some((entry) => entry.startsWith(".cleanup-"))
+}
+
 export function ensurePrivateState(paths: StatePaths): void {
 	mkdirSync(dirname(paths.root), { recursive: true, mode: 0o700 })
 	exactPrivateDirectory(dirname(paths.root))
 	exactPrivateDirectory(paths.root)
-	if (readdirSync(paths.root).some((entry) => entry.startsWith(".cleanup-"))) {
-		throw new UnsafeStateError()
-	}
+	if (detachedCleanupExists(paths)) throw new UnsafeStateError()
 }
 
+/**
+ * Takes exclusive ownership, or answers false when another owner already holds
+ * it.
+ *
+ * Excluding a detached cleanup belongs to this acquisition, not to a check made
+ * earlier: a cleanup releases its lock by renaming it away, so the only way this
+ * creation succeeds while one is in flight is after that rename, and that rename
+ * is what leaves the tombstone behind. Reading the root again after the creation
+ * therefore always observes it. The lock just created is given straight back, so
+ * a starter that passed the earlier check can never become a second owner beside
+ * a session whose cleanup has not finished.
+ */
 export function acquireSessionLock(paths: StatePaths): boolean {
 	try {
 		mkdirSync(paths.lock, { mode: 0o700 })
 		chmodSync(paths.lock, 0o700)
-		return true
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error
 		validateSessionLock(paths)
 		return false
 	}
+	if (detachedCleanupExists(paths)) {
+		rmdirSync(paths.lock)
+		throw new UnsafeStateError()
+	}
+	return true
 }
 
 export function validateSessionLock(paths: StatePaths): boolean {

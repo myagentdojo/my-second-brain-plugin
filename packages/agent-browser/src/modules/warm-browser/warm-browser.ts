@@ -660,7 +660,10 @@ async function start(
 					"Inspect the owned process group and private state before retrying.",
 				)
 			}
-			removeOwnedState(paths, sessionId)
+			// The group is proved stopped, so its cleanup reports the stop it
+			// performed rather than escaping into a rollback that would signal
+			// an already-stopped group a second time.
+			removeStateAfterStop("start", parsed.runId, paths, sessionId)
 			staticFailure(
 				"start",
 				parsed.runId,
@@ -697,7 +700,7 @@ async function start(
 			if (!(await adapter.terminateProcessGroup(spawned, launching.launch))) {
 				launchCleanupUnverified(parsed.runId, priorTx)
 			}
-			removeOwnedState(paths, sessionId)
+			removeStateAfterStop("start", parsed.runId, paths, sessionId)
 		} else if (intentWritten) {
 			removeOwnedState(paths, sessionId)
 		} else {

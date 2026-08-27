@@ -66,6 +66,25 @@ interface HostEffectsPlan {
 	 */
 	readonly signalOutcomes?: Record<string, SignalOutcome>
 	readonly portStatus?: "free" | "occupied" | "unverifiable"
+	/**
+	 * Blocks the port inspection until this path appears. The port is inspected
+	 * immediately before the ownership lock is acquired, so this holds a real
+	 * second process inside the window between the tombstone precheck and the
+	 * acquisition.
+	 */
+	readonly holdPortInspectionUntil?: string
+	/**
+	 * Throws once from the process-table read, at the moment the launch has been
+	 * recorded as starting. That is after the spawn is confirmed and before the
+	 * endpoint is verified, so it models one unexpected host failure with an
+	 * owned process group already running.
+	 */
+	readonly processTableThrowsWhenStarting?: boolean
+	/**
+	 * Obstructs durable cleanup at the moment a process group is signalled, by
+	 * leaving an entry inside the ownership lock that its removal cannot delete.
+	 */
+	readonly obstructCleanup?: boolean
 	/** The literal `lsof` reading the production observer must interpret. */
 	readonly listener?: ListenerReading
 	readonly listenerOwner?: number | "absent" | "unverifiable" | "spawned"
@@ -93,6 +112,31 @@ function action(value: Record<string, unknown>): void {
 }
 
 let signalsDelivered = 0
+let unexpectedFailuresRaised = 0
+
+/** The private state this harness owns, derived exactly as production derives it. */
+function sessionLockPath(): string {
+	return join(process.env.XDG_STATE_HOME ?? "", "my-second-brain", "warm-browser", "session.lock")
+}
+
+/** Whether the durable receipt has reached the phase named. */
+function receiptPhaseIs(phase: string): boolean {
+	const receipt = join(sessionLockPath(), "session.json")
+	if (!existsSync(receipt)) return false
+	try {
+		return (JSON.parse(readFileSync(receipt, "utf8")) as { phase?: string }).phase === phase
+	} catch {
+		return false
+	}
+}
+
+async function waitForBarrier(path: string): Promise<void> {
+	for (let attempt = 0; attempt < 1_000; attempt += 1) {
+		if (existsSync(path)) return
+		await new Promise((resolve) => setTimeout(resolve, 5))
+	}
+	throw new Error("the private host-effects fake timed out on its barrier")
+}
 let loopbackReadsServed = 0
 
 function row(leader: SpawnedLeader): string {
@@ -105,6 +149,14 @@ const fake: typeof import("../../src/modules/warm-browser/host-effects") = {
 	hostPlatform: () => plan().platform ?? "darwin",
 	readProcessTable: () => {
 		const current = plan()
+		if (
+			current.processTableThrowsWhenStarting === true &&
+			unexpectedFailuresRaised === 0 &&
+			receiptPhaseIs("starting")
+		) {
+			unexpectedFailuresRaised += 1
+			throw new Error("the private host-effects fake could not read the process table")
+		}
 		const leaders = spawnedLeaders()
 		if (loopbackReadsServed > 0 && current.processTableAfterJson !== undefined) {
 			return current.processTableAfterJson
@@ -142,12 +194,22 @@ const fake: typeof import("../../src/modules/warm-browser/host-effects") = {
 	},
 	signalProcessGroup: (processGroupId, signal) => {
 		action({ action: "signal", processGroupId, signal })
+		if (signal !== 0 && plan().obstructCleanup === true) {
+			const lock = sessionLockPath()
+			// A real filesystem obstruction, left exactly when the group is
+			// signalled, so durable cleanup fails after a proved stop.
+			if (existsSync(lock)) {
+				writeFileSync(join(lock, "unexpected-entry"), "block cleanup\n", { mode: 0o600 })
+			}
+		}
 		if (signal !== 0) signalsDelivered += 1
 		const current = plan()
 		return current.signalOutcomes?.[String(signal)] ?? current.signalOutcome ?? "absent"
 	},
 	connectLoopbackPort: async (port) => {
 		action({ action: "port", port })
+		const barrier = plan().holdPortInspectionUntil
+		if (barrier !== undefined) await waitForBarrier(barrier)
 		return plan().portStatus ?? "free"
 	},
 	readLoopbackListener: (port) => {

@@ -1,14 +1,19 @@
 import { afterEach, expect, test } from "bun:test"
-import { chmodSync, existsSync, readFileSync, statSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 
 import * as productionAdapterModule from "../src/modules/warm-browser/production-adapter"
 import {
 	hostEffects,
 	installedChrome,
+	packageRoot,
+	preloadEntry,
 	processRow,
 	type ProductionCliProbe,
 	productionCliProbe,
 	removeProductionCliProbes,
+	productionEntry,
 	runProductionCli,
 	systemRows,
 	verifiedReading,
@@ -519,4 +524,125 @@ test("an unsafe Agent Chrome Profile refuses the launch before any host effect",
 	})
 	expect(hostEffects(probe)).toEqual([])
 	expect(existsSync(probe.lockPath)).toBe(false)
+})
+
+/** One real second process running the production CLI, held at its port barrier. */
+function spawnProductionCli(probe: ProductionCliProbe, arguments_: readonly string[]) {
+	return Bun.spawn({
+		cmd: [process.execPath, "--preload", preloadEntry, productionEntry, ...arguments_],
+		cwd: packageRoot,
+		env: probe.environment,
+		stdout: "pipe",
+		stderr: "pipe",
+	})
+}
+
+async function waitForPortInspection(probe: ProductionCliProbe): Promise<void> {
+	for (let attempt = 0; attempt < 1_000; attempt += 1) {
+		if (hostEffects(probe).some(({ action }) => action === "port")) return
+		await new Promise((resolve) => setTimeout(resolve, 5))
+	}
+	throw new Error("the held start never reached its port inspection")
+}
+
+test("a start that passed the tombstone precheck refuses once a cleanup detaches its lock", async () => {
+	const barrier = join(tmpdir(), `warm-browser-acquire-${crypto.randomUUID()}`)
+	const probe = productionCliProbe({ ...launchPlan(), holdPortInspectionUntil: barrier })
+
+	// The starter passes the tombstone precheck against a clean state root, then
+	// is held in the window immediately before it acquires ownership.
+	const started = spawnProductionCli(probe, ["start", "--run-id", "acquire-race"])
+	await waitForPortInspection(probe)
+	expect(existsSync(probe.lockPath)).toBe(false)
+
+	// Another owner's cleanup detaches its lock into a tombstone and then fails,
+	// which is the exact state the held starter must refuse to acquire into.
+	mkdirSync(join(probe.sessionRoot, ".cleanup-old-session"), { recursive: true, mode: 0o700 })
+	writeFileSync(barrier, "release\n")
+
+	const [exitCode, stdout, stderr] = await Promise.all([
+		started.exited,
+		new Response(started.stdout).text(),
+		new Response(started.stderr).text(),
+	])
+
+	expect(exitCode).toBe(20)
+	expect(stdout).toBe("")
+	expect(JSON.parse(stderr)).toMatchObject({
+		resultCode: "STATE_UNSAFE",
+		transactionState: "unchanged",
+	})
+	// It refused before writing any receipt and before launching anything.
+	expect(existsSync(probe.sessionPath)).toBe(false)
+	expect(existsSync(probe.lockPath)).toBe(false)
+	expect(hostEffects(probe).filter(({ action }) => action === "spawn")).toEqual([])
+	// The other owner's tombstone is left exactly as its cleanup left it.
+	expect(existsSync(join(probe.sessionRoot, ".cleanup-old-session"))).toBe(true)
+})
+
+/**
+ * Independent oracle: the truthful result when a proved stop cannot remove its
+ * durable state. The stop already happened, so the transaction is stopped and
+ * the retained state is what needs repair. Restated by hand.
+ */
+function expectStoppedButRetained(result: { exitCode: number; stdout: string; stderr: string }): void {
+	expect(result.exitCode).toBe(20)
+	expect(result.stdout).toBe("")
+	expect(JSON.parse(result.stderr)).toMatchObject({
+		status: "error",
+		command: "start",
+		resultCode: "STATE_UNSAFE",
+		transactionState: "stopped",
+		retrySafe: false,
+		nextAction:
+			"Repair the retained private Warm Browser session state; the owned browser process group is already stopped.",
+		message:
+			"Warm Browser stopped the owned browser process group but could not remove its private session state.",
+	})
+}
+
+test("an endpoint rollback whose cleanup fails reports the stop and never signals twice", () => {
+	const probe = productionCliProbe({
+		...launchPlan(),
+		// A foreign listener refuses the endpoint, so the launch rolls back.
+		listenerOwner: 4243,
+		obstructCleanup: true,
+	})
+
+	const result = runProductionCli(probe, ["start", "--run-id", "rollback-cleanup"])
+
+	expectStoppedButRetained({
+		exitCode: result.exitCode ?? -1,
+		stdout: result.stdout.toString(),
+		stderr: result.stderr.toString(),
+	})
+	// Exactly one termination sequence: the group is never signalled again.
+	expect(hostEffects(probe).filter(({ action }) => action === "signal")).toEqual([
+		{ action: "signal", processGroupId: 4242, signal: "SIGTERM" },
+	])
+	// The receipt is retained where a repair can find it.
+	expect(existsSync(join(probe.sessionRoot, ".cleanup-session-1", "session.json"))).toBe(false)
+	expect(readdirSync(probe.sessionRoot).some((entry) => entry.startsWith(".cleanup-"))).toBe(true)
+})
+
+test("an unexpected post-spawn rollback whose cleanup fails reports the stop and signals once", () => {
+	const probe = productionCliProbe({
+		...launchPlan(),
+		// One unexpected host failure once the launch is recorded as starting,
+		// which is after the spawn is confirmed, then normal behaviour.
+		processTableThrowsWhenStarting: true,
+		obstructCleanup: true,
+	})
+
+	const result = runProductionCli(probe, ["start", "--run-id", "unexpected-cleanup"])
+
+	expectStoppedButRetained({
+		exitCode: result.exitCode ?? -1,
+		stdout: result.stdout.toString(),
+		stderr: result.stderr.toString(),
+	})
+	expect(hostEffects(probe).filter(({ action }) => action === "signal")).toEqual([
+		{ action: "signal", processGroupId: 4242, signal: "SIGTERM" },
+	])
+	expect(readdirSync(probe.sessionRoot).some((entry) => entry.startsWith(".cleanup-"))).toBe(true)
 })
