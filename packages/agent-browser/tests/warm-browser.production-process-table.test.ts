@@ -26,13 +26,13 @@ afterEach(removeProductionCliProbes)
  * Independent oracle: the exact Chrome command line a well-formed row carries.
  * Restated here on purpose so no production table supplies its own expectation.
  */
-function chromeCommand(profileRoot: string, launchMarker = "session-probe"): string {
+function chromeCommand(profileRoot: string, launchMarker = "session-probe", port = 9242): string {
 	return [
 		installedChrome,
 		`--user-data-dir=${profileRoot}`,
 		"--profile-directory=Default",
 		"--remote-debugging-address=127.0.0.1",
-		"--remote-debugging-port=9242",
+		`--remote-debugging-port=${port}`,
 		`--agent-browser-launch-marker=${launchMarker}`,
 		"--password-store=basic",
 		"--use-mock-keychain",
@@ -694,6 +694,140 @@ test("a stale launch with no marker and no profile owner is cleaned without sign
 		data: { trigger: "status", postcondition: "absent", stoppedOwnedProcess: false },
 	})
 	expect(existsSync(probe.lockPath)).toBe(false)
+	expect(hostEffects(probe)).toEqual([])
+})
+
+/**
+ * A running receipt that agrees with itself throughout, for whichever values it
+ * is given. Each rebind regression starts here and changes exactly one thing, so
+ * exactly one rule of the receipt contract is the one that refuses it.
+ */
+function consistentRunningState(
+	probe: ProductionCliProbe,
+	overrides: { profileRoot?: string; port?: number; marker?: string } = {},
+): Record<string, unknown> {
+	const profileRoot = overrides.profileRoot ?? probe.profileRoot
+	const port = overrides.port ?? 9242
+	const marker = overrides.marker ?? "session-probe"
+	const commandLine = chromeCommand(profileRoot, marker, port)
+	const base = runningState(probe)
+	return {
+		...base,
+		profileRoot,
+		launchMarker: marker,
+		launch: { executable: installedChrome, commandLine },
+		endpoint: { ...(base.endpoint as Record<string, unknown>), port },
+		process: { ...(base.process as Record<string, unknown>), commandLine },
+	}
+}
+
+/**
+ * Independent oracle: receipts that disagree with the fixed production contract
+ * on exactly one rule. Each is a receipt this code could not have written, so
+ * acting on it would mean observing, removing, or signalling on behalf of a
+ * session that was rebound underneath it.
+ */
+const rebrokenReceipts: ReadonlyArray<
+	readonly [string, string, (probe: ProductionCliProbe) => Record<string, unknown>]
+> = [
+	[
+		"a profile root the production Adapter does not own",
+		"STATE_UNSAFE",
+		(probe) => consistentRunningState(probe, { profileRoot: "/tmp/someone-elses-profile" }),
+	],
+	[
+		"a launch marker that is not its session id",
+		"STATE_UNSAFE",
+		(probe) => consistentRunningState(probe, { marker: "some-other-marker" }),
+	],
+	[
+		"a port outside the command domain",
+		"STATE_UNSAFE",
+		(probe) => consistentRunningState(probe, { port: 80 }),
+	],
+	[
+		"a launch that is not the canonical one for its own values",
+		"STATE_UNSAFE",
+		(probe) => ({
+			...consistentRunningState(probe),
+			launch: {
+				executable: installedChrome,
+				commandLine: `${chromeCommand(probe.profileRoot)} --load-extension=/tmp/unowned`,
+			},
+		}),
+	],
+	[
+		"an executable the production Adapter does not launch",
+		"STATE_UNSAFE",
+		(probe) => ({
+			...consistentRunningState(probe),
+			launch: {
+				executable: "/usr/bin/true",
+				commandLine: chromeCommand(probe.profileRoot).replace(installedChrome, "/usr/bin/true"),
+			},
+		}),
+	],
+	[
+		"a stored process disagreeing with its own launch",
+		"PROCESS_IDENTITY_UNVERIFIED",
+		(probe) => ({
+			...consistentRunningState(probe),
+			process: {
+				...(runningState(probe).process as Record<string, unknown>),
+				commandLine: chromeCommand(probe.profileRoot, "session-other"),
+			},
+		}),
+	],
+]
+
+test.each(rebrokenReceipts)(
+	"a durable receipt naming %s is refused before any effect",
+	(_name, resultCode, build) => {
+	const probe = productionCliProbe()
+	seedSessionState(probe, build(probe))
+	const stateBefore = readFileSync(probe.sessionPath, "utf8")
+	writeHostEffectsPlan(probe, { processTable: ownedRowReading(probe) })
+
+	const result = runProductionCli(probe, ["stop", "--run-id", "rebound-receipt"])
+
+	// The exact typed refusal this rule owns, so a receipt that slipped past it
+	// and was caught later by observation would disagree with this test.
+	expect(result.exitCode).toBe(20)
+	expect(result.stdout.toString()).toBe("")
+	expect(JSON.parse(result.stderr.toString())).toMatchObject({ resultCode })
+	// The receipt and the lock survive exactly as they were.
+	expect(readFileSync(probe.sessionPath, "utf8")).toBe(stateBefore)
+	expect(existsSync(probe.lockPath)).toBe(true)
+	// Nothing was observed on its behalf and nothing was signalled.
+	expect(hostEffects(probe)).toEqual([])
+	},
+)
+
+test("a receipt whose process disagrees with its launch is refused without reading the table", () => {
+	const probe = productionCliProbe()
+	seedSessionState(probe, {
+		...consistentRunningState(probe),
+		process: {
+			...(runningState(probe).process as Record<string, unknown>),
+			commandLine: chromeCommand(probe.profileRoot, "session-other"),
+		},
+	})
+	const stateBefore = readFileSync(probe.sessionPath, "utf8")
+	// The process table cannot be read at all. A refusal that names the identity
+	// rather than the reading proves the receipt was rejected before any
+	// observation was attempted on its behalf.
+	writeHostEffectsPlan(probe, {
+		processTable: { status: null, signal: null, failed: true, stdout: null },
+	})
+
+	const result = runProductionCli(probe, ["stop", "--run-id", "unread-table"])
+
+	expect(result.exitCode).toBe(20)
+	expect(JSON.parse(result.stderr.toString())).toMatchObject({
+		resultCode: "PROCESS_IDENTITY_UNVERIFIED",
+	})
+	expect(readFileSync(probe.sessionPath, "utf8")).toBe(stateBefore)
+	expect(existsSync(probe.lockPath)).toBe(true)
 	expect(hostEffects(probe)).toEqual([])
 })
 

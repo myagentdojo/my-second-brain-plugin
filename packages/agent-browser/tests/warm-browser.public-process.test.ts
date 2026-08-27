@@ -15,6 +15,7 @@ import {
 import { homedir, tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 
+import { startingTimeoutMs } from "../src/modules/warm-browser/bounds"
 import * as contractModule from "../src/modules/warm-browser/contract"
 import { expectError, expectRefusal } from "./fixtures/cli-refusals"
 import { commandVocabulary } from "../src/modules/warm-browser/contract"
@@ -24,6 +25,13 @@ import { runWarmBrowserCli } from "../src/modules/warm-browser/warm-browser"
 const packageRoot = resolve(import.meta.dir, "..")
 const productionEntry = resolve(packageRoot, "src/main.ts")
 const driverPreload = resolve(import.meta.dir, "fixtures/warm-browser-driver.ts")
+/** The clock the driver fixture reports. */
+const fixtureNowEpochMs = 1_800_000_000_000
+/**
+ * An age comfortably past the staleness bound, derived from the bound itself so
+ * these fixtures cannot silently stop being stale when the bound changes.
+ */
+const staleEpochMs = fixtureNowEpochMs - startingTimeoutMs - 60_000
 const temporaryRoots: string[] = []
 
 interface Fixture {
@@ -145,7 +153,7 @@ function perturbLedger(testFixture: Fixture, change: (ledger: ProcessLedger) => 
 function makeStateStale(testFixture: Fixture, patch: Record<string, unknown> = {}): void {
 	writeJson(testFixture.sessionPath, {
 		...readJson(testFixture.sessionPath),
-		createdAtEpochMs: 1_799_999_980_000,
+		createdAtEpochMs: staleEpochMs,
 		...patch,
 	})
 	chmodSync(testFixture.sessionPath, 0o600)
@@ -909,7 +917,7 @@ test("status recovers crashed-process state and reports its literal trigger and 
 test("an expired state-less lock is preserved because its process receipt cannot be reconstructed", () => {
 	const testFixture = fixture()
 	mkdirSync(testFixture.lockPath, { recursive: true, mode: 0o700 })
-	utimesSync(testFixture.lockPath, new Date(1_799_999_970_000), new Date(1_799_999_970_000))
+	utimesSync(testFixture.lockPath, new Date(staleEpochMs), new Date(staleEpochMs))
 	const status = run(testFixture, ["status", "--run-id", "empty-lock-status"])
 	expectError(status, 20, {
 		schemaVersion: 1,

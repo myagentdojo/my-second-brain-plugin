@@ -354,6 +354,53 @@ async function recoverLaunching(
 	return { kind: "recovered", stoppedOwnedProcess: true }
 }
 
+/**
+ * Proves a durable receipt is one this code could have written, before anything
+ * is observed, removed, or signalled on its behalf.
+ *
+ * Everything the receipt says about the launch is also derivable from the fixed
+ * production Adapter and its own session identity. A receipt that disagrees was
+ * rebound after it was written, by an edit, a restore, or a different build, and
+ * acting on it would mean signalling or deleting on behalf of a session this
+ * process never owned. Each disagreement fails closed and leaves the receipt and
+ * the lock exactly as they are.
+ */
+function proveReceiptContract(
+	command: SliceCommand,
+	runId: string,
+	state: BrowserSessionState,
+	adapter: WarmBrowserAdapter,
+): void {
+	const port = state.endpoint.port
+	if (
+		state.profileRoot !== adapter.profileRoot() ||
+		state.launchMarker !== state.sessionId ||
+		port < 1024 ||
+		port > 65_535
+	) {
+		throw new UnsafeStateError()
+	}
+	const canonical = launchOwnership({
+		executable: adapter.chromeExecutable(),
+		profileRoot: state.profileRoot,
+		port,
+		launchMarker: state.launchMarker,
+	})
+	if (
+		state.launch.executable !== canonical.executable ||
+		state.launch.commandLine !== canonical.commandLine
+	) {
+		throw new UnsafeStateError()
+	}
+	if (
+		state.phase !== "launching" &&
+		(state.process.executable !== state.launch.executable ||
+			state.process.commandLine !== state.launch.commandLine)
+	) {
+		identityFailure(command, runId)
+	}
+}
+
 async function inspectSession(
 	command: SliceCommand,
 	runId: string,
@@ -362,6 +409,7 @@ async function inspectSession(
 ): Promise<SessionInspection> {
 	const lockExists = validateSessionLock(paths)
 	const state = readSessionState(paths)
+	if (state !== undefined) proveReceiptContract(command, runId, state, adapter)
 	if (!lockExists && state !== undefined) {
 		staticFailure(
 			command,

@@ -826,9 +826,29 @@ async function recoverLaunching(command, runId, paths, state, adapter) {
   removeStateAfterStop(command, runId, paths, state.sessionId);
   return { kind: "recovered", stoppedOwnedProcess: true };
 }
+function proveReceiptContract(command, runId, state, adapter) {
+  const port = state.endpoint.port;
+  if (state.profileRoot !== adapter.profileRoot() || state.launchMarker !== state.sessionId || port < 1024 || port > 65535) {
+    throw new UnsafeStateError;
+  }
+  const canonical = launchOwnership({
+    executable: adapter.chromeExecutable(),
+    profileRoot: state.profileRoot,
+    port,
+    launchMarker: state.launchMarker
+  });
+  if (state.launch.executable !== canonical.executable || state.launch.commandLine !== canonical.commandLine) {
+    throw new UnsafeStateError;
+  }
+  if (state.phase !== "launching" && (state.process.executable !== state.launch.executable || state.process.commandLine !== state.launch.commandLine)) {
+    identityFailure(command, runId);
+  }
+}
 async function inspectSession(command, runId, paths, adapter) {
   const lockExists = validateSessionLock(paths);
   const state = readSessionState(paths);
+  if (state !== undefined)
+    proveReceiptContract(command, runId, state, adapter);
   if (!lockExists && state !== undefined) {
     staticFailure(command, runId, "STATE_UNSAFE", 20, "Warm Browser state has no ownership lock.", "Inspect the private Warm Browser state before retrying.");
   }
