@@ -1,73 +1,4 @@
 // @bun
-// packages/agent-browser/src/modules/warm-browser/contract.ts
-var schemaVersion = 1;
-var runIdOption = { flag: "--run-id", value: "ID", required: false };
-var refusedSelectorFlags = ["--selector", "--css", "--xpath", "--text"];
-var refusedDestinationFlags = [
-  "--path",
-  "--out",
-  "--output",
-  "--file",
-  "--dir",
-  "--directory"
-];
-var commandVocabulary = [
-  { name: "help", sideEffects: "none", options: [] },
-  {
-    name: "start",
-    sideEffects: "may stop a proved stale owned browser process group and invalidate every earlier Snapshot Reference, then starts one owned browser process group",
-    options: [{ flag: "--port", value: "NUMBER", required: false }]
-  },
-  {
-    name: "status",
-    sideEffects: "may stop a proved stale owned browser process group, remove its private state, and invalidate every earlier Snapshot Reference",
-    options: []
-  },
-  {
-    name: "open",
-    sideEffects: "navigates the one Controlled Page and invalidates every earlier Snapshot Reference",
-    options: [
-      { flag: "--url", value: "URL", required: true },
-      { flag: "--adopt-page", value: null, required: false }
-    ]
-  },
-  {
-    name: "snapshot",
-    sideEffects: "reads the Controlled Page and replaces every earlier Snapshot Reference",
-    options: []
-  },
-  {
-    name: "screenshot",
-    sideEffects: "captures the Controlled Page to one private Browser Session-owned PNG, replacing the Screenshot that session owned, and may invalidate every earlier Snapshot Reference",
-    options: []
-  },
-  {
-    name: "click",
-    sideEffects: "dispatches one click on one referenced element of the Controlled Page and may invalidate every earlier Snapshot Reference",
-    options: [{ flag: "--ref", value: "REFERENCE", required: true }]
-  },
-  {
-    name: "fill",
-    sideEffects: "types one non-secret value into one referenced empty field of the Controlled Page and may invalidate every earlier Snapshot Reference",
-    options: [
-      { flag: "--ref", value: "REFERENCE", required: true },
-      { flag: "--value", value: "TEXT", required: true }
-    ]
-  },
-  {
-    name: "stop",
-    sideEffects: "stops one verified owned browser process group and removes its private state, including every Snapshot Reference",
-    options: []
-  }
-];
-
-class SpawnCleanupUnverifiedError extends Error {
-  constructor() {
-    super("spawned Chrome process-group cleanup could not be verified");
-    this.name = "SpawnCleanupUnverifiedError";
-  }
-}
-
 // packages/agent-browser/src/modules/warm-browser/bounds.ts
 var portProbeTimeoutMs = 300;
 var spawnConfirmationAttempts = 20;
@@ -90,9 +21,8 @@ var fillValueLimit = 4096;
 var screenshotByteLimit = 16 * 1024 * 1024;
 var screenshotPixelLimit = 20000;
 var screenshotBase64Limit = Math.ceil(screenshotByteLimit / 3) * 4;
-
-// packages/agent-browser/src/modules/warm-browser/controlled-page.ts
-import { Buffer } from "buffer";
+var privateDeliveryChildReplyLimit = 4096;
+var credentialWrapperOutputLimit = 1048576;
 
 // packages/agent-browser/src/modules/warm-browser/cdp-channel.ts
 var failedReply = { ok: false, result: undefined };
@@ -184,6 +114,9 @@ async function openCdpChannel(webSocketUrl) {
   return { kind: "open", channel };
 }
 
+// packages/agent-browser/src/modules/warm-browser/controlled-page.ts
+import { Buffer } from "buffer";
+
 // packages/agent-browser/src/modules/warm-browser/credential-fields.ts
 var credentialInputTypes = ["password"];
 var credentialAutocompleteTokens = [
@@ -269,6 +202,7 @@ var actionableRoles = [
   "textarea",
   "textbox"
 ];
+var frameOwnerNodeNames = ["IFRAME", "FRAME", "OBJECT", "EMBED"];
 function record(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value : undefined;
 }
@@ -355,6 +289,21 @@ function isWithin(parents, node, ancestor) {
     current = parents.get(current);
   }
   return false;
+}
+function isFramed(reading, node) {
+  if (!reading.descriptions.has(node) && !reading.parents.has(node))
+    return true;
+  let current = reading.parents.get(node);
+  for (let step = 0;step < 128; step += 1) {
+    if (current === undefined)
+      return false;
+    const description = reading.descriptions.get(current);
+    if (description !== undefined && frameOwnerNodeNames.includes(description.nodeName.toUpperCase())) {
+      return true;
+    }
+    current = reading.parents.get(current);
+  }
+  return true;
 }
 function hasProperty(node, name) {
   const properties = Array.isArray(node.properties) ? node.properties : [];
@@ -519,6 +468,46 @@ async function captureControlledPage(input) {
     return { kind: "captured", basis: after, png: Buffer.from(data, "base64") };
   });
 }
+async function readControlledPageField(input) {
+  return await withControlledPage(input.port, input.targetId, { kind: "unverified" }, async (channel) => {
+    for (const method of ["Page.enable", "DOM.enable", "Accessibility.enable"]) {
+      if (!(await channel.call(method, {})).ok)
+        return { kind: "unverified" };
+    }
+    const opening = await readBasis(channel, input.targetId);
+    if (opening === undefined)
+      return { kind: "unverified" };
+    if (!sameBasis(opening, input.basis))
+      return { kind: "identity_changed" };
+    const reading = await readDocument(channel);
+    if (reading === undefined)
+      return { kind: "unverified" };
+    const described = await channel.call("DOM.describeNode", {
+      backendNodeId: input.backendNodeId
+    });
+    if (!described.ok)
+      return { kind: "element_absent" };
+    const description = describedNode(record(record(described.result)?.node) ?? {});
+    if (description === undefined)
+      return { kind: "element_absent" };
+    const accessibility = await readNodeAccessibility(channel, input.backendNodeId);
+    if (accessibility === undefined)
+      return { kind: "unverified" };
+    const closing = await readBasis(channel, input.targetId);
+    if (closing === undefined)
+      return { kind: "unverified" };
+    if (!sameBasis(closing, input.basis))
+      return { kind: "identity_changed" };
+    return {
+      kind: "read",
+      basis: closing,
+      description,
+      accessibleName: accessibility.name,
+      holdsValue: accessibility.holdsValue,
+      framed: isFramed(reading, input.backendNodeId)
+    };
+  });
+}
 function undeliverable(reason) {
   return { kind: "undeliverable", reason };
 }
@@ -662,6 +651,712 @@ async function actOnControlledPage(input) {
   });
 }
 
+// packages/agent-browser/src/modules/private-delivery/field-kind.ts
+var passwordAutocompleteTokens = ["current-password", "new-password"];
+var passwordIdentifierFragments = [
+  "password",
+  "passwd",
+  "passphrase",
+  "passcode",
+  "pwd"
+];
+var usernameAutocompleteTokens = ["username"];
+var usernameIdentifierFragments = ["username", "userid", "login", "email"];
+var identifierAttributes2 = ["name", "id", "autocomplete", "aria-label", "placeholder"];
+var editableNodeNames2 = ["INPUT", "TEXTAREA", "SELECT"];
+var editableRoles2 = ["textbox", "searchbox", "combobox", "spinbutton"];
+function normalise2(value) {
+  return value.toLowerCase().replaceAll(/[^a-z0-9]/g, "");
+}
+function attributeToken2(description, name) {
+  return (description.attributes[name] ?? "").trim().toLowerCase();
+}
+function isEditableField2(description) {
+  if (editableNodeNames2.includes(description.nodeName.toUpperCase())) {
+    return true;
+  }
+  const editable = attributeToken2(description, "contenteditable");
+  if (editable !== "" && editable !== "false")
+    return true;
+  return editableRoles2.includes(attributeToken2(description, "role"));
+}
+function credentialFieldKind(description, accessibleName = "") {
+  if (attributeToken2(description, "type") === "password")
+    return "password";
+  const autocomplete = attributeToken2(description, "autocomplete").split(/\s+/);
+  const heard = isEditableField2(description) ? normalise2(accessibleName) : "";
+  const identifier = [
+    ...identifierAttributes2.map((attribute) => normalise2(description.attributes[attribute] ?? "")),
+    heard
+  ].join(" ");
+  if (autocomplete.some((token) => passwordAutocompleteTokens.includes(token)) || passwordIdentifierFragments.some((fragment) => identifier.includes(fragment))) {
+    return "password";
+  }
+  if (autocomplete.some((token) => usernameAutocompleteTokens.includes(token)) || usernameIdentifierFragments.some((fragment) => identifier.includes(fragment))) {
+    return "username";
+  }
+  return;
+}
+
+// packages/agent-browser/src/modules/private-delivery/child.ts
+var privateDeliveryChildArgument = "--deliver-one-credential-field";
+var controlCharacter = /\p{Cc}/u;
+function say(outcome) {
+  process.stdout.write(`${JSON.stringify({ outcome })}
+`);
+  return outcome === "usage" ? 2 : 1;
+}
+function sayDelivered(fieldNowHoldsValue) {
+  process.stdout.write(`${JSON.stringify({ outcome: "delivered", fieldNowHoldsValue })}
+`);
+  return 0;
+}
+var childOptionFlags = [
+  "--port",
+  "--target",
+  "--node",
+  "--frame",
+  "--loader",
+  "--url",
+  "--origin",
+  "--field"
+];
+function identityArgument(value) {
+  return value === "" || value.length > 2048 || controlCharacter.test(value) || /\s/u.test(value) ? undefined : value;
+}
+function parseChildArguments(argumentList) {
+  const seen = new Map;
+  for (let index = 0;index < argumentList.length; index += 2) {
+    const flag = argumentList[index];
+    const value = argumentList[index + 1];
+    if (flag === undefined || value === undefined)
+      return;
+    if (!childOptionFlags.includes(flag))
+      return;
+    if (seen.has(flag))
+      return;
+    seen.set(flag, value);
+  }
+  if (seen.size !== childOptionFlags.length)
+    return;
+  const portText = seen.get("--port");
+  if (!/^[0-9]{1,5}$/.test(portText))
+    return;
+  const port = Number(portText);
+  if (!Number.isSafeInteger(port) || port < 1 || port > 65535)
+    return;
+  const targetId = seen.get("--target");
+  if (!isAddressableTargetId(targetId))
+    return;
+  const nodeText = seen.get("--node");
+  if (!/^[0-9]{1,15}$/.test(nodeText))
+    return;
+  const backendNodeId = Number(nodeText);
+  if (!Number.isSafeInteger(backendNodeId) || backendNodeId < 1)
+    return;
+  const frameId = identityArgument(seen.get("--frame"));
+  const loaderId = identityArgument(seen.get("--loader"));
+  const origin = identityArgument(seen.get("--origin"));
+  if (frameId === undefined || loaderId === undefined || origin === undefined)
+    return;
+  const url = seen.get("--url");
+  if (url === "" || url.length > 2048 || controlCharacter.test(url))
+    return;
+  const field = seen.get("--field");
+  if (field !== "username" && field !== "password")
+    return;
+  return { port, targetId, backendNodeId, frameId, loaderId, url, origin, field };
+}
+function record2(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : undefined;
+}
+function nonEmptyText2(value) {
+  return typeof value === "string" && value !== "" ? value : undefined;
+}
+async function readFrame(channel) {
+  const reply = await channel.call("Page.getFrameTree", {});
+  if (!reply.ok)
+    return;
+  const frame = record2(record2(record2(reply.result)?.frameTree)?.frame);
+  const frameId = nonEmptyText2(frame?.id);
+  const loaderId = nonEmptyText2(frame?.loaderId);
+  const url = nonEmptyText2(frame?.url);
+  return frameId === undefined || loaderId === undefined || url === undefined ? undefined : { frameId, loaderId, url };
+}
+function checkFrame(frame, arguments_) {
+  let origin;
+  try {
+    origin = new URL(frame.url).origin;
+  } catch {
+    return "origin_changed";
+  }
+  if (origin !== arguments_.origin)
+    return "origin_changed";
+  return frame.frameId !== arguments_.frameId || frame.loaderId !== arguments_.loaderId || frame.url !== arguments_.url ? "identity_changed" : "same";
+}
+function attributeMap2(attributes) {
+  const flat = Array.isArray(attributes) ? attributes : [];
+  const map = {};
+  for (let index = 0;index + 1 < flat.length; index += 2) {
+    const name = flat[index];
+    const value = flat[index + 1];
+    if (typeof name === "string" && typeof value === "string")
+      map[name] = value;
+  }
+  return map;
+}
+async function describeNode(channel, backendNodeId) {
+  const reply = await channel.call("DOM.describeNode", { backendNodeId });
+  if (!reply.ok)
+    return;
+  const node = record2(record2(reply.result)?.node);
+  const nodeName = nonEmptyText2(node?.nodeName);
+  return node === undefined || nodeName === undefined ? undefined : { nodeName, attributes: attributeMap2(node.attributes) };
+}
+async function readField(channel, backendNodeId) {
+  const reply = await channel.call("Accessibility.getPartialAXTree", {
+    backendNodeId,
+    fetchRelatives: false
+  });
+  if (!reply.ok)
+    return;
+  const nodes = record2(reply.result)?.nodes;
+  if (!Array.isArray(nodes))
+    return;
+  for (const entry of nodes) {
+    const node = record2(entry);
+    if (node === undefined || node.backendDOMNodeId !== backendNodeId)
+      continue;
+    const value = record2(node.value)?.value;
+    const name = record2(node.name)?.value;
+    const properties = Array.isArray(node.properties) ? node.properties : [];
+    const focused = properties.some((property) => {
+      const reading = record2(property);
+      return reading?.name === "focused" && record2(reading.value)?.value === true;
+    });
+    return {
+      name: typeof name === "string" ? name : "",
+      holdsValue: typeof value === "string" && value !== "",
+      focused
+    };
+  }
+  return;
+}
+async function runPrivateDeliveryChild(argumentList) {
+  const arguments_ = parseChildArguments(argumentList);
+  if (arguments_ === undefined)
+    return say("usage");
+  const deliveredValue = await Bun.stdin.text();
+  if (deliveredValue === "" || deliveredValue.length > fillValueLimit || controlCharacter.test(deliveredValue)) {
+    return say("field_mismatch");
+  }
+  const connection = await openCdpChannel(`ws://127.0.0.1:${arguments_.port}/devtools/page/${arguments_.targetId}`);
+  if (connection.kind === "unavailable")
+    return say("unverified");
+  try {
+    return await deliverIntoPage(connection.channel, arguments_, deliveredValue);
+  } catch {
+    return say("unverified");
+  } finally {
+    connection.channel.close();
+  }
+}
+async function deliverIntoPage(channel, arguments_, deliveredValue) {
+  for (const method of ["Page.enable", "DOM.enable", "Accessibility.enable"]) {
+    if (!(await channel.call(method, {})).ok)
+      return say("unverified");
+  }
+  const first = await readFrame(channel);
+  if (first === undefined)
+    return say("unverified");
+  const firstAnswer = checkFrame(first, arguments_);
+  if (firstAnswer !== "same")
+    return say(firstAnswer);
+  const description = await describeNode(channel, arguments_.backendNodeId);
+  if (description === undefined)
+    return say("element_absent");
+  const field = await readField(channel, arguments_.backendNodeId);
+  if (field === undefined)
+    return say("unverified");
+  if (credentialFieldKind(description, field.name) !== arguments_.field) {
+    return say("field_mismatch");
+  }
+  if (field.holdsValue)
+    return say("field_not_empty");
+  const second = await readFrame(channel);
+  if (second === undefined)
+    return say("unverified");
+  const secondAnswer = checkFrame(second, arguments_);
+  if (secondAnswer !== "same")
+    return say(secondAnswer);
+  if (!(await channel.call("DOM.focus", { backendNodeId: arguments_.backendNodeId })).ok) {
+    return say("unverified");
+  }
+  const focused = await readField(channel, arguments_.backendNodeId);
+  if (focused === undefined || !focused.focused)
+    return say("unverified");
+  if (!(await channel.call("Input.insertText", { text: deliveredValue })).ok) {
+    return say("unverified");
+  }
+  const after = await readFrame(channel);
+  if (after === undefined)
+    return say("unverified");
+  if (after.frameId !== arguments_.frameId || after.loaderId !== arguments_.loaderId || after.url !== arguments_.url) {
+    return say("superseded");
+  }
+  const readBack = await readField(channel, arguments_.backendNodeId);
+  if (readBack === undefined)
+    return say("unverified");
+  return sayDelivered(readBack.holdsValue);
+}
+
+// packages/agent-browser/src/modules/warm-browser/contract.ts
+var schemaVersion = 1;
+var runIdOption = { flag: "--run-id", value: "ID", required: false };
+var refusedSelectorFlags = ["--selector", "--css", "--xpath", "--text"];
+var refusedDestinationFlags = [
+  "--path",
+  "--out",
+  "--output",
+  "--file",
+  "--dir",
+  "--directory"
+];
+var commandVocabulary = [
+  { name: "help", sideEffects: "none", options: [] },
+  {
+    name: "start",
+    sideEffects: "may stop a proved stale owned browser process group and invalidate every earlier Snapshot Reference, then starts one owned browser process group",
+    options: [{ flag: "--port", value: "NUMBER", required: false }]
+  },
+  {
+    name: "status",
+    sideEffects: "may stop a proved stale owned browser process group, remove its private state, and invalidate every earlier Snapshot Reference",
+    options: []
+  },
+  {
+    name: "open",
+    sideEffects: "navigates the one Controlled Page and invalidates every earlier Snapshot Reference",
+    options: [
+      { flag: "--url", value: "URL", required: true },
+      { flag: "--adopt-page", value: null, required: false }
+    ]
+  },
+  {
+    name: "snapshot",
+    sideEffects: "reads the Controlled Page and replaces every earlier Snapshot Reference",
+    options: []
+  },
+  {
+    name: "screenshot",
+    sideEffects: "captures the Controlled Page to one private Browser Session-owned PNG, replacing the Screenshot that session owned, and may invalidate every earlier Snapshot Reference",
+    options: []
+  },
+  {
+    name: "click",
+    sideEffects: "dispatches one click on one referenced element of the Controlled Page and may invalidate every earlier Snapshot Reference",
+    options: [{ flag: "--ref", value: "REFERENCE", required: true }]
+  },
+  {
+    name: "fill",
+    sideEffects: "types one non-secret value into one referenced empty field of the Controlled Page and may invalidate every earlier Snapshot Reference",
+    options: [
+      { flag: "--ref", value: "REFERENCE", required: true },
+      { flag: "--value", value: "TEXT", required: true }
+    ]
+  },
+  {
+    name: "login",
+    sideEffects: "delivers one Credential Match field into one referenced credential field of the Controlled Page and invalidates every earlier Snapshot Reference",
+    options: [
+      { flag: "--ref", value: "REFERENCE", required: true },
+      { flag: "--field", value: "KIND", required: true },
+      { flag: "--human-approved", value: null, required: false }
+    ]
+  },
+  {
+    name: "stop",
+    sideEffects: "stops one verified owned browser process group and removes its private state, including every Snapshot Reference",
+    options: []
+  }
+];
+
+class SpawnCleanupUnverifiedError extends Error {
+  constructor() {
+    super("spawned Chrome process-group cleanup could not be verified");
+    this.name = "SpawnCleanupUnverifiedError";
+  }
+}
+
+// packages/agent-browser/src/modules/private-delivery/private-delivery.ts
+import { accessSync, constants, lstatSync as lstatSync2 } from "fs";
+import { homedir } from "os";
+import { join as join2 } from "path";
+
+// packages/agent-browser/src/modules/private-delivery/configuration.ts
+import { lstatSync, readFileSync } from "fs";
+import { join, resolve } from "path";
+var vaultNameLimit = 128;
+var controlCharacter2 = /\p{Cc}/u;
+function isVaultName(value) {
+  return typeof value === "string" && value !== "" && value.length <= vaultNameLimit && !controlCharacter2.test(value) && !value.includes("/") && value === value.trim();
+}
+function ownedByCurrentUser(metadata) {
+  return typeof process.getuid !== "function" || metadata.uid === process.getuid();
+}
+function readCredentialVaultConfiguration(environment = process.env) {
+  const base = environment.XDG_STATE_HOME ? resolve(environment.XDG_STATE_HOME) : environment.HOME ? resolve(environment.HOME, ".local", "state") : undefined;
+  if (base === undefined)
+    return { kind: "unsafe" };
+  const directory = join(base, "my-second-brain", "private-delivery");
+  const file = join(directory, "credential-vault.json");
+  let fileMetadata;
+  try {
+    fileMetadata = lstatSync(file);
+  } catch (error) {
+    return error.code === "ENOENT" ? { kind: "unconfigured" } : { kind: "unsafe" };
+  }
+  let directoryMetadata;
+  try {
+    directoryMetadata = lstatSync(directory);
+  } catch {
+    return { kind: "unsafe" };
+  }
+  if (!directoryMetadata.isDirectory() || directoryMetadata.isSymbolicLink() || !ownedByCurrentUser(directoryMetadata) || (directoryMetadata.mode & 4095) !== 448) {
+    return { kind: "unsafe" };
+  }
+  if (!fileMetadata.isFile() || fileMetadata.isSymbolicLink() || !ownedByCurrentUser(fileMetadata) || (fileMetadata.mode & 4095) !== 384) {
+    return { kind: "unsafe" };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync(file, "utf8"));
+  } catch {
+    return { kind: "unsafe" };
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return { kind: "unsafe" };
+  }
+  const configuration = parsed;
+  if (Object.keys(configuration).length !== 2 || configuration.schemaVersion !== 1 || !isVaultName(configuration.vault)) {
+    return { kind: "unsafe" };
+  }
+  return { kind: "configured", vault: configuration.vault };
+}
+
+// packages/agent-browser/src/modules/private-delivery/contract.ts
+var privateDeliveryChildOutcomes = [
+  "delivered",
+  "superseded",
+  "identity_changed",
+  "origin_changed",
+  "field_mismatch",
+  "field_not_empty",
+  "element_absent",
+  "unverified",
+  "usage"
+];
+
+// packages/agent-browser/src/modules/private-delivery/credential-effects.ts
+import { spawnSync } from "child_process";
+function runVaultCommand(wrapper, argumentList) {
+  const result = spawnSync(wrapper, [...argumentList], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+    maxBuffer: credentialWrapperOutputLimit
+  });
+  return {
+    status: result.status,
+    signal: result.signal,
+    failed: result.error !== undefined,
+    stdout: typeof result.stdout === "string" ? result.stdout : null
+  };
+}
+function runPrivateDelivery(input) {
+  const result = spawnSync(input.wrapper, ["inject-stdin", input.reference, "--", ...input.command], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    maxBuffer: credentialWrapperOutputLimit
+  });
+  return {
+    status: result.status,
+    signal: result.signal,
+    failed: result.error !== undefined,
+    stdout: typeof result.stdout === "string" ? result.stdout : null,
+    stderr: typeof result.stderr === "string" ? result.stderr : null
+  };
+}
+
+// packages/agent-browser/src/modules/private-delivery/credential-match.ts
+var candidateListLimit = 512;
+var declaredUrlLimit = 32;
+var itemFieldLimit = 128;
+var replyTextLimit = 2048;
+function record3(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : undefined;
+}
+function boundedText(value) {
+  return typeof value === "string" && value !== "" && value.length <= replyTextLimit ? value : undefined;
+}
+function interpretLoginItemList(text) {
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return;
+  }
+  if (!Array.isArray(parsed) || parsed.length > candidateListLimit)
+    return;
+  const ids = [];
+  for (const entry of parsed) {
+    const id = boundedText(record3(entry)?.id);
+    if (id === undefined || ids.includes(id))
+      return;
+    ids.push(id);
+  }
+  return ids;
+}
+function declaredOrigins(urls) {
+  if (urls === undefined)
+    return [];
+  if (!Array.isArray(urls) || urls.length > declaredUrlLimit)
+    return;
+  const origins = [];
+  for (const entry of urls) {
+    const href = record3(entry)?.href;
+    if (typeof href !== "string" || href.length > replyTextLimit)
+      continue;
+    let parsed;
+    try {
+      parsed = new URL(href);
+    } catch {
+      continue;
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:")
+      continue;
+    origins.push(parsed.origin);
+  }
+  return origins;
+}
+function itemFields(fields) {
+  if (fields === undefined)
+    return [];
+  if (!Array.isArray(fields) || fields.length > itemFieldLimit)
+    return;
+  const readings = [];
+  for (const entry of fields) {
+    const field = record3(entry);
+    if (field === undefined)
+      return;
+    const id = field.id;
+    if (typeof id !== "string" || id.length > replyTextLimit)
+      return;
+    const purpose = field.purpose;
+    if (purpose !== undefined && typeof purpose !== "string")
+      return;
+    if (typeof purpose === "string" && purpose.length > replyTextLimit)
+      return;
+    readings.push({ id, purpose: typeof purpose === "string" ? purpose : "" });
+  }
+  return readings;
+}
+function interpretLoginItem(text) {
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return;
+  }
+  const item = record3(parsed);
+  if (item === undefined)
+    return;
+  const id = boundedText(item.id);
+  const vault = record3(item.vault);
+  const vaultId = boundedText(vault?.id);
+  const vaultName = boundedText(vault?.name);
+  const origins = declaredOrigins(item.urls);
+  const fields = itemFields(item.fields);
+  if (id === undefined || vaultId === undefined || vaultName === undefined || origins === undefined || fields === undefined) {
+    return;
+  }
+  return { id, vaultId, vaultName, declaredOrigins: origins, fields };
+}
+function declaresExactOrigin(item, origin) {
+  return item.declaredOrigins.some((declared) => declared === origin);
+}
+
+// packages/agent-browser/src/modules/private-delivery/private-delivery.ts
+var credentialWrapperPath = join2(homedir(), "code/dotfiles/bin/with-one-password-token");
+var reservedWrapperExits = [2, 3, 4, 5, 70];
+function isOwnedRegularFile(path) {
+  try {
+    const metadata = lstatSync2(path);
+    return metadata.isFile() && !metadata.isSymbolicLink() && (typeof process.getuid !== "function" || metadata.uid === process.getuid());
+  } catch {
+    return false;
+  }
+}
+function isOwnedExecutable(path) {
+  if (!isOwnedRegularFile(path))
+    return false;
+  try {
+    accessSync(path, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function vaultReplyText(reading) {
+  if (reading.failed || reading.signal !== null || reading.status !== 0)
+    return;
+  if (reading.stdout === null || reading.stdout.length > credentialWrapperOutputLimit) {
+    return;
+  }
+  return reading.stdout;
+}
+function record4(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : undefined;
+}
+function parseChildReply(raw) {
+  if (raw.length > privateDeliveryChildReplyLimit)
+    return;
+  const text = raw.trim();
+  if (text === "" || text.includes(`
+`))
+    return;
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return;
+  }
+  const reply = record4(parsed);
+  const outcome = reply?.outcome;
+  if (typeof outcome !== "string" || !privateDeliveryChildOutcomes.includes(outcome)) {
+    return;
+  }
+  return {
+    outcome,
+    fieldNowHoldsValue: reply?.fieldNowHoldsValue === true
+  };
+}
+function interpretDelivery(reading) {
+  if (reading.failed)
+    return { kind: "vault_unverified" };
+  const reply = reading.stdout === null ? undefined : parseChildReply(reading.stdout);
+  if (reply === undefined) {
+    if ((reading.stdout === null || reading.stdout.trim() === "") && reading.signal === null && reading.status !== null && reservedWrapperExits.includes(reading.status)) {
+      return { kind: "vault_unverified" };
+    }
+    return { kind: "unverified", touchedPage: true };
+  }
+  switch (reply.outcome) {
+    case "delivered":
+      return reply.fieldNowHoldsValue ? { kind: "delivered" } : { kind: "unverified", touchedPage: true };
+    case "identity_changed":
+      return { kind: "identity_changed" };
+    case "origin_changed":
+      return { kind: "origin_changed" };
+    case "field_mismatch":
+      return { kind: "field_mismatch" };
+    case "field_not_empty":
+      return { kind: "field_not_empty" };
+    case "element_absent":
+      return { kind: "element_absent" };
+    case "superseded":
+      return { kind: "unverified", touchedPage: true };
+    case "usage":
+      return { kind: "unverified", touchedPage: false };
+    case "unverified":
+      return { kind: "unverified", touchedPage: true };
+  }
+}
+async function deliverPrivately(input) {
+  if (!input.humanApproved)
+    return { kind: "approval_required" };
+  const configuration = readCredentialVaultConfiguration();
+  if (configuration.kind === "unconfigured")
+    return { kind: "vault_unconfigured" };
+  if (configuration.kind === "unsafe")
+    return { kind: "vault_unsafe" };
+  const vault = configuration.vault;
+  if (!isOwnedExecutable(credentialWrapperPath))
+    return { kind: "wrapper_unavailable" };
+  const listing = vaultReplyText(runVaultCommand(credentialWrapperPath, [
+    "op",
+    "item",
+    "list",
+    "--vault",
+    vault,
+    "--categories",
+    "Login",
+    "--format",
+    "json"
+  ]));
+  const candidates = listing === undefined ? undefined : interpretLoginItemList(listing);
+  if (candidates === undefined)
+    return { kind: "vault_unverified" };
+  const matches = [];
+  for (const candidate of candidates) {
+    const replyText = vaultReplyText(runVaultCommand(credentialWrapperPath, [
+      "op",
+      "item",
+      "get",
+      candidate,
+      "--vault",
+      vault,
+      "--format",
+      "json"
+    ]));
+    const item = replyText === undefined ? undefined : interpretLoginItem(replyText);
+    if (item === undefined)
+      return { kind: "vault_unverified" };
+    if (item.vaultId !== vault && item.vaultName !== vault)
+      return { kind: "vault_mismatch" };
+    if (declaresExactOrigin(item, input.origin))
+      matches.push(item);
+  }
+  if (matches.length === 0)
+    return { kind: "match_absent" };
+  if (matches.length > 1)
+    return { kind: "match_ambiguous" };
+  const matched = matches[0];
+  const purpose = input.field === "username" ? "USERNAME" : "PASSWORD";
+  const selected = matched.fields.filter((field) => field.purpose === purpose && field.id !== "");
+  if (selected.length !== 1)
+    return { kind: "field_ambiguous" };
+  const reference = `op://${encodeURIComponent(vault)}/${encodeURIComponent(matched.id)}/${encodeURIComponent(selected[0].id)}`;
+  const entry = process.argv[1];
+  if (entry === undefined || !isOwnedRegularFile(entry)) {
+    return { kind: "unverified", touchedPage: false };
+  }
+  const command = [
+    process.execPath,
+    "--config=/dev/null",
+    "--no-install",
+    "--env-file=/dev/null",
+    entry,
+    privateDeliveryChildArgument,
+    "--port",
+    String(input.port),
+    "--target",
+    input.targetId,
+    "--node",
+    String(input.backendNodeId),
+    "--frame",
+    input.basis.frameId,
+    "--loader",
+    input.basis.loaderId,
+    "--url",
+    input.basis.url,
+    "--origin",
+    input.origin,
+    "--field",
+    input.field
+  ];
+  return interpretDelivery(runPrivateDelivery({ wrapper: credentialWrapperPath, reference, command }));
+}
+
 // packages/agent-browser/src/modules/warm-browser/ownership.ts
 function chromeArgumentList(input) {
   return [
@@ -698,19 +1393,19 @@ function ownsProcess(expected, observed, ownership) {
 
 // packages/agent-browser/src/modules/warm-browser/production-adapter.ts
 import { randomUUID } from "crypto";
-import { existsSync, lstatSync as lstatSync2 } from "fs";
-import { homedir } from "os";
-import { join } from "path";
+import { existsSync, lstatSync as lstatSync4 } from "fs";
+import { homedir as homedir2 } from "os";
+import { join as join3 } from "path";
 
 // packages/agent-browser/src/modules/warm-browser/host-effects.ts
-import { spawn, spawnSync } from "child_process";
-import { accessSync, constants, lstatSync } from "fs";
+import { spawn, spawnSync as spawnSync2 } from "child_process";
+import { accessSync as accessSync2, constants as constants2, lstatSync as lstatSync3 } from "fs";
 import { createConnection } from "net";
 function hostPlatform() {
   return process.platform;
 }
 function readProcessTable() {
-  const result = spawnSync("/bin/ps", ["-axo", "pid=,pgid=,lstart=,command="], {
+  const result = spawnSync2("/bin/ps", ["-axo", "pid=,pgid=,lstart=,command="], {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "ignore"]
   });
@@ -723,10 +1418,10 @@ function readProcessTable() {
 }
 function isExecutableFile(path) {
   try {
-    const metadata = lstatSync(path);
+    const metadata = lstatSync3(path);
     if (!metadata.isFile() || metadata.isSymbolicLink())
       return false;
-    accessSync(path, constants.X_OK);
+    accessSync2(path, constants2.X_OK);
     return true;
   } catch {
     return false;
@@ -734,9 +1429,9 @@ function isExecutableFile(path) {
 }
 async function startDetachedProcess(executable, argumentList) {
   const child = spawn(executable, [...argumentList], { detached: true, stdio: "ignore" });
-  await new Promise((resolve, reject) => {
+  await new Promise((resolve2, reject) => {
     child.once("error", reject);
-    child.once("spawn", resolve);
+    child.once("spawn", resolve2);
   });
   if (child.pid === undefined)
     throw new Error("the launched process returned no process identity");
@@ -759,7 +1454,7 @@ function signalProcessGroup(processGroupId, signal) {
   }
 }
 async function connectLoopbackPort(port) {
-  return await new Promise((resolve) => {
+  return await new Promise((resolve2) => {
     const socket = createConnection({ host: "127.0.0.1", port });
     let settled = false;
     const finish = (result) => {
@@ -767,7 +1462,7 @@ async function connectLoopbackPort(port) {
         return;
       settled = true;
       socket.destroy();
-      resolve(result);
+      resolve2(result);
     };
     socket.once("connect", () => finish("occupied"));
     socket.once("error", (error) => finish(error.code === "ECONNREFUSED" ? "free" : "unverifiable"));
@@ -775,7 +1470,7 @@ async function connectLoopbackPort(port) {
   });
 }
 function readLoopbackListener(port) {
-  const result = spawnSync("/usr/sbin/lsof", ["-nP", "-a", `-iTCP@127.0.0.1:${port}`, "-sTCP:LISTEN", "-Fp"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  const result = spawnSync2("/usr/sbin/lsof", ["-nP", "-a", `-iTCP@127.0.0.1:${port}`, "-sTCP:LISTEN", "-Fp"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
   return {
     status: result.status,
     signal: result.signal,
@@ -869,7 +1564,7 @@ var installedChrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chr
 function privateOwnedDirectory(path) {
   if (!existsSync(path))
     return false;
-  const metadata = lstatSync2(path);
+  const metadata = lstatSync4(path);
   return metadata.isDirectory() && !metadata.isSymbolicLink() && (typeof process.getuid !== "function" || metadata.uid === process.getuid()) && (metadata.mode & 63) === 0;
 }
 function processTable() {
@@ -885,7 +1580,7 @@ function observeProcessGroup(processGroupId) {
   return outcome === "absent" ? "absent" : "unverified";
 }
 async function pause(milliseconds) {
-  await new Promise((resolve) => setTimeout(resolve, milliseconds));
+  await new Promise((resolve2) => setTimeout(resolve2, milliseconds));
 }
 async function awaitProcessGroupAbsence(processGroupId, attempts) {
   for (let attempt = 0;attempt < attempts; attempt += 1) {
@@ -995,8 +1690,8 @@ var productionAdapter = {
   platform: hostPlatform,
   chromeExecutable: () => installedChrome,
   inspectChrome: (executable) => isExecutableFile(executable) ? "installed" : "unavailable",
-  profileRoot: () => join(homedir(), ".agent-warm-profile"),
-  inspectProfile: (profileRoot) => privateOwnedDirectory(profileRoot) && privateOwnedDirectory(join(profileRoot, "Default")) ? "safe" : "unsafe",
+  profileRoot: () => join3(homedir2(), ".agent-warm-profile"),
+  inspectProfile: (profileRoot) => privateOwnedDirectory(profileRoot) && privateOwnedDirectory(join3(profileRoot, "Default")) ? "safe" : "unsafe",
   findProfileProcesses: (profileRoot) => {
     const plain = `--user-data-dir=${profileRoot}`;
     const quoted = `--user-data-dir="${profileRoot}"`;
@@ -1142,10 +1837,10 @@ function resolveSnapshotReference(input) {
 import {
   chmodSync,
   existsSync as existsSync2,
-  lstatSync as lstatSync3,
+  lstatSync as lstatSync5,
   mkdirSync,
   readdirSync,
-  readFileSync,
+  readFileSync as readFileSync2,
   renameSync,
   rmdirSync,
   rmSync,
@@ -1153,7 +1848,7 @@ import {
   unlinkSync,
   writeFileSync
 } from "fs";
-import { dirname, join as join2, resolve } from "path";
+import { dirname, join as join4, resolve as resolve2 } from "path";
 class UnsafeStateError extends Error {
   constructor() {
     super("Warm Browser private state could not be proved safe");
@@ -1172,21 +1867,21 @@ function exactPrivateDirectory(path) {
     chmodSync(path, 448);
     return;
   }
-  const metadata = lstatSync3(path);
+  const metadata = lstatSync5(path);
   if (!isOwnedPrivateDirectory(metadata))
     throw new UnsafeStateError;
 }
 function resolveStatePaths(environment = process.env) {
-  const base = environment.XDG_STATE_HOME ? resolve(environment.XDG_STATE_HOME) : environment.HOME ? resolve(environment.HOME, ".local", "state") : undefined;
+  const base = environment.XDG_STATE_HOME ? resolve2(environment.XDG_STATE_HOME) : environment.HOME ? resolve2(environment.HOME, ".local", "state") : undefined;
   if (base === undefined)
     throw new UnsafeStateError;
-  const root = join2(base, "my-second-brain", "warm-browser");
-  const lock = join2(root, "session.lock");
+  const root = join4(base, "my-second-brain", "warm-browser");
+  const lock = join4(root, "session.lock");
   return {
     root,
     lock,
-    session: join2(lock, "session.json"),
-    screenshots: join2(lock, "screenshots")
+    session: join4(lock, "session.json"),
+    screenshots: join4(lock, "screenshots")
   };
 }
 function detachedCleanupExists(paths) {
@@ -1218,7 +1913,7 @@ function acquireSessionLock(paths) {
 function validateSessionLock(paths) {
   let metadata;
   try {
-    metadata = lstatSync3(paths.lock);
+    metadata = lstatSync5(paths.lock);
   } catch (error) {
     if (error.code === "ENOENT")
       return false;
@@ -1317,7 +2012,7 @@ function stateShape(value) {
 function readSessionState(paths) {
   let metadata;
   try {
-    metadata = lstatSync3(paths.session);
+    metadata = lstatSync5(paths.session);
   } catch (error) {
     if (error.code === "ENOENT")
       return;
@@ -1327,7 +2022,7 @@ function readSessionState(paths) {
     throw new UnsafeStateError;
   let parsed;
   try {
-    parsed = JSON.parse(readFileSync(paths.session, "utf8"));
+    parsed = JSON.parse(readFileSync2(paths.session, "utf8"));
   } catch {
     throw new UnsafeStateError;
   }
@@ -1369,11 +2064,11 @@ function removeScreenshotDirectory(directory) {
     return { kind: "removed" };
   const owned = [];
   try {
-    if (!isOwnedPrivateDirectory(lstatSync3(directory)))
+    if (!isOwnedPrivateDirectory(lstatSync5(directory)))
       return { kind: "refused" };
     for (const entry of readdirSync(directory)) {
-      const path = join2(directory, entry);
-      if (!isOwnedPrivateFile(lstatSync3(path), 384))
+      const path = join4(directory, entry);
+      if (!isOwnedPrivateFile(lstatSync5(path), 384))
         return { kind: "refused" };
       owned.push(path);
     }
@@ -1396,7 +2091,7 @@ function writeOwnedScreenshot(paths, name, bytes) {
   if (!validateSessionLock(paths) || !isOwnedScreenshotName(name))
     throw new UnsafeStateError;
   exactPrivateDirectory(paths.screenshots);
-  const target = join2(paths.screenshots, ownedScreenshotFile(name));
+  const target = join4(paths.screenshots, ownedScreenshotFile(name));
   const temporary = `${target}.tmp-${process.pid}`;
   try {
     writeFileSync(temporary, bytes, { flag: "wx", mode: 384 });
@@ -1406,7 +2101,7 @@ function writeOwnedScreenshot(paths, name, bytes) {
   } finally {
     rmSync(temporary, { force: true });
   }
-  const metadata = lstatSync3(target);
+  const metadata = lstatSync5(target);
   if (!isOwnedPrivateFile(metadata, 384))
     throw new UnsafeStateError;
   return target;
@@ -1417,13 +2112,13 @@ function removeOwnedState(paths, sessionId) {
   const state = readSessionState(paths);
   if (state === undefined || state.sessionId !== sessionId)
     throw new UnsafeStateError;
-  const detached = join2(paths.root, `.cleanup-${sessionId}`);
+  const detached = join4(paths.root, `.cleanup-${sessionId}`);
   if (existsSync2(detached))
     throw new UnsafeStateError;
   renameSync(paths.lock, detached);
-  const detachedSession = join2(detached, "session.json");
+  const detachedSession = join4(detached, "session.json");
   try {
-    if (removeScreenshotDirectory(join2(detached, "screenshots")).kind !== "removed") {
+    if (removeScreenshotDirectory(join4(detached, "screenshots")).kind !== "removed") {
       throw new UnsafeStateError;
     }
     unlinkSync(detachedSession);
@@ -1444,7 +2139,7 @@ function removeOwnedState(paths, sessionId) {
 // packages/agent-browser/src/modules/warm-browser/warm-browser.ts
 var defaultPort = 9242;
 var runIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
-var controlCharacter = /\p{Cc}/u;
+var controlCharacter3 = /\p{Cc}/u;
 var commandNames = new Set(commandVocabulary.map(({ name }) => name));
 var selectorFlags = new Set(refusedSelectorFlags);
 var destinationFlags = new Set(refusedDestinationFlags);
@@ -1547,6 +2242,14 @@ function safeUrl(value) {
     return;
   }
 }
+function exactOrigin(url) {
+  const parsed = safeUrl(url);
+  if (parsed === undefined)
+    return;
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:")
+    return;
+  return parsed.origin === "" || parsed.origin === "null" ? undefined : parsed.origin;
+}
 var optionValidators = {
   "--run-id": (runId, command, raw) => {
     if (!runIdPattern.test(raw))
@@ -1563,7 +2266,7 @@ var optionValidators = {
     return port;
   },
   "--url": (runId, command, raw) => {
-    const parsed = raw.length > 2048 || controlCharacter.test(raw) ? undefined : safeUrl(raw);
+    const parsed = raw.length > 2048 || controlCharacter3.test(raw) ? undefined : safeUrl(raw);
     if (parsed === undefined)
       usage(runId, command, "The --url value must be an absolute URL.");
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
@@ -1580,14 +2283,20 @@ var optionValidators = {
     return raw;
   },
   "--ref": (runId, command, raw) => {
-    if (raw === "" || raw.length > 160 || /\s/u.test(raw) || controlCharacter.test(raw)) {
+    if (raw === "" || raw.length > 160 || /\s/u.test(raw) || controlCharacter3.test(raw)) {
       usage(runId, command, "The --ref value is missing or invalid.");
     }
     return raw;
   },
   "--value": (runId, command, raw) => {
-    if (raw === "" || raw.length > fillValueLimit || controlCharacter.test(raw)) {
+    if (raw === "" || raw.length > fillValueLimit || controlCharacter3.test(raw)) {
       usage(runId, command, "The --value text is missing or invalid.");
+    }
+    return raw;
+  },
+  "--field": (runId, command, raw) => {
+    if (raw !== "username" && raw !== "password") {
+      usage(runId, command, "The --field value must be username or password.");
     }
     return raw;
   }
@@ -1648,14 +2357,17 @@ function parseArguments(arguments_, adapter) {
   const url = seen.get("--url");
   const reference = seen.get("--ref");
   const value = seen.get("--value");
+  const field = seen.get("--field");
   return {
     command,
     runId,
     adoptPage: seen.get("--adopt-page") === true,
+    humanApproved: seen.get("--human-approved") === true,
     ...port === undefined ? {} : { port },
     ...url === undefined ? {} : { url },
     ...reference === undefined ? {} : { reference },
-    ...value === undefined ? {} : { value }
+    ...value === undefined ? {} : { value },
+    ...field === undefined ? {} : { field }
   };
 }
 function staticFailure(command, runId, resultCode, exitCode, message, nextAction, retrySafe = false, transactionState = "unchanged") {
@@ -2134,7 +2846,7 @@ function undeliverableAct(command, runId, reason, touchedPage) {
   staticFailure(command, runId, "ELEMENT_NOT_ACTIONABLE", 21, undeliverableMessages[reason], freshSnapshotAction, false, actTransaction(touchedPage));
 }
 function credentialRefusal(command, runId) {
-  staticFailure(command, runId, "CREDENTIAL_FIELD_REFUSED", 21, "Warm Browser does not type credentials into the Controlled Page.", "Use the Warm Browser login command for a credential field; it is not callable in this slice.");
+  staticFailure(command, runId, "CREDENTIAL_FIELD_REFUSED", 21, "Warm Browser does not type credentials into the Controlled Page.", "Run warm-browser login --ref REFERENCE --field KIND --human-approved --run-id ID for a credential field.");
 }
 async function open(parsed, paths, adapter) {
   const session = await requireControlledPage(parsed, "open", paths, adapter);
@@ -2328,6 +3040,124 @@ async function actOnPage(parsed, command, paths, adapter) {
     }
   });
 }
+function refuseLoginDelivery(parsed, paths, state, outcome) {
+  const runId = parsed.runId;
+  switch (outcome.kind) {
+    case "approval_required":
+      staticFailure("login", runId, "APPROVAL_REQUIRED", 21, "Credential access needs a human approval given immediately before it.", "Obtain explicit human approval, then run warm-browser login --ref REFERENCE --field KIND --human-approved --run-id ID.");
+    case "vault_unconfigured":
+      staticFailure("login", runId, "CREDENTIAL_VAULT_UNCONFIGURED", 20, "No Credential Vault is configured for Private Delivery.", "Configure the one Credential Vault in the private credential-vault.json state file, then retry.");
+    case "vault_unsafe":
+      staticFailure("login", runId, "STATE_UNSAFE", 20, "The configured Credential Vault file could not be proved safe.", "Repair the private credential-vault.json ownership and permissions before retrying.");
+    case "wrapper_unavailable":
+      staticFailure("login", runId, "CREDENTIAL_VAULT_UNVERIFIED", 20, "The one credential wrapper Private Delivery invokes is unavailable.", "Restore the with-one-password-token wrapper before retrying.");
+    case "vault_unverified":
+      staticFailure("login", runId, "CREDENTIAL_VAULT_UNVERIFIED", 20, "The Credential Vault could not be read or its reply could not be interpreted.", "Inspect the credential wrapper and the configured Credential Vault before retrying.");
+    case "vault_mismatch":
+      staticFailure("login", runId, "CREDENTIAL_VAULT_MISMATCH", 21, "A resolved Login item does not belong to the configured Credential Vault.", "Inspect the configured Credential Vault before retrying.");
+    case "match_absent":
+      staticFailure("login", runId, "CREDENTIAL_MATCH_ABSENT", 21, "No Login item in the Credential Vault declares this exact origin.", "Add exactly one Login item whose website is this exact origin, then retry.");
+    case "match_ambiguous":
+      staticFailure("login", runId, "CREDENTIAL_MATCH_AMBIGUOUS", 21, "More than one Login item in the Credential Vault declares this exact origin.", "Leave exactly one Login item declaring this exact origin, then retry.");
+    case "field_ambiguous":
+      staticFailure("login", runId, "CREDENTIAL_FIELD_AMBIGUOUS", 21, "The matched Login item does not carry exactly one field of the requested kind.", "Repair the matched Login item to carry exactly one field of the requested kind, then retry.");
+    case "origin_changed": {
+      const transaction = invalidationState(state);
+      invalidateReferences("login", runId, paths, state, "invalidated");
+      staticFailure("login", runId, "ORIGIN_CHANGED", 21, "The Controlled Page's exact origin moved before the field was filled.", freshSnapshotAction, false, transaction);
+    }
+    case "identity_changed": {
+      const transaction = invalidationState(state);
+      invalidateReferences("login", runId, paths, state, "invalidated");
+      staticFailure("login", runId, "PAGE_IDENTITY_CHANGED", 21, "The Controlled Page is no longer the page this Snapshot Reference was issued against.", freshSnapshotAction, false, transaction);
+    }
+    case "field_mismatch":
+      staticFailure("login", runId, "LOGIN_FIELD_MISMATCH", 21, "The referenced live field is not a credential field of the requested kind.", "Run warm-browser snapshot --run-id ID and select the credential field of the requested kind.");
+    case "field_not_empty":
+      undeliverableAct("login", runId, "field_not_empty", false);
+    case "element_absent":
+      staticFailure("login", runId, "SNAPSHOT_REFERENCE_STALE", 21, "The referenced element is no longer part of the Controlled Page.", freshSnapshotAction);
+    case "unverified": {
+      if (outcome.touchedPage) {
+        invalidateReferences("login", runId, paths, state, "acted");
+        staticFailure("login", runId, "PRIVATE_DELIVERY_UNVERIFIED", 20, "The disposable child did not prove what it did with the delivery.", "Run warm-browser snapshot --run-id ID to read what the Controlled Page now holds.", false, "acted");
+      }
+      staticFailure("login", runId, "PRIVATE_DELIVERY_UNVERIFIED", 20, "The disposable child did not prove what it did with the delivery.", "Inspect the credential wrapper and the Controlled Page before retrying.");
+    }
+  }
+}
+async function login(parsed, paths, adapter) {
+  const session = await requireControlledPage(parsed, "login", paths, adapter);
+  const state = session.state;
+  const reference = requiredArgument(parsed.reference);
+  const field = requiredArgument(parsed.field);
+  const resolution = resolveSnapshotReference({
+    reference,
+    generation: state.snapshot,
+    controlledPageTargetId: state.endpoint.controlledPageTargetId,
+    nowEpochMs: adapter.nowEpochMs()
+  });
+  if (resolution.kind !== "resolved")
+    refuseReference("login", parsed.runId, resolution.kind);
+  const generation = state.snapshot;
+  const reading = await readControlledPageField({
+    port: state.endpoint.port,
+    targetId: state.endpoint.controlledPageTargetId,
+    basis: generation.basis,
+    backendNodeId: resolution.element.backendNodeId
+  });
+  if (reading.kind === "identity_changed") {
+    refuseLoginDelivery(parsed, paths, state, { kind: "identity_changed" });
+  }
+  if (reading.kind === "element_absent") {
+    refuseLoginDelivery(parsed, paths, state, { kind: "element_absent" });
+  }
+  if (reading.kind === "unverified") {
+    pageControlUnverified("login", parsed.runId, "Warm Browser could not read the referenced credential field.", "unchanged");
+  }
+  if (reading.framed) {
+    staticFailure("login", parsed.runId, "LOGIN_FRAME_UNSUPPORTED", 21, "The referenced credential field sits inside a frame, and login delivers into the top document only.", "Run warm-browser open --url URL --run-id ID with the login page whose own document carries the field.");
+  }
+  const origin = exactOrigin(reading.basis.url);
+  if (origin === undefined) {
+    staticFailure("login", parsed.runId, "ORIGIN_UNSUPPORTED", 21, "The Controlled Page has no exact http or https origin.", "Run warm-browser open --url URL --run-id ID with an http or https address, then retry login.");
+  }
+  if (reading.holdsValue)
+    undeliverableAct("login", parsed.runId, "field_not_empty", false);
+  if (credentialFieldKind(reading.description, reading.accessibleName) !== field) {
+    refuseLoginDelivery(parsed, paths, state, { kind: "field_mismatch" });
+  }
+  const outcome = await deliverPrivately({
+    port: state.endpoint.port,
+    targetId: state.endpoint.controlledPageTargetId,
+    basis: generation.basis,
+    backendNodeId: resolution.element.backendNodeId,
+    origin,
+    field,
+    humanApproved: parsed.humanApproved
+  });
+  if (outcome.kind !== "delivered")
+    refuseLoginDelivery(parsed, paths, state, outcome);
+  invalidateReferences("login", parsed.runId, paths, state, "acted");
+  return success({
+    schemaVersion,
+    status: "ok",
+    command: "login",
+    resultCode: "LOGIN_FIELD_DELIVERED",
+    runId: parsed.runId,
+    transactionState: "acted",
+    retrySafe: false,
+    nextAction: "Run warm-browser snapshot --run-id ID and obtain explicit human approval before any consequential submission.",
+    data: {
+      field,
+      reference,
+      fieldNowHoldsValue: true,
+      controlledPage: controlledPageData(generation.basis),
+      invalidatedReferences: true,
+      postcondition: "running"
+    }
+  });
+}
 var sliceCommands = {
   start,
   status,
@@ -2336,6 +3166,7 @@ var sliceCommands = {
   screenshot,
   click: (parsed, paths, adapter) => actOnPage(parsed, "click", paths, adapter),
   fill: (parsed, paths, adapter) => actOnPage(parsed, "fill", paths, adapter),
+  login,
   stop
 };
 async function execute(parsed, adapter) {
@@ -2421,9 +3252,13 @@ async function runWarmBrowserCli(arguments_) {
 }
 
 // packages/agent-browser/src/main.ts
-var outcome = await runWarmBrowserCli(process.argv.slice(2));
-if (outcome.stdout)
-  process.stdout.write(outcome.stdout);
-if (outcome.stderr)
-  process.stderr.write(outcome.stderr);
-process.exitCode = outcome.exitCode;
+if (process.argv[2] === privateDeliveryChildArgument) {
+  process.exitCode = await runPrivateDeliveryChild(process.argv.slice(3));
+} else {
+  const outcome = await runWarmBrowserCli(process.argv.slice(2));
+  if (outcome.stdout)
+    process.stdout.write(outcome.stdout);
+  if (outcome.stderr)
+    process.stderr.write(outcome.stderr);
+  process.exitCode = outcome.exitCode;
+}

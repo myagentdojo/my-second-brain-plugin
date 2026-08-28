@@ -20,7 +20,7 @@ import { join, resolve } from "node:path"
 
 export const packageRoot = resolve(import.meta.dir, "../..")
 export const productionEntry = resolve(packageRoot, "src/main.ts")
-export const preloadEntry = resolve(import.meta.dir, "host-effects-preload.ts")
+export const preloadEntry = resolve(import.meta.dir, "production-seams-preload.ts")
 export const installedChrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 export const startedAtToken = "Thu Aug 27 09:52:01 2026"
 
@@ -33,6 +33,7 @@ export interface ProductionCliProbe {
 	readonly sessionPath: string
 	readonly lockPath: string
 	readonly profileRoot: string
+	readonly home: string
 	readonly environment: Record<string, string>
 }
 
@@ -48,6 +49,18 @@ export function productionCliProbe(plan: Record<string, unknown> = {}): Producti
 		mkdirSync(directory, { mode: 0o700 })
 		chmodSync(directory, 0o700)
 	}
+	// Private Delivery resolves its one credential wrapper under the caller's
+	// home directory, and the probe owns that home. The file here is inert: the
+	// credential-effects seam is substituted, so it is never executed. It exists
+	// so the wrapper-path proof is about a real owned executable file, and so no
+	// test can ever depend on the real dotfiles wrapper.
+	const wrapperDirectory = join(home, "code", "dotfiles", "bin")
+	mkdirSync(wrapperDirectory, { recursive: true, mode: 0o700 })
+	const wrapperPath = join(wrapperDirectory, "with-one-password-token")
+	writeFileSync(wrapperPath, "#!/bin/sh\n# inert test wrapper; never executed\nexit 70\n", {
+		mode: 0o700,
+	})
+	chmodSync(wrapperPath, 0o700)
 	const environment = { ...process.env } as Record<string, string>
 	delete environment.AGENT_BROWSER_CDP_FIXTURE_ACKNOWLEDGED
 	environment.WARM_BROWSER_FIXTURE_ROOT = fakeRoot
@@ -61,6 +74,7 @@ export function productionCliProbe(plan: Record<string, unknown> = {}): Producti
 		sessionPath: join(sessionRoot, "session.lock", "session.json"),
 		lockPath: join(sessionRoot, "session.lock"),
 		profileRoot,
+		home,
 		environment,
 	}
 	writeHostEffectsPlan(probe, plan)
@@ -116,7 +130,7 @@ export async function runProductionCliAsync(
 		cmd: [
 			process.execPath,
 			"--preload",
-			resolve(root, "tests/fixtures/host-effects-preload.ts"),
+			resolve(root, "tests/fixtures/production-seams-preload.ts"),
 			resolve(root, "src/main.ts"),
 			...arguments_,
 		],

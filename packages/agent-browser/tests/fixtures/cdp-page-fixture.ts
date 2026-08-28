@@ -51,6 +51,11 @@ export interface FixtureElement {
 	readonly focusFails?: boolean
 	/** The value the field already holds. */
 	readonly value?: string
+	/**
+	 * The element is described inside this owner's `contentDocument`, the way a
+	 * real frame's document is, rather than among its children.
+	 */
+	readonly contentDocumentOf?: number
 }
 
 export interface FixtureTarget {
@@ -320,10 +325,26 @@ export function startCdpPageFixture(options: CdpPageFixtureOptions = {}): CdpPag
 	/** One document subtree: this element and whatever nests inside it. */
 	function domSubtree(element: FixtureElement, nodeId: number): Record<string, unknown> {
 		const children = elements.filter((child) => child.childOf === element.backendNodeId)
+		const framed = elements.filter((child) => child.contentDocumentOf === element.backendNodeId)
 		return {
 			...domNode(element, nodeId),
 			childNodeCount: children.length,
 			children: children.map((child, index) => domSubtree(child, nodeId * 100 + index + 1)),
+			// A frame owner carries its framed document the way a real one does:
+			// as a `contentDocument` record beside its children, never among them.
+			...(framed.length > 0
+				? {
+					contentDocument: {
+						nodeId: nodeId * 100 + 90,
+						backendNodeId: 9_000 + element.backendNodeId,
+						nodeType: 9,
+						nodeName: "#document",
+						nodeValue: "",
+						childNodeCount: framed.length,
+						children: framed.map((child, index) => domSubtree(child, nodeId * 100 + 91 + index)),
+					},
+				}
+				: {}),
 		}
 	}
 
@@ -333,11 +354,15 @@ export function startCdpPageFixture(options: CdpPageFixtureOptions = {}): CdpPag
 		readonly shadowRoots: Record<string, unknown>[]
 	} {
 		const described = elements.filter((element) => element.undescribed !== true)
+		// A framed element belongs to its owner's content document alone, so it
+		// never appears in the light or shadow lists of the top document.
 		const light = described.filter((element) =>
-			element.childOf === undefined && element.inShadowRoot !== true
+			element.childOf === undefined && element.inShadowRoot !== true &&
+			element.contentDocumentOf === undefined
 		)
 		const shadow = described.filter((element) =>
-			element.childOf === undefined && element.inShadowRoot === true
+			element.childOf === undefined && element.inShadowRoot === true &&
+			element.contentDocumentOf === undefined
 		)
 		return {
 			children: light.map((element, index) => domSubtree(element, index + 4)),

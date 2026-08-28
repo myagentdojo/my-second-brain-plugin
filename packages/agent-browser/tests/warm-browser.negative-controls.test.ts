@@ -6,6 +6,7 @@ import { join, resolve } from "node:path"
 import {
 	acceptedReferenceLifetimeMs,
 	ageSnapshotGeneration,
+	framedSignInPage,
 	pageProbe,
 	readReceipt,
 	signInPage,
@@ -13,6 +14,13 @@ import {
 	takeSnapshot,
 	writeReceipt,
 } from "./fixtures/controlled-page-probe"
+import {
+	configureCredentialVault,
+	loginItem,
+	vaultActions,
+	vaultReading,
+	writeCredentialPlan,
+} from "./fixtures/login-probe"
 import {
 	packageRoot,
 	removeProductionCliProbes,
@@ -993,4 +1001,339 @@ test("removing the completeness proof lets a truncated stream be kept as a Scree
 			replace: removed,
 		})),
 	).toEqual({ resultCode: "SCREENSHOT_CAPTURED", exitCode: 0 })
+})
+
+/**
+ * The secret the login controls deliver. It is owned by this file alone, so a
+ * control that finds it on the page is reading its own delivery and never
+ * another test's.
+ */
+const controlSentinel = "control-sentinel-1b9be2d4-never-in-any-public-surface"
+
+/**
+ * One planned Credential Vault whose single Login item declares the given
+ * websites. Fixture input for the login controls, never an expected value.
+ */
+function controlVaultPlan(websites: readonly string[]): Record<string, unknown> {
+	return {
+		vaultList: vaultReading([{ id: "item-1" }]),
+		vaultGet: {
+			"item-1": vaultReading(loginItem({
+				id: "item-1",
+				vault: { id: "vlt-1", name: "Agent Vault" },
+				websites,
+				fields: [
+					{ id: "username-field", purpose: "USERNAME" },
+					{ id: "password-field", purpose: "PASSWORD" },
+				],
+			})),
+		},
+		sentinel: controlSentinel,
+	}
+}
+
+test("removing the approval gate reaches the Credential Vault without a human", async () => {
+	const scenario = async (root: string): Promise<Reading & { vaultReads: number }> => {
+		const { probe } = await pageProbe(
+			{ url: "https://fixture.test/sign-in", elements: signInPage },
+			root,
+		)
+		const snapshot = await takeSnapshot(probe, "control-approval", root)
+		configureCredentialVault(probe, "Agent Vault")
+		writeCredentialPlan(probe, controlVaultPlan(["https://fixture.test"]))
+		const result = reading(
+			await runProductionCliAsync(
+				probe,
+				[
+					"login",
+					"--ref",
+					snapshot.elements[2]!.ref,
+					"--field",
+					"password",
+					"--run-id",
+					"control-login",
+				],
+				root,
+			),
+		)
+		return { ...result, vaultReads: vaultActions(probe).length }
+	}
+
+	// The gate owns the ordering, not just the refusal: with it, no approval
+	// means zero vault readings; without it, the same unapproved login lists
+	// the vault, reads the item, and delivers.
+	expect(await scenario(packageRoot)).toEqual({
+		resultCode: "APPROVAL_REQUIRED",
+		exitCode: 21,
+		vaultReads: 0,
+	})
+	expect(
+		await scenario(mutatedPackage({
+			file: "src/modules/private-delivery/private-delivery.ts",
+			find: '\tif (!input.humanApproved) return { kind: "approval_required" }',
+			replace: removed,
+		})),
+	).toEqual({ resultCode: "LOGIN_FIELD_DELIVERED", exitCode: 0, vaultReads: 2 })
+})
+
+test("removing the child's pre-fill revalidation lands the secret on a late document", async () => {
+	const scenario = async (root: string): Promise<Reading & { typed: readonly string[] }> => {
+		const { fixture, probe } = await pageProbe(
+			{
+				url: "https://fixture.test/sign-in",
+				elements: signInPage,
+				// The second node description of the scenario is the disposable
+				// child's own, so the page moves after the child has read the field
+				// and before it types: exactly the window the pre-fill revalidation
+				// exists to close.
+				navigateAfterMethod: {
+					method: "DOM.describeNode",
+					url: "https://fixture.test/late",
+					occurrence: 2,
+				},
+			},
+			root,
+		)
+		const snapshot = await takeSnapshot(probe, "control-prefill", root)
+		configureCredentialVault(probe, "Agent Vault")
+		writeCredentialPlan(probe, controlVaultPlan(["https://fixture.test"]))
+		const result = reading(
+			await runProductionCliAsync(
+				probe,
+				[
+					"login",
+					"--ref",
+					snapshot.elements[2]!.ref,
+					"--field",
+					"password",
+					"--human-approved",
+					"--run-id",
+					"control-login",
+				],
+				root,
+			),
+		)
+		return { ...result, typed: fixture.insertedText() }
+	}
+
+	expect(await scenario(packageRoot)).toEqual({
+		resultCode: "PAGE_IDENTITY_CHANGED",
+		exitCode: 21,
+		typed: [],
+	})
+	// With the revalidation gone, the secret really enters the document that
+	// arrived after the match; the read-back after typing still refuses to call
+	// it a delivery, but the page already holds the value.
+	expect(
+		await scenario(mutatedPackage({
+			file: "src/modules/private-delivery/child.ts",
+			find: '\tif (secondAnswer !== "same") return say(secondAnswer)',
+			replace: removed,
+		})),
+	).toEqual({
+		resultCode: "PRIVATE_DELIVERY_UNVERIFIED",
+		exitCode: 20,
+		typed: [controlSentinel],
+	})
+})
+
+test("a prefix origin comparison lets a near-miss origin match", async () => {
+	const scenario = async (root: string): Promise<Reading & { typed: readonly string[] }> => {
+		const { fixture, probe } = await pageProbe(
+			{ url: "https://fixture.test/sign-in", elements: signInPage },
+			root,
+		)
+		const snapshot = await takeSnapshot(probe, "control-origin", root)
+		configureCredentialVault(probe, "Agent Vault")
+		// The declared website is a superstring of the page's exact origin, which
+		// is precisely what a prefix comparison cannot tell apart.
+		writeCredentialPlan(probe, controlVaultPlan(["https://fixture.test.evil.example"]))
+		const result = reading(
+			await runProductionCliAsync(
+				probe,
+				[
+					"login",
+					"--ref",
+					snapshot.elements[2]!.ref,
+					"--field",
+					"password",
+					"--human-approved",
+					"--run-id",
+					"control-login",
+				],
+				root,
+			),
+		)
+		return { ...result, typed: fixture.insertedText() }
+	}
+
+	expect(await scenario(packageRoot)).toEqual({
+		resultCode: "CREDENTIAL_MATCH_ABSENT",
+		exitCode: 21,
+		typed: [],
+	})
+	expect(
+		await scenario(mutatedPackage({
+			file: "src/modules/private-delivery/credential-match.ts",
+			find: "\treturn item.declaredOrigins.some((declared) => declared === origin)",
+			replace: "\treturn item.declaredOrigins.some((declared) => declared.startsWith(origin))",
+		})),
+	).toEqual({ resultCode: "LOGIN_FIELD_DELIVERED", exitCode: 0, typed: [controlSentinel] })
+})
+
+test("removing the unique-match rule delivers when two items declare the origin", async () => {
+	const scenario = async (root: string): Promise<Reading & { typed: readonly string[] }> => {
+		const { fixture, probe } = await pageProbe(
+			{ url: "https://fixture.test/sign-in", elements: signInPage },
+			root,
+		)
+		const snapshot = await takeSnapshot(probe, "control-unique", root)
+		configureCredentialVault(probe, "Agent Vault")
+		writeCredentialPlan(probe, {
+			vaultList: vaultReading([{ id: "item-1" }, { id: "item-2" }]),
+			vaultGet: {
+				"item-1": vaultReading(loginItem({
+					id: "item-1",
+					vault: { id: "vlt-1", name: "Agent Vault" },
+					websites: ["https://fixture.test"],
+					fields: [{ id: "password-field", purpose: "PASSWORD" }],
+				})),
+				"item-2": vaultReading(loginItem({
+					id: "item-2",
+					vault: { id: "vlt-1", name: "Agent Vault" },
+					websites: ["https://fixture.test"],
+					fields: [{ id: "password-field", purpose: "PASSWORD" }],
+				})),
+			},
+			sentinel: controlSentinel,
+		})
+		const result = reading(
+			await runProductionCliAsync(
+				probe,
+				[
+					"login",
+					"--ref",
+					snapshot.elements[2]!.ref,
+					"--field",
+					"password",
+					"--human-approved",
+					"--run-id",
+					"control-login",
+				],
+				root,
+			),
+		)
+		return { ...result, typed: fixture.insertedText() }
+	}
+
+	// Two claimants is a question for the vault's owner. With the rule gone,
+	// the Module silently picks a winner and delivers its secret.
+	expect(await scenario(packageRoot)).toEqual({
+		resultCode: "CREDENTIAL_MATCH_AMBIGUOUS",
+		exitCode: 21,
+		typed: [],
+	})
+	expect(
+		await scenario(mutatedPackage({
+			file: "src/modules/private-delivery/private-delivery.ts",
+			find: '\tif (matches.length > 1) return { kind: "match_ambiguous" }',
+			replace: removed,
+		})),
+	).toEqual({ resultCode: "LOGIN_FIELD_DELIVERED", exitCode: 0, typed: [controlSentinel] })
+})
+
+test("removing the frame guard delivers into a framed field", async () => {
+	const scenario = async (root: string): Promise<Reading & { framedField: string | undefined }> => {
+		const { fixture, probe } = await pageProbe(
+			{ url: "https://fixture.test/sign-in", elements: framedSignInPage },
+			root,
+		)
+		const snapshot = await takeSnapshot(probe, "control-frame", root)
+		configureCredentialVault(probe, "Agent Vault")
+		writeCredentialPlan(probe, controlVaultPlan(["https://fixture.test"]))
+		const result = reading(
+			await runProductionCliAsync(
+				probe,
+				[
+					"login",
+					"--ref",
+					snapshot.elements[5]!.ref,
+					"--field",
+					"password",
+					"--human-approved",
+					"--run-id",
+					"control-login",
+				],
+				root,
+			),
+		)
+		return { ...result, framedField: fixture.fieldValue(18) }
+	}
+
+	// The child revalidates the top document only, so with the guard gone the
+	// secret lands inside a document nobody proved anything about.
+	expect(await scenario(packageRoot)).toEqual({
+		resultCode: "LOGIN_FRAME_UNSUPPORTED",
+		exitCode: 21,
+		framedField: "",
+	})
+	expect(
+		await scenario(mutatedPackage({
+			file: "src/modules/warm-browser/warm-browser.ts",
+			find: "\tif (reading.framed) {",
+			replace: "\tif (false) {",
+		})),
+	).toEqual({ resultCode: "LOGIN_FIELD_DELIVERED", exitCode: 0, framedField: controlSentinel })
+})
+
+test("removing the post-delivery invalidation leaves the used reference alive", async () => {
+	const scenario = async (root: string): Promise<Reading & { retained: boolean }> => {
+		const { probe } = await pageProbe(
+			{ url: "https://fixture.test/sign-in", elements: signInPage },
+			root,
+		)
+		const snapshot = await takeSnapshot(probe, "control-invalidate", root)
+		configureCredentialVault(probe, "Agent Vault")
+		writeCredentialPlan(probe, controlVaultPlan(["https://fixture.test"]))
+		const delivered = await runProductionCliAsync(
+			probe,
+			[
+				"login",
+				"--ref",
+				snapshot.elements[2]!.ref,
+				"--field",
+				"password",
+				"--human-approved",
+				"--run-id",
+				"control-login",
+			],
+			root,
+		)
+		expect(delivered.exitCode, root).toBe(0)
+		const retained = readReceipt(probe).snapshot !== undefined
+		const result = reading(
+			await runProductionCliAsync(
+				probe,
+				["click", "--ref", snapshot.elements[2]!.ref, "--run-id", "control-after-click"],
+				root,
+			),
+		)
+		return { ...result, retained }
+	}
+
+	// The delivery makes the page a page nobody has re-read. With the durable
+	// invalidation gone, the reference that just carried a secret survives it
+	// and a following act goes straight through.
+	expect(await scenario(packageRoot)).toEqual({
+		resultCode: "SNAPSHOT_ABSENT",
+		exitCode: 21,
+		retained: false,
+	})
+	expect(
+		await scenario(mutatedPackage({
+			file: "src/modules/warm-browser/warm-browser.ts",
+			find: '\tinvalidateReferences("login", parsed.runId, paths, state, "acted")',
+			replace: removed,
+		})),
+	).toEqual({ resultCode: "ELEMENT_CLICKED", exitCode: 0, retained: true })
 })

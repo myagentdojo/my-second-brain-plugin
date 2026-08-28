@@ -676,7 +676,7 @@ test("fill refuses a credential field before it says anything to the page", asyn
 		transactionState: "unchanged",
 		retrySafe: false,
 		nextAction:
-			"Use the Warm Browser login command for a credential field; it is not callable in this slice.",
+			"Run warm-browser login --ref REFERENCE --field KIND --human-approved --run-id ID for a credential field.",
 		message: "Warm Browser does not type credentials into the Controlled Page.",
 	})
 	// Nothing was typed, nothing was focused, and no conversation was opened.
@@ -770,7 +770,7 @@ test.each(loginIdentifierFields)(
 			command: "fill",
 			resultCode: "CREDENTIAL_FIELD_REFUSED",
 			nextAction:
-				"Use the Warm Browser login command for a credential field; it is not callable in this slice.",
+				"Run warm-browser login --ref REFERENCE --field KIND --human-approved --run-id ID for a credential field.",
 		})
 		expect(fixture.insertedText()).toEqual([])
 		expect(fixture.attachedTargets().length).toBe(attachedBefore)

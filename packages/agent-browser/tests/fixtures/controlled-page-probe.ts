@@ -79,6 +79,34 @@ export const signInPage: readonly FixtureElement[] = [
 ]
 
 /**
+ * The same sign-in page plus one iframe whose own document carries a password
+ * field. The framed field still appears in the full accessibility tree, as a
+ * real frame's fields do, so a snapshot references it; only the document read
+ * places it inside the frame. It is fixture input, not an expected value.
+ */
+export const framedSignInPage: readonly FixtureElement[] = [
+	...signInPage,
+	{
+		backendNodeId: 17,
+		role: "Iframe",
+		name: "Embedded sign-in",
+		nodeName: "IFRAME",
+		attributes: { src: "https://fixture.test/frame" },
+		box: [10, 240, 300, 200],
+		focusable: false,
+	},
+	{
+		backendNodeId: 18,
+		role: "textbox",
+		name: "Password",
+		nodeName: "INPUT",
+		attributes: { type: "password", name: "password" },
+		box: [20, 260, 200, 24],
+		contentDocumentOf: 17,
+	},
+]
+
+/**
  * The accepted Snapshot Reference lifetime, one minute, restated by hand and
  * owned by the tests.
  *

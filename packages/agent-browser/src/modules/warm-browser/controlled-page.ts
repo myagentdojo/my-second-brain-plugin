@@ -60,6 +60,14 @@ const actionableRoles = [
 	"textbox",
 ] as const
 
+/**
+ * Node names whose content is another document. A field below one of these
+ * sits inside a frame, and the piercing document reading links every framed
+ * document to its owner, so the same ancestry walk that pierces shadow roots
+ * answers whether a field is framed.
+ */
+const frameOwnerNodeNames = ["IFRAME", "FRAME", "OBJECT", "EMBED"] as const
+
 interface AccessibilityNodeReading {
 	readonly role: string
 	readonly name: string
@@ -185,6 +193,33 @@ function isWithin(parents: Map<number, number>, node: number, ancestor: number):
 		current = parents.get(current)
 	}
 	return false
+}
+
+/**
+ * Whether one node sits inside a framed document. `documentReading` links a
+ * `contentDocument` child to its owner, so a field inside a frame's document
+ * is caught by the same walk that follows every other container. An ancestry
+ * the bounded walk never finished is answered as framed, because an
+ * unfinished answer is not proof the field sits in the top document.
+ */
+function isFramed(reading: DocumentReading, node: number): boolean {
+	// A node the document reading never placed at all has no ancestry to walk,
+	// and an absent ancestry is not proof of the top document any more than an
+	// unfinished one is.
+	if (!reading.descriptions.has(node) && !reading.parents.has(node)) return true
+	let current = reading.parents.get(node)
+	for (let step = 0; step < 128; step += 1) {
+		if (current === undefined) return false
+		const description = reading.descriptions.get(current)
+		if (
+			description !== undefined &&
+			(frameOwnerNodeNames as readonly string[]).includes(description.nodeName.toUpperCase())
+		) {
+			return true
+		}
+		current = reading.parents.get(current)
+	}
+	return true
 }
 
 /** Whether the page reports one boolean accessibility property as true. */
@@ -428,6 +463,75 @@ export async function captureControlledPage(input: {
 			if (!sameBasis(before, after)) return { kind: "identity_changed" }
 			if (data.length % 4 !== 0 || !strictBase64.test(data)) return { kind: "unverified" }
 			return { kind: "captured", basis: after, png: Buffer.from(data, "base64") }
+		},
+	)
+}
+
+/**
+ * What one live credential field reading came to. It reads only what the
+ * login decision needs: how the page describes the field, the name a reader
+ * would hear, whether it already holds a value, and whether it sits inside a
+ * frame. The field's text is never carried out.
+ */
+export type ControlledPageFieldReading =
+	| {
+		readonly kind: "read"
+		readonly basis: ControlledPageBasis
+		readonly description: DomNodeDescription
+		readonly accessibleName: string
+		readonly holdsValue: boolean
+		readonly framed: boolean
+	}
+	| { readonly kind: "identity_changed" }
+	| { readonly kind: "element_absent" }
+	| { readonly kind: "unverified" }
+
+/**
+ * Reads one referenced field of the Controlled Page without acting on it.
+ * The page identity is proved against the caller's basis before and after the
+ * reads, so a reading of a page that moved describes nothing and says so
+ * instead.
+ */
+export async function readControlledPageField(input: {
+	readonly port: number
+	readonly targetId: string
+	readonly basis: ControlledPageBasis
+	readonly backendNodeId: number
+}): Promise<ControlledPageFieldReading> {
+	return await withControlledPage<ControlledPageFieldReading>(
+		input.port,
+		input.targetId,
+		{ kind: "unverified" },
+		async (channel) => {
+			for (const method of ["Page.enable", "DOM.enable", "Accessibility.enable"]) {
+				if (!(await channel.call(method, {})).ok) return { kind: "unverified" }
+			}
+			const opening = await readBasis(channel, input.targetId)
+			if (opening === undefined) return { kind: "unverified" }
+			if (!sameBasis(opening, input.basis)) return { kind: "identity_changed" }
+			const reading = await readDocument(channel)
+			if (reading === undefined) return { kind: "unverified" }
+			const described = await channel.call("DOM.describeNode", {
+				backendNodeId: input.backendNodeId,
+			})
+			if (!described.ok) return { kind: "element_absent" }
+			const description = describedNode(record(record(described.result)?.node) ?? {})
+			if (description === undefined) return { kind: "element_absent" }
+			const accessibility = await readNodeAccessibility(channel, input.backendNodeId)
+			if (accessibility === undefined) return { kind: "unverified" }
+			// The readings describe the page as it was a moment ago; a page that
+			// moved while they were taken is a page they never described.
+			const closing = await readBasis(channel, input.targetId)
+			if (closing === undefined) return { kind: "unverified" }
+			if (!sameBasis(closing, input.basis)) return { kind: "identity_changed" }
+			return {
+				kind: "read",
+				basis: closing,
+				description,
+				accessibleName: accessibility.name,
+				holdsValue: accessibility.holdsValue,
+				framed: isFramed(reading, input.backendNodeId),
+			}
 		},
 	)
 }

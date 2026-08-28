@@ -62,14 +62,14 @@ test("Agent Browser lifecycle source follows the repository discovery contract",
 	expect(skill).toMatch(/^---\nname: agent-browser\ndescription: "[^"]+"\n---\n/)
 	expect(skill).not.toContain("disable-model-invocation: true")
 	expect(skill).toContain("Read [`CONTEXT.md`](CONTEXT.md) before using this skill.")
-	expect(skill).toContain("Maturity: `page-control-slice`")
+	expect(skill).toContain("Maturity: `private-login-slice`")
 	expect(skill).toContain("<plugin-root>/bin/warm-browser")
 	expect(guidance).toContain("Agent Browser Source Guidance")
 	expect(glossary).toContain("**Agent Browser**")
 	expect(glossary).toContain("**Warm Browser**")
 	expect(glossary).toContain("**Screenshot**")
 	expect(skill).toContain("`screenshot`")
-	expect(skill).toMatch(/`screenshot`, `click`, `fill`, and\s+`stop`/)
+	expect(skill).toMatch(/`screenshot`, `click`, `fill`,\s+`login`, and `stop`/)
 	expect(standards).toContain("## One vocabulary owner")
 	expect(standards).toContain("## Prove the public process")
 	expect(standards).toContain("## YAGNI exclusions")
@@ -108,11 +108,16 @@ test("Agent Browser has the approved lifecycle workspace and generated activatio
 	const moduleRoot = join(packageRoot, "src", "modules")
 	expect(readdirSync(moduleRoot).sort()).toEqual(["private-delivery", "warm-browser"])
 	const warmBrowser = readFileSync(join(moduleRoot, "warm-browser", "README.md"), "utf8")
-	expect(warmBrowser).toContain("one of the two Agent Browser Modules, and the implemented one")
-	expect(warmBrowser).toContain("owns the Command Vocabulary and Result Vocabulary")
-	expect(warmBrowser).toContain(
-		"`start`, `status`, `open`, `snapshot`, `screenshot`, `click`,\n`fill`, and `stop` product commands; `login` is not callable yet.",
+	expect(warmBrowser).toMatch(
+		/one of the two Agent Browser Modules; Private Delivery is the\s+other, and both are implemented/,
 	)
+	expect(warmBrowser).toContain("owns the Command Vocabulary and Result Vocabulary")
+	expect(warmBrowser).toMatch(
+		/`start`, `status`, `open`, `snapshot`,\s+`screenshot`, `click`, `fill`, `login`, and `stop` product commands/,
+	)
+	expect(warmBrowser).toMatch(/every command the Command Vocabulary names/)
+	expect(warmBrowser).toMatch(/proves everything non-secret before it delegates/)
+	expect(warmBrowser).toMatch(/No credential value ever crosses back/)
 	expect(warmBrowser).toContain("never through a\npublic selector")
 	expect(warmBrowser).toContain("refuses a credential field from the snapshot")
 	expect(warmBrowser).toContain("never at the socket the endpoint\nadvertises")
@@ -133,12 +138,14 @@ test("Agent Browser has the approved lifecycle workspace and generated activatio
 	expect(warmBrowser).toContain("production Adapter is fixed")
 	expect(warmBrowser).toContain("no factory, no injected dependency")
 	const privateDelivery = readFileSync(join(moduleRoot, "private-delivery", "README.md"), "utf8")
-	expect(privateDelivery).toContain("the one Agent Browser Module still ahead")
-	expect(privateDelivery).toContain("exact-origin unique-match and revalidation")
-	expect(privateDelivery).toContain("one selected-field")
-	expect(privateDelivery).toContain("disposable-child confinement")
-	expect(privateDelivery).toContain("redacted non-secret results")
-	expect(privateDelivery).toMatch(/no public or general\s+seam/)
+	expect(privateDelivery).toContain("the second Agent Browser Module, and it is implemented")
+	expect(privateDelivery).toMatch(
+		/exactly one Login item whose\s+declared website origin equals the current exact origin as one string/,
+	)
+	expect(privateDelivery).toMatch(/exactly one field of the requested kind/)
+	expect(privateDelivery).toMatch(/a boundary against accident, not an authorisation/)
+	expect(privateDelivery).toContain("Redaction is total")
+	expect(privateDelivery).toMatch(/seam a test may substitute is `credential-effects\.ts` alone/)
 
 	expect(existsSync(join(root, "plugin", "bin", "warm-browser"))).toBe(true)
 	expect(existsSync(join(packageRoot, "src", "index.ts"))).toBe(false)

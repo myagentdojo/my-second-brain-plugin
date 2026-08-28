@@ -235,7 +235,7 @@ test("help is one literal agent-native success envelope", () => {
 				nextAction: "Run warm-browser start --run-id ID to create the Browser Session.",
 				data: {
 					usage:
-						"warm-browser <help|start|status|open|snapshot|screenshot|click|fill|stop> [--run-id ID] [--port NUMBER] [--url URL] [--adopt-page] [--ref REFERENCE] [--value TEXT]",
+						"warm-browser <help|start|status|open|snapshot|screenshot|click|fill|login|stop> [--run-id ID] [--port NUMBER] [--url URL] [--adopt-page] [--ref REFERENCE] [--value TEXT] [--field KIND] [--human-approved]",
 					commands: [
 						{ name: "help", sideEffects: "none", options: [] },
 						{
@@ -286,6 +286,16 @@ test("help is one literal agent-native success envelope", () => {
 							],
 						},
 						{
+							name: "login",
+							sideEffects:
+								"delivers one Credential Match field into one referenced credential field of the Controlled Page and invalidates every earlier Snapshot Reference",
+							options: [
+								{ flag: "--ref", value: "REFERENCE", required: true },
+								{ flag: "--field", value: "KIND", required: true },
+								{ flag: "--human-approved", value: null, required: false },
+							],
+						},
+						{
 							name: "stop",
 							sideEffects:
 								"stops one verified owned browser process group and removes its private state, including every Snapshot Reference",
@@ -331,6 +341,10 @@ test("help states every side effect each command can actually have", () => {
 			"types one non-secret value into one referenced empty field of the Controlled Page and may invalidate every earlier Snapshot Reference",
 		],
 		[
+			"login",
+			"delivers one Credential Match field into one referenced credential field of the Controlled Page and invalidates every earlier Snapshot Reference",
+		],
+		[
 			"stop",
 			"stops one verified owned browser process group and removes its private state, including every Snapshot Reference",
 		],
@@ -358,7 +372,19 @@ test("help states every side effect each command can actually have", () => {
 	// holds, because every one of them proves the Controlled Page identity first
 	// and a page that moved takes its references with it. Each says so, because a
 	// caller holding one has to know its reference did not survive the command.
-	for (const name of ["start", "status", "open", "snapshot", "screenshot", "click", "fill", "stop"] as const) {
+	for (
+		const name of [
+			"start",
+			"status",
+			"open",
+			"snapshot",
+			"screenshot",
+			"click",
+			"fill",
+			"login",
+			"stop",
+		] as const
+	) {
 		const advertised = commands.find((command) => command.name === name)?.sideEffects ?? ""
 		expect(advertised, name).toContain("Snapshot Reference")
 	}
@@ -375,6 +401,7 @@ test("help usage names every command from the single Command Vocabulary owner", 
 		"screenshot",
 		"click",
 		"fill",
+		"login",
 		"stop",
 	] as const
 	const result = Bun.spawnSync({
@@ -386,7 +413,7 @@ test("help usage names every command from the single Command Vocabulary owner", 
 	const usage = (JSON.parse(result.stdout.toString()).data as { usage: string }).usage
 
 	expect(usage).toBe(
-		"warm-browser <help|start|status|open|snapshot|screenshot|click|fill|stop> [--run-id ID] [--port NUMBER] [--url URL] [--adopt-page] [--ref REFERENCE] [--value TEXT]",
+		"warm-browser <help|start|status|open|snapshot|screenshot|click|fill|login|stop> [--run-id ID] [--port NUMBER] [--url URL] [--adopt-page] [--ref REFERENCE] [--value TEXT] [--field KIND] [--human-approved]",
 	)
 	expect(usage.slice("warm-browser <".length, usage.indexOf(">")).split("|")).toEqual([
 		...expectedNames,
@@ -398,7 +425,9 @@ test("help usage names every command from the single Command Vocabulary owner", 
 		resolve(packageRoot, "src/modules/warm-browser/warm-browser.ts"),
 		"utf8",
 	)
-	expect(moduleSource).not.toContain("help|start|status|open|snapshot|screenshot|click|fill|stop")
+	expect(moduleSource).not.toContain(
+		"help|start|status|open|snapshot|screenshot|click|fill|login|stop",
+	)
 })
 
 test("production fixes the Agent Chrome Profile to HOME without predecessor overrides", () => {

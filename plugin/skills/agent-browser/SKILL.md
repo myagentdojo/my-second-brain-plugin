@@ -35,7 +35,11 @@ The intended public Command Vocabulary is `start`, `status`, `open`,
 4. Treat navigation, page replacement, and a fresh snapshot generation as
    reference-invalidating events. Take another snapshot before continuing.
 5. For login, select the intended username or password field from the current
-   snapshot. Require human approval immediately before credential access.
+   snapshot, obtain human approval immediately before credential access, then
+   run `warm-browser login --ref REFERENCE --field KIND --human-approved
+   --run-id ID`. The `--human-approved` switch asserts that a human approved
+   this exact credential access immediately before it; it is never an agent
+   decision.
 6. Let Private Delivery resolve exactly one Login item for the current exact
    origin, revalidate that origin, fill one selected field, report only
    non-secret shape, and exit.
@@ -62,11 +66,14 @@ The intended public Command Vocabulary is `start`, `status`, `open`,
 
 ## Current maturity
 
-Maturity: `page-control-slice`. The generated payload activates Warm Browser
-`help`, `start`, `status`, `open`, `snapshot`, `screenshot`, `click`, `fill`, and
-`stop`; `login` is not callable. `fill` refuses every credential field,
-including the login identifier beside the password, and names `login`, so
-credential entry has no path in this slice. Profile
-Cutover, credential delivery, installation, and release remain separate tickets.
+Maturity: `private-login-slice`. The generated payload activates Warm Browser
+`help`, `start`, `status`, `open`, `snapshot`, `screenshot`, `click`, `fill`,
+`login`, and `stop`, which is every command the Command Vocabulary names.
+`fill` still refuses every credential field, including the login identifier
+beside the password, and routes it to
+`warm-browser login --ref REFERENCE --field KIND --human-approved --run-id ID`,
+which delivers one Credential Match field through Private Delivery without the
+credential entering the agent process. Profile Cutover, installation, and
+release remain separate tickets.
 Do not claim profile exclusivity or a real-profile launch until their owning
 proofs complete.

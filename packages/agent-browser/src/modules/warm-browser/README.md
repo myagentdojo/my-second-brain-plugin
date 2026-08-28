@@ -1,13 +1,15 @@
 # Warm Browser
 
-Warm Browser is one of the two Agent Browser Modules, and the implemented one.
+Warm Browser is one of the two Agent Browser Modules; Private Delivery is the
+other, and both are implemented.
 
 It owns the Command Vocabulary and Result Vocabulary, and each command declares
 the options it accepts beside its own name there. The implemented slice is the
-`help` meta-surface and the `start`, `status`, `open`, `snapshot`, `screenshot`, `click`,
-`fill`, and `stop` product commands; `login` is not callable yet. Browser
-Session, Controlled Page, Snapshot Generation, Snapshot Reference validity, and
-Screenshot lifecycle remain internal to this Module.
+`help` meta-surface and the `start`, `status`, `open`, `snapshot`,
+`screenshot`, `click`, `fill`, `login`, and `stop` product commands, which is
+every command the Command Vocabulary names. Browser Session, Controlled Page,
+Snapshot Generation, Snapshot Reference validity, and Screenshot lifecycle
+remain internal to this Module.
 
 The production Adapter is fixed: one value, no factory, no injected dependency.
 Tests inject the internal Adapter through a private test-only driver, or
@@ -86,6 +88,18 @@ and a field inside a shadow root is described rather than missed, because the
 document is read through them. The login
 identifier is classified with the password, because it is the half of the pair
 that names the account; both refusals route to `login`.
+
+`login` acts through the same Snapshot Reference discipline as every other
+page command, and it proves everything non-secret before it delegates: the
+verified Browser Session, the resolved reference, the live page identity
+before and after the reading, that the referenced field sits in the top
+document rather than inside a frame, that the page has an exact http or https
+origin, that the field is empty, and that it is a credential field of exactly
+the requested kind. Only then does it hand the port, the identity basis, the
+node, the origin, and the field kind to Private Delivery, which owns the
+credential half. No credential value ever crosses back: what returns is one
+closed non-secret outcome, and the envelope carries no value, no length, no
+item, and no vault detail.
 
 A Screenshot is a private session-owned PNG of the Controlled Page, distinct
 from the structured interaction snapshot. The artifact lives inside the

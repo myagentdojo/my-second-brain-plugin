@@ -7,14 +7,18 @@ plugin launcher is `plugin/bin/warm-browser`; the package entry is `src/main.ts`
 ## Warm Browser lifecycle
 
 The callable slice is `help`, `start`, `status`, `open`, `snapshot`,
-`screenshot`, `click`, `fill`, and `stop`. `help` is a CLI meta-surface, not one
-of the nine accepted product commands; `login` is still not callable. Every
-command accepts `--run-id <ID>`, and each command declares the options it
-accepts beside its own name in the Command Vocabulary: `start` accepts one
+`screenshot`, `click`, `fill`, `login`, and `stop`. `help` is a CLI
+meta-surface, not one of the nine accepted product commands, and the other nine
+are the whole Command Vocabulary. Every command accepts `--run-id <ID>`, and
+each command declares the options it accepts beside its own name in the Command
+Vocabulary: `start` accepts one
 `--port <1024..65535>` override and otherwise uses loopback port `9242`, `open`
 accepts `--url URL` and `--adopt-page`, `screenshot` accepts none, `click`
-accepts `--ref REFERENCE`, and `fill` accepts `--ref REFERENCE` and
-`--value TEXT`.
+accepts `--ref REFERENCE`, `fill` accepts `--ref REFERENCE` and
+`--value TEXT`, and `login` accepts `--ref REFERENCE`, `--field KIND`, and
+`--human-approved`. The `--human-approved` switch asserts that a human approved
+this exact credential access immediately before it; the assertion is the
+human's to make and never an agent's own decision.
 
 On macOS, production fixes the existing profile path to
 `$HOME/.agent-warm-profile`, with inner profile `Default`. It does not honor the
@@ -97,17 +101,23 @@ Result Vocabulary is `HELP`, `SESSION_STARTED`, `SESSION_RUNNING`,
 `CONTROLLED_PAGE_UNAVAILABLE`, `CONTROLLED_PAGE_AMBIGUOUS`,
 `CONTROLLED_PAGE_REPLACED`, `SESSION_ALREADY_RUNNING`, `PORT_OCCUPIED`,
 `PORT_UNVERIFIABLE`, `START_IN_PROGRESS`, `PAGE_OPENED`, `SNAPSHOT_TAKEN`,
-`SCREENSHOT_CAPTURED`, `ELEMENT_CLICKED`, `FIELD_FILLED`, `SNAPSHOT_ABSENT`, `ELEMENT_NOT_ACTIONABLE`,
-`SNAPSHOT_REFERENCE_INVALID`, `SNAPSHOT_REFERENCE_STALE`,
-`PAGE_IDENTITY_CHANGED`, `SELECTOR_UNSUPPORTED`, `SCREENSHOT_PATH_UNSUPPORTED`, `CREDENTIAL_FIELD_REFUSED`,
+`SCREENSHOT_CAPTURED`, `ELEMENT_CLICKED`, `FIELD_FILLED`, `SNAPSHOT_ABSENT`,
+`ELEMENT_NOT_ACTIONABLE`, `SNAPSHOT_REFERENCE_INVALID`,
+`SNAPSHOT_REFERENCE_STALE`, `PAGE_IDENTITY_CHANGED`, `SELECTOR_UNSUPPORTED`,
+`SCREENSHOT_PATH_UNSUPPORTED`, `CREDENTIAL_FIELD_REFUSED`,
 `NAVIGATION_TARGET_REFUSED`, `NAVIGATION_FAILED`, `PAGE_CONTROL_UNVERIFIED`,
-and `UNEXPECTED_FAILURE`.
+`LOGIN_FIELD_DELIVERED`, `APPROVAL_REQUIRED`, `LOGIN_FIELD_MISMATCH`,
+`LOGIN_FRAME_UNSUPPORTED`, `ORIGIN_UNSUPPORTED`, `ORIGIN_CHANGED`,
+`CREDENTIAL_VAULT_UNCONFIGURED`, `CREDENTIAL_VAULT_MISMATCH`,
+`CREDENTIAL_VAULT_UNVERIFIED`, `CREDENTIAL_MATCH_ABSENT`,
+`CREDENTIAL_MATCH_AMBIGUOUS`, `CREDENTIAL_FIELD_AMBIGUOUS`,
+`PRIVATE_DELIVERY_UNVERIFIED`, and `UNEXPECTED_FAILURE`.
 
 ## Controlled Page operation
 
-`open`, `snapshot`, `click`, and `fill` act on the one Controlled Page of an
-already verified Browser Session and on nothing else. Without one they refuse
-with `SESSION_ABSENT`.
+`open`, `snapshot`, `screenshot`, `click`, `fill`, and `login` act on the one
+Controlled Page of an already verified Browser Session and on nothing else.
+Without one they refuse with `SESSION_ABSENT`.
 
 `snapshot` reads the page's accessibility tree and its document and issues one
 Snapshot Generation of short-lived Snapshot References. A reference is
@@ -160,7 +170,9 @@ attribute rules hold for every node, because an attribute is the page saying wha
 the node is; the name a reader would hear is asked only about a field a value
 could go into, because a link or a button carries its own visible text as that
 name and `Log in` says what the control does rather than what a field holds. Both
-refusals name `login`, which is not callable in this slice. Warm Browser never
+refusals route to
+`warm-browser login --ref REFERENCE --field KIND --human-approved --run-id ID`.
+Warm Browser never
 types authentication material, and `--value` carries non-secret text only.
 
 ## Screenshots
@@ -182,13 +194,69 @@ invented answer is never kept. Every Screenshot goes with the session state on
 stop and on bounded stale-session cleanup; a cleanup that cannot be completed
 fails closed and leaves the state repairable.
 
+## Responsible login
+
+`login` delivers exactly one field of exactly one Credential Vault Login item
+into one referenced credential field of the Controlled Page, without the
+credential ever entering the agent process, the argument list, the environment,
+the public streams, the diagnostics, or the durable state.
+
+The ordering is fixed and each step fails closed before the next. Warm Browser
+proves everything non-secret first: the verified Browser Session, the resolved
+Snapshot Reference, the live page identity before and after the field reading,
+that the field sits in the top document rather than inside a frame
+(`LOGIN_FRAME_UNSUPPORTED`), that the page has an exact http or https origin
+(`ORIGIN_UNSUPPORTED`), that the field is empty, and that the live field is a
+credential field of exactly the requested kind (`LOGIN_FIELD_MISMATCH`); a
+one-time-code or verification-code field has no kind and is refused. None of
+those refusals has spoken to the Credential Vault. Private Delivery then proves
+the human approval before anything else, so `--human-approved` provably
+precedes credential access, and its absence is `APPROVAL_REQUIRED` before
+anything is read, any wrapper is invoked, or any process is created.
+
+The Credential Match is unique and exact. One configured Credential Vault is
+named by a private file Private Delivery only reads,
+`$XDG_STATE_HOME/my-second-brain/private-delivery/credential-vault.json`, with
+its directory exactly `0700` and the file exactly `0600`; an absent file is
+`CREDENTIAL_VAULT_UNCONFIGURED`, and a present file failing any check is
+refused rather than repaired. A declared website matches only when its whole
+parsed origin equals the current exact origin as one string, so scheme, host,
+and port must all agree: a parent domain, a sub-domain, a different scheme, an
+explicit non-default port, and a path-only difference are all decided by that
+one comparison. Zero matches are `CREDENTIAL_MATCH_ABSENT` and two or more are
+`CREDENTIAL_MATCH_AMBIGUOUS`; the Module never picks a winner. The matched
+item must carry exactly one field of the requested kind or the delivery is
+`CREDENTIAL_FIELD_AMBIGUOUS`, and an item outside the configured vault is
+`CREDENTIAL_VAULT_MISMATCH`.
+
+The one credential wrapper is
+`$HOME/code/dotfiles/bin/with-one-password-token`. It alone holds the
+service-account token, and its `inject-stdin` command resolves the one `op://`
+reference itself, hands the secret to a disposable child on standard input,
+and scrubs the child environment down to HOME, PATH, LANG, LC_ALL, and TMPDIR.
+The disposable child is a private re-entry of the shipped entry that the
+public parser never sees: it revalidates the frame, the document load, the
+url, and the exact origin immediately before the fill, re-derives the field
+kind from the live page, proves the field empty and then focused, inserts the
+value, and answers one closed JSON line carrying no value and no length. An
+origin that moved is `ORIGIN_CHANGED`, a page that moved is
+`PAGE_IDENTITY_CHANGED`, and a child that could not prove what it did is
+`PRIVATE_DELIVERY_UNVERIFIED`.
+
+The result is non-secret and the boundaries are closed. Success is
+`LOGIN_FIELD_DELIVERED` with the field kind, the reference, the Controlled
+Page, and nothing else: no value, no length, no item title, no item id, no
+vault name, and no username. Every earlier Snapshot Reference is invalidated
+durably on success and on any outcome that reached the page, so nothing acts
+on a page that now holds a credential without re-reading it first.
+
 ## Deterministic Controlled Page proof
 
-`open`, `snapshot`, `click`, and `fill` are proved through the public process
-against a deterministic local accessibility fixture: one real loopback endpoint
-that speaks the CDP subset Warm Browser speaks, over a real WebSocket. The
-production entry opens the socket, sends the real requests, and interprets the
-real replies. Only the process table, the launch, the loopback listener, and the
+`open`, `snapshot`, `screenshot`, `click`, and `fill` are proved through the
+public process against a deterministic local accessibility fixture: one real
+loopback endpoint that speaks the CDP subset Warm Browser speaks, over a real
+WebSocket. The production entry opens the socket, sends the real requests, and
+interprets the real replies. Only the process table, the launch, the loopback listener, and the
 port probe stay substituted, because no browser is launched and none is
 inspected. An independent CDP target reader that shares no code with the Module
 reads the same endpoint and proves the process and Controlled Page Warm Browser

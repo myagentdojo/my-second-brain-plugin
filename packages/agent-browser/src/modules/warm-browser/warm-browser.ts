@@ -20,6 +20,14 @@ import {
 	type TransactionState,
 	type UndeliverableAct,
 } from "./contract"
+import {
+	type CredentialFieldKind,
+	credentialFieldKind,
+} from "../private-delivery/field-kind"
+import {
+	deliverPrivately,
+	type PrivateDeliveryOutcome,
+} from "../private-delivery/private-delivery"
 import type { WarmBrowserAdapter } from "./adapter"
 import { fillValueLimit, startingTimeoutMs } from "./bounds"
 import {
@@ -27,6 +35,7 @@ import {
 	captureControlledPage,
 	type ControlledPageAction,
 	openControlledPage,
+	readControlledPageField,
 	readControlledPageSnapshot,
 	sameBasis,
 } from "./controlled-page"
@@ -93,7 +102,15 @@ interface ParsedCommand {
 	readonly url?: string
 	readonly reference?: string
 	readonly value?: string
+	readonly field?: CredentialFieldKind
 	readonly adoptPage: boolean
+	/**
+	 * Whether the caller asserted that a human approved this exact credential
+	 * access immediately before it. The assertion is the human's, never an
+	 * agent's own decision, and login refuses without it before anything is
+	 * read.
+	 */
+	readonly humanApproved: boolean
 }
 
 class WarmBrowserFailure extends Error {
@@ -229,6 +246,19 @@ function safeUrl(value: string): URL | undefined {
 }
 
 /**
+ * The exact origin of one Controlled Page address, or nothing. An address
+ * whose protocol is not http or https, or whose origin is "null" or empty,
+ * has no exact origin, and a page without one has nothing a Credential Match
+ * could be equal to.
+ */
+function exactOrigin(url: string): string | undefined {
+	const parsed = safeUrl(url)
+	if (parsed === undefined) return undefined
+	if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return undefined
+	return parsed.origin === "" || parsed.origin === "null" ? undefined : parsed.origin
+}
+
+/**
  * What each option's value must be, declared once per flag. A command that
  * accepts a flag accepts exactly the same values for it as every other command
  * that does, because the rule belongs to the flag and not to the command.
@@ -273,6 +303,12 @@ const optionValidators: Readonly<Record<string, OptionValidator>> = {
 	"--value": (runId, command, raw) => {
 		if (raw === "" || raw.length > fillValueLimit || controlCharacter.test(raw)) {
 			usage(runId, command, "The --value text is missing or invalid.")
+		}
+		return raw
+	},
+	"--field": (runId, command, raw) => {
+		if (raw !== "username" && raw !== "password") {
+			usage(runId, command, "The --field value must be username or password.")
 		}
 		return raw
 	},
@@ -359,14 +395,17 @@ function parseArguments(arguments_: readonly string[], adapter: WarmBrowserAdapt
 	const url = seen.get("--url")
 	const reference = seen.get("--ref")
 	const value = seen.get("--value")
+	const field = seen.get("--field")
 	return {
 		command,
 		runId,
 		adoptPage: seen.get("--adopt-page") === true,
+		humanApproved: seen.get("--human-approved") === true,
 		...(port === undefined ? {} : { port: port as number }),
 		...(url === undefined ? {} : { url: url as string }),
 		...(reference === undefined ? {} : { reference: reference as string }),
 		...(value === undefined ? {} : { value: value as string }),
+		...(field === undefined ? {} : { field: field as CredentialFieldKind }),
 	}
 }
 
@@ -1166,7 +1205,7 @@ interface ControlledSession {
  * so a command missing it never reaches execution. Reaching here means those two
  * disagree, which is a defect rather than a caller mistake.
  */
-function requiredArgument(value: string | undefined): string {
+function requiredArgument<T extends string>(value: T | undefined): T {
 	if (value === undefined) throw new Error("a required option reached execution unset")
 	return value
 }
@@ -1388,7 +1427,7 @@ function credentialRefusal(command: PageCommand, runId: string): never {
 		"CREDENTIAL_FIELD_REFUSED",
 		21,
 		"Warm Browser does not type credentials into the Controlled Page.",
-		"Use the Warm Browser login command for a credential field; it is not callable in this slice.",
+		"Run warm-browser login --ref REFERENCE --field KIND --human-approved --run-id ID for a credential field.",
 	)
 }
 
@@ -1751,6 +1790,289 @@ async function actOnPage(
 	})
 }
 
+/**
+ * The one owner of why a login could not deliver. The live field reading and
+ * Private Delivery both answer through it, so a field that already holds a
+ * value, a page that moved, and an element that is gone are each said one way
+ * however they were discovered.
+ *
+ * The refusals that reached or may have reached the page drop the Snapshot
+ * Generation durably before they return, exactly as an act does: a page whose
+ * identity or origin moved, and a delivery the disposable child could not
+ * prove, all leave references that describe a page nobody may trust again.
+ */
+function refuseLoginDelivery(
+	parsed: ParsedCommand,
+	paths: StatePaths,
+	state: RunningBrowserSessionState,
+	outcome: Exclude<PrivateDeliveryOutcome, { readonly kind: "delivered" }>,
+): never {
+	const runId = parsed.runId
+	switch (outcome.kind) {
+		case "approval_required":
+			staticFailure(
+				"login",
+				runId,
+				"APPROVAL_REQUIRED",
+				21,
+				"Credential access needs a human approval given immediately before it.",
+				"Obtain explicit human approval, then run warm-browser login --ref REFERENCE --field KIND --human-approved --run-id ID.",
+			)
+		case "vault_unconfigured":
+			staticFailure(
+				"login",
+				runId,
+				"CREDENTIAL_VAULT_UNCONFIGURED",
+				20,
+				"No Credential Vault is configured for Private Delivery.",
+				"Configure the one Credential Vault in the private credential-vault.json state file, then retry.",
+			)
+		case "vault_unsafe":
+			staticFailure(
+				"login",
+				runId,
+				"STATE_UNSAFE",
+				20,
+				"The configured Credential Vault file could not be proved safe.",
+				"Repair the private credential-vault.json ownership and permissions before retrying.",
+			)
+		case "wrapper_unavailable":
+			staticFailure(
+				"login",
+				runId,
+				"CREDENTIAL_VAULT_UNVERIFIED",
+				20,
+				"The one credential wrapper Private Delivery invokes is unavailable.",
+				"Restore the with-one-password-token wrapper before retrying.",
+			)
+		case "vault_unverified":
+			staticFailure(
+				"login",
+				runId,
+				"CREDENTIAL_VAULT_UNVERIFIED",
+				20,
+				"The Credential Vault could not be read or its reply could not be interpreted.",
+				"Inspect the credential wrapper and the configured Credential Vault before retrying.",
+			)
+		case "vault_mismatch":
+			staticFailure(
+				"login",
+				runId,
+				"CREDENTIAL_VAULT_MISMATCH",
+				21,
+				"A resolved Login item does not belong to the configured Credential Vault.",
+				"Inspect the configured Credential Vault before retrying.",
+			)
+		case "match_absent":
+			staticFailure(
+				"login",
+				runId,
+				"CREDENTIAL_MATCH_ABSENT",
+				21,
+				"No Login item in the Credential Vault declares this exact origin.",
+				"Add exactly one Login item whose website is this exact origin, then retry.",
+			)
+		case "match_ambiguous":
+			staticFailure(
+				"login",
+				runId,
+				"CREDENTIAL_MATCH_AMBIGUOUS",
+				21,
+				"More than one Login item in the Credential Vault declares this exact origin.",
+				"Leave exactly one Login item declaring this exact origin, then retry.",
+			)
+		case "field_ambiguous":
+			staticFailure(
+				"login",
+				runId,
+				"CREDENTIAL_FIELD_AMBIGUOUS",
+				21,
+				"The matched Login item does not carry exactly one field of the requested kind.",
+				"Repair the matched Login item to carry exactly one field of the requested kind, then retry.",
+			)
+		case "origin_changed": {
+			const transaction = invalidationState(state)
+			invalidateReferences("login", runId, paths, state, "invalidated")
+			staticFailure(
+				"login",
+				runId,
+				"ORIGIN_CHANGED",
+				21,
+				"The Controlled Page's exact origin moved before the field was filled.",
+				freshSnapshotAction,
+				false,
+				transaction,
+			)
+		}
+		case "identity_changed": {
+			const transaction = invalidationState(state)
+			invalidateReferences("login", runId, paths, state, "invalidated")
+			staticFailure(
+				"login",
+				runId,
+				"PAGE_IDENTITY_CHANGED",
+				21,
+				"The Controlled Page is no longer the page this Snapshot Reference was issued against.",
+				freshSnapshotAction,
+				false,
+				transaction,
+			)
+		}
+		case "field_mismatch":
+			staticFailure(
+				"login",
+				runId,
+				"LOGIN_FIELD_MISMATCH",
+				21,
+				"The referenced live field is not a credential field of the requested kind.",
+				"Run warm-browser snapshot --run-id ID and select the credential field of the requested kind.",
+			)
+		case "field_not_empty":
+			undeliverableAct("login", runId, "field_not_empty", false)
+		case "element_absent":
+			staticFailure(
+				"login",
+				runId,
+				"SNAPSHOT_REFERENCE_STALE",
+				21,
+				"The referenced element is no longer part of the Controlled Page.",
+				freshSnapshotAction,
+			)
+		case "unverified": {
+			if (outcome.touchedPage) {
+				// The child got far enough to have asked the page for something, so
+				// what the page now shows is unknown and the references that described
+				// it before are not kept.
+				invalidateReferences("login", runId, paths, state, "acted")
+				staticFailure(
+					"login",
+					runId,
+					"PRIVATE_DELIVERY_UNVERIFIED",
+					20,
+					"The disposable child did not prove what it did with the delivery.",
+					"Run warm-browser snapshot --run-id ID to read what the Controlled Page now holds.",
+					false,
+					"acted",
+				)
+			}
+			staticFailure(
+				"login",
+				runId,
+				"PRIVATE_DELIVERY_UNVERIFIED",
+				20,
+				"The disposable child did not prove what it did with the delivery.",
+				"Inspect the credential wrapper and the Controlled Page before retrying.",
+			)
+		}
+	}
+}
+
+async function login(
+	parsed: ParsedCommand,
+	paths: StatePaths,
+	adapter: WarmBrowserAdapter,
+): Promise<CliOutcome> {
+	const session = await requireControlledPage(parsed, "login", paths, adapter)
+	const state = session.state
+	const reference = requiredArgument(parsed.reference)
+	const field = requiredArgument(parsed.field)
+	const resolution = resolveSnapshotReference({
+		reference,
+		generation: state.snapshot,
+		controlledPageTargetId: state.endpoint.controlledPageTargetId,
+		nowEpochMs: adapter.nowEpochMs(),
+	})
+	if (resolution.kind !== "resolved") refuseReference("login", parsed.runId, resolution.kind)
+	// A resolved reference always came from the generation this session holds.
+	const generation = state.snapshot!
+	// Everything non-secret is proved here, before the Credential Vault is ever
+	// spoken to: none of the refusals below has read a configuration, invoked a
+	// wrapper, or created a process.
+	const reading = await readControlledPageField({
+		port: state.endpoint.port,
+		targetId: state.endpoint.controlledPageTargetId,
+		basis: generation.basis,
+		backendNodeId: resolution.element.backendNodeId,
+	})
+	if (reading.kind === "identity_changed") {
+		refuseLoginDelivery(parsed, paths, state, { kind: "identity_changed" })
+	}
+	if (reading.kind === "element_absent") {
+		refuseLoginDelivery(parsed, paths, state, { kind: "element_absent" })
+	}
+	if (reading.kind === "unverified") {
+		pageControlUnverified(
+			"login",
+			parsed.runId,
+			"Warm Browser could not read the referenced credential field.",
+			"unchanged",
+		)
+	}
+	// Private Delivery revalidates the top document only, so a field inside a
+	// frame would be filled against a document nobody proved. It is refused
+	// here, before anything credential-shaped begins.
+	if (reading.framed) {
+		staticFailure(
+			"login",
+			parsed.runId,
+			"LOGIN_FRAME_UNSUPPORTED",
+			21,
+			"The referenced credential field sits inside a frame, and login delivers into the top document only.",
+			"Run warm-browser open --url URL --run-id ID with the login page whose own document carries the field.",
+		)
+	}
+	const origin = exactOrigin(reading.basis.url)
+	if (origin === undefined) {
+		staticFailure(
+			"login",
+			parsed.runId,
+			"ORIGIN_UNSUPPORTED",
+			21,
+			"The Controlled Page has no exact http or https origin.",
+			"Run warm-browser open --url URL --run-id ID with an http or https address, then retry login.",
+		)
+	}
+	if (reading.holdsValue) undeliverableAct("login", parsed.runId, "field_not_empty", false)
+	// The kind must match exactly. Credential material with no kind, such as a
+	// one-time-code field, is refused too: nothing in a Login item is the right
+	// value for it.
+	if (credentialFieldKind(reading.description, reading.accessibleName) !== field) {
+		refuseLoginDelivery(parsed, paths, state, { kind: "field_mismatch" })
+	}
+	const outcome = await deliverPrivately({
+		port: state.endpoint.port,
+		targetId: state.endpoint.controlledPageTargetId,
+		basis: generation.basis,
+		backendNodeId: resolution.element.backendNodeId,
+		origin,
+		field,
+		humanApproved: parsed.humanApproved,
+	})
+	if (outcome.kind !== "delivered") refuseLoginDelivery(parsed, paths, state, outcome)
+	// A delivered field makes the page a page nobody has re-read, so every
+	// earlier reference is dropped durably before success is reported.
+	invalidateReferences("login", parsed.runId, paths, state, "acted")
+	return success({
+		schemaVersion,
+		status: "ok",
+		command: "login",
+		resultCode: "LOGIN_FIELD_DELIVERED",
+		runId: parsed.runId,
+		transactionState: "acted",
+		retrySafe: false,
+		nextAction:
+			"Run warm-browser snapshot --run-id ID and obtain explicit human approval before any consequential submission.",
+		data: {
+			field,
+			reference,
+			fieldNowHoldsValue: true,
+			controlledPage: controlledPageData(generation.basis),
+			invalidatedReferences: true,
+			postcondition: "running",
+		},
+	})
+}
+
 type SliceHandler = (
 	parsed: ParsedCommand,
 	paths: StatePaths,
@@ -1769,6 +2091,7 @@ const sliceCommands: Readonly<Record<SliceCommand, SliceHandler>> = {
 	screenshot,
 	click: (parsed, paths, adapter) => actOnPage(parsed, "click", paths, adapter),
 	fill: (parsed, paths, adapter) => actOnPage(parsed, "fill", paths, adapter),
+	login,
 	stop,
 }
 

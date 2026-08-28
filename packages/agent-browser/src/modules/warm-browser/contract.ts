@@ -87,6 +87,20 @@ export const commandVocabulary = [
 		],
 	},
 	{
+		name: "login",
+		sideEffects:
+			"delivers one Credential Match field into one referenced credential field of the Controlled Page and invalidates every earlier Snapshot Reference",
+		options: [
+			{ flag: "--ref", value: "REFERENCE", required: true },
+			{ flag: "--field", value: "KIND", required: true },
+			// The switch asserts that a human approved this exact credential access
+			// immediately before it. The assertion is the human's to make and never
+			// an agent's own decision; without it, login refuses before anything is
+			// read.
+			{ flag: "--human-approved", value: null, required: false },
+		],
+	},
+	{
 		name: "stop",
 		sideEffects:
 			"stops one verified owned browser process group and removes its private state, including every Snapshot Reference",
@@ -97,7 +111,10 @@ export const commandVocabulary = [
 export type CliCommand = (typeof commandVocabulary)[number]["name"]
 export type SliceCommand = Exclude<CliCommand, "help">
 /** A command that acts on the Controlled Page of an already running session. */
-export type PageCommand = Extract<CliCommand, "open" | "snapshot" | "screenshot" | "click" | "fill">
+export type PageCommand = Extract<
+	CliCommand,
+	"open" | "snapshot" | "screenshot" | "click" | "fill" | "login"
+>
 export type TransactionState =
 	| "unchanged"
 	| "started"
@@ -154,6 +171,19 @@ export type ResultCode =
 	| "NAVIGATION_TARGET_REFUSED"
 	| "NAVIGATION_FAILED"
 	| "PAGE_CONTROL_UNVERIFIED"
+	| "LOGIN_FIELD_DELIVERED"
+	| "APPROVAL_REQUIRED"
+	| "LOGIN_FIELD_MISMATCH"
+	| "LOGIN_FRAME_UNSUPPORTED"
+	| "ORIGIN_UNSUPPORTED"
+	| "ORIGIN_CHANGED"
+	| "CREDENTIAL_VAULT_UNCONFIGURED"
+	| "CREDENTIAL_VAULT_MISMATCH"
+	| "CREDENTIAL_VAULT_UNVERIFIED"
+	| "CREDENTIAL_MATCH_ABSENT"
+	| "CREDENTIAL_MATCH_AMBIGUOUS"
+	| "CREDENTIAL_FIELD_AMBIGUOUS"
+	| "PRIVATE_DELIVERY_UNVERIFIED"
 	| "UNEXPECTED_FAILURE"
 
 export interface SuccessEnvelope {
