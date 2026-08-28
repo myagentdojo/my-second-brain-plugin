@@ -2,16 +2,14 @@ import { accessSync, constants, lstatSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
 
-import {
-	credentialWrapperOutputLimit,
-	privateDeliveryChildReplyLimit,
-} from "../warm-browser/bounds"
 import type { ControlledPageBasis } from "../warm-browser/contract"
 import { privateDeliveryChildArgument } from "./child"
 import { readCredentialVaultConfiguration } from "./configuration"
 import {
+	credentialWrapperOutputLimit,
 	type PrivateDeliveryChildOutcome,
 	privateDeliveryChildOutcomes,
+	privateDeliveryChildReplyLimit,
 	type PrivateDeliveryOutcome,
 } from "./contract"
 import {

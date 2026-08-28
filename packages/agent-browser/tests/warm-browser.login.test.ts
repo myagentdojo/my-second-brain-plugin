@@ -347,6 +347,41 @@ test("a credential field inside a frame is refused before any vault access", asy
 	expect(vaultActions(probe)).toEqual([])
 })
 
+test("a page with no exact origin is refused with the vault never spoken to", async () => {
+	// about:blank is a real page a Browser Session can hold, and it has no
+	// exact http or https origin, so it has nothing a Credential Match could
+	// be equal to.
+	const { probe, snapshot } = await signInProbe({ url: "about:blank" })
+	configureCredentialVault(probe, "Agent Vault")
+	writeCredentialPlan(probe, oneItemPlan(["https://fixture.test"]))
+
+	const result = await runProductionCliAsync(probe, [
+		"login",
+		"--ref",
+		snapshot.elements[2]!.ref,
+		"--field",
+		"password",
+		"--human-approved",
+		"--run-id",
+		"login-no-origin",
+	])
+
+	expectError(result, 21, {
+		schemaVersion: 1,
+		status: "error",
+		command: "login",
+		resultCode: "ORIGIN_UNSUPPORTED",
+		runId: "login-no-origin",
+		transactionState: "unchanged",
+		retrySafe: false,
+		nextAction:
+			"Run warm-browser open --url URL --run-id ID with an http or https address, then retry login.",
+		message: "The Controlled Page has no exact http or https origin.",
+	})
+	expect(vaultActions(probe)).toEqual([])
+	expect(deliveryActions(probe)).toEqual([])
+})
+
 test("a reference from an earlier generation or from no generation is refused", async () => {
 	const { probe, snapshot } = await signInProbe()
 	configureCredentialVault(probe, "Agent Vault")
@@ -523,7 +558,7 @@ test("a missing wrapper refuses by name with the vault never spoken to", async (
 		schemaVersion: 1,
 		status: "error",
 		command: "login",
-		resultCode: "CREDENTIAL_VAULT_UNVERIFIED",
+		resultCode: "CREDENTIAL_WRAPPER_UNAVAILABLE",
 		runId: "login-no-wrapper",
 		transactionState: "unchanged",
 		retrySafe: false,

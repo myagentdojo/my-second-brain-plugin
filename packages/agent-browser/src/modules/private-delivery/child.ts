@@ -148,6 +148,19 @@ async function readFrame(channel: CdpChannel): Promise<FrameBasis | undefined> {
 }
 
 /**
+ * Whether one frame reading is the exact document the child was given: the
+ * same frame, the same document load, the same address. The origin is outside
+ * this question, because the two checks that share it need it differently:
+ * `checkFrame` asks the origin first, and the post-fill check never asks it
+ * at all.
+ */
+function isExactDocument(frame: FrameBasis, arguments_: ChildArguments): boolean {
+	return frame.frameId === arguments_.frameId &&
+		frame.loaderId === arguments_.loaderId &&
+		frame.url === arguments_.url
+}
+
+/**
  * What one frame reading says about the identity the child was given.
  *
  * The origin is asked first, because a page that moved across origins and one
@@ -170,11 +183,7 @@ function checkFrame(
 		return "origin_changed"
 	}
 	if (origin !== arguments_.origin) return "origin_changed"
-	return frame.frameId !== arguments_.frameId ||
-			frame.loaderId !== arguments_.loaderId ||
-			frame.url !== arguments_.url
-		? "identity_changed"
-		: "same"
+	return isExactDocument(frame, arguments_) ? "same" : "identity_changed"
 }
 
 function attributeMap(attributes: unknown): Record<string, string> {
@@ -321,16 +330,11 @@ async function deliverIntoPage(
 		return say("unverified")
 	}
 	// A page that moved after the value entered it is never reported as
-	// delivery: the document the caller referenced is gone.
+	// delivery: the document the caller referenced is gone, and it is the
+	// wrong one whatever its origin, so the origin is not asked here.
 	const after = await readFrame(channel)
 	if (after === undefined) return say("unverified")
-	if (
-		after.frameId !== arguments_.frameId ||
-		after.loaderId !== arguments_.loaderId ||
-		after.url !== arguments_.url
-	) {
-		return say("superseded")
-	}
+	if (!isExactDocument(after, arguments_)) return say("superseded")
 	const readBack = await readField(channel, arguments_.backendNodeId)
 	if (readBack === undefined) return say("unverified")
 	return sayDelivered(readBack.holdsValue)

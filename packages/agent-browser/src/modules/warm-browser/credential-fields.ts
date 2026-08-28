@@ -55,8 +55,21 @@ const credentialIdentifierFragments = [
 	"email",
 ] as const
 
+/**
+ * The exports below are how a page's own tokens are read and compared. The
+ * question of which fields they are asked about belongs to each classifier:
+ * this one is deliberately wide and Private Delivery's `credentialFieldKind`
+ * deliberately narrow. The reading is shared so it cannot drift between them.
+ */
+
 /** The attributes an identifier fragment is looked for in. */
-const identifierAttributes = ["name", "id", "autocomplete", "aria-label", "placeholder"] as const
+export const identifierAttributes = [
+	"name",
+	"id",
+	"autocomplete",
+	"aria-label",
+	"placeholder",
+] as const
 
 /** Node names that are a field a value goes into, whatever else the page says. */
 const editableNodeNames = ["INPUT", "TEXTAREA", "SELECT"] as const
@@ -64,12 +77,12 @@ const editableNodeNames = ["INPUT", "TEXTAREA", "SELECT"] as const
 /** Declared roles that make any node a field a value goes into. */
 const editableRoles = ["textbox", "searchbox", "combobox", "spinbutton"] as const
 
-function normalise(value: string): string {
+export function normalise(value: string): string {
 	return value.toLowerCase().replaceAll(/[^a-z0-9]/g, "")
 }
 
 /** One attribute read the way the page's own tokens compare: trimmed, lowercased. */
-function attributeToken(description: DomNodeDescription, name: string): string {
+export function attributeToken(description: DomNodeDescription, name: string): string {
 	return (description.attributes[name] ?? "").trim().toLowerCase()
 }
 
@@ -86,7 +99,7 @@ function attributeToken(description: DomNodeDescription, name: string): string {
  * page saying what the node is rather than what a reader would call it, and a
  * node with no description at all is refused before this is ever asked.
  */
-function isEditableField(description: DomNodeDescription): boolean {
+export function isEditableField(description: DomNodeDescription): boolean {
 	if ((editableNodeNames as readonly string[]).includes(description.nodeName.toUpperCase())) {
 		return true
 	}

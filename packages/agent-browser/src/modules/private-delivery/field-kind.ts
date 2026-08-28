@@ -1,4 +1,10 @@
-import type { DomNodeDescription } from "../warm-browser/credential-fields"
+import {
+	attributeToken,
+	type DomNodeDescription,
+	identifierAttributes,
+	isEditableField,
+	normalise,
+} from "../warm-browser/credential-fields"
 
 /**
  * Which half of a credential pair one field is.
@@ -13,8 +19,10 @@ import type { DomNodeDescription } from "../warm-browser/credential-fields"
  * nothing in a Credential Vault Login item is the right value for it, so it
  * has no side of the pair to be and is refused rather than guessed at.
  *
- * The attribute reads and the normalisation are restated to match
- * `credential-fields.ts` exactly rather than imported, so neither question can
+ * The reading mechanics are imported from `credential-fields.ts`, because how
+ * a page's own tokens are read and compared is one rule however the answer is
+ * used. Only the token and fragment lists below are this file's own: they are
+ * where the wide and the narrow question genuinely differ, so neither list can
  * be widened or narrowed by an edit meant for the other.
  */
 
@@ -37,39 +45,6 @@ const usernameAutocompleteTokens = ["username"] as const
 
 /** Identifier fragments that name the account-name half. */
 const usernameIdentifierFragments = ["username", "userid", "login", "email"] as const
-
-/** The attributes an identifier fragment is looked for in, as the public classifier reads them. */
-const identifierAttributes = ["name", "id", "autocomplete", "aria-label", "placeholder"] as const
-
-/** Node names that are a field a value goes into, whatever else the page says. */
-const editableNodeNames = ["INPUT", "TEXTAREA", "SELECT"] as const
-
-/** Declared roles that make any node a field a value goes into. */
-const editableRoles = ["textbox", "searchbox", "combobox", "spinbutton"] as const
-
-function normalise(value: string): string {
-	return value.toLowerCase().replaceAll(/[^a-z0-9]/g, "")
-}
-
-/** One attribute read the way the page's own tokens compare: trimmed, lowercased. */
-function attributeToken(description: DomNodeDescription, name: string): string {
-	return (description.attributes[name] ?? "").trim().toLowerCase()
-}
-
-/**
- * Whether the accessible name is part of this node's identity as a field. The
- * rule is the public classifier's for the same reason it holds there: a link
- * or a button carries its own visible text as that name, and `Log in` names
- * what the control does rather than which credential a field would hold.
- */
-function isEditableField(description: DomNodeDescription): boolean {
-	if ((editableNodeNames as readonly string[]).includes(description.nodeName.toUpperCase())) {
-		return true
-	}
-	const editable = attributeToken(description, "contenteditable")
-	if (editable !== "" && editable !== "false") return true
-	return (editableRoles as readonly string[]).includes(attributeToken(description, "role"))
-}
 
 /**
  * Classifies one field as one half of the credential pair, or as neither.

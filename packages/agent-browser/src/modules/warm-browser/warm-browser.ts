@@ -1840,7 +1840,7 @@ function refuseLoginDelivery(
 			staticFailure(
 				"login",
 				runId,
-				"CREDENTIAL_VAULT_UNVERIFIED",
+				"CREDENTIAL_WRAPPER_UNAVAILABLE",
 				20,
 				"The one credential wrapper Private Delivery invokes is unavailable.",
 				"Restore the with-one-password-token wrapper before retrying.",
@@ -2065,6 +2065,10 @@ async function login(
 		data: {
 			field,
 			reference,
+			// The literal is what delivered means: `interpretDelivery` in
+			// `private-delivery.ts` refuses to answer delivered unless the child's
+			// read-back proved the field holds a value, so no other value could
+			// ever be reported here.
 			fieldNowHoldsValue: true,
 			controlledPage: controlledPageData(generation.basis),
 			invalidatedReferences: true,

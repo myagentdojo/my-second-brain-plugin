@@ -8,9 +8,10 @@ import { join, resolve } from "node:path"
  * against, and this Module only ever reads it: a Module that could create or
  * repair the file could be steered into configuring itself, so an unsafe file
  * is refused rather than fixed. The permission checks are written here rather
- * than imported from `warm-browser/state.ts`, because the two Modules must
- * stay independent: sharing the check would let an edit meant for the Browser
- * Session receipt change what this Module accepts as its credential policy.
+ * than imported from `warm-browser/state.ts`, because this file decides what
+ * counts as an acceptable credential policy, and an edit meant for the Browser
+ * Session receipt must never be able to change that by travelling through a
+ * shared helper.
  */
 
 export type CredentialVaultConfiguration =

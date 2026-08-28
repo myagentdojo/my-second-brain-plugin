@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process"
 
-import { credentialWrapperOutputLimit } from "../warm-browser/bounds"
+import { credentialWrapperOutputLimit } from "./contract"
 
 /**
  * Every raw credential-wrapper effect Private Delivery performs: one vault

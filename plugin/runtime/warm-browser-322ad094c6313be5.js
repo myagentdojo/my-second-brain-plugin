@@ -21,8 +21,6 @@ var fillValueLimit = 4096;
 var screenshotByteLimit = 16 * 1024 * 1024;
 var screenshotPixelLimit = 20000;
 var screenshotBase64Limit = Math.ceil(screenshotByteLimit / 3) * 4;
-var privateDeliveryChildReplyLimit = 4096;
-var credentialWrapperOutputLimit = 1048576;
 
 // packages/agent-browser/src/modules/warm-browser/cdp-channel.ts
 var failedReply = { ok: false, result: undefined };
@@ -142,7 +140,13 @@ var credentialIdentifierFragments = [
   "login",
   "email"
 ];
-var identifierAttributes = ["name", "id", "autocomplete", "aria-label", "placeholder"];
+var identifierAttributes = [
+  "name",
+  "id",
+  "autocomplete",
+  "aria-label",
+  "placeholder"
+];
 var editableNodeNames = ["INPUT", "TEXTAREA", "SELECT"];
 var editableRoles = ["textbox", "searchbox", "combobox", "spinbutton"];
 function normalise(value) {
@@ -662,31 +666,13 @@ var passwordIdentifierFragments = [
 ];
 var usernameAutocompleteTokens = ["username"];
 var usernameIdentifierFragments = ["username", "userid", "login", "email"];
-var identifierAttributes2 = ["name", "id", "autocomplete", "aria-label", "placeholder"];
-var editableNodeNames2 = ["INPUT", "TEXTAREA", "SELECT"];
-var editableRoles2 = ["textbox", "searchbox", "combobox", "spinbutton"];
-function normalise2(value) {
-  return value.toLowerCase().replaceAll(/[^a-z0-9]/g, "");
-}
-function attributeToken2(description, name) {
-  return (description.attributes[name] ?? "").trim().toLowerCase();
-}
-function isEditableField2(description) {
-  if (editableNodeNames2.includes(description.nodeName.toUpperCase())) {
-    return true;
-  }
-  const editable = attributeToken2(description, "contenteditable");
-  if (editable !== "" && editable !== "false")
-    return true;
-  return editableRoles2.includes(attributeToken2(description, "role"));
-}
 function credentialFieldKind(description, accessibleName = "") {
-  if (attributeToken2(description, "type") === "password")
+  if (attributeToken(description, "type") === "password")
     return "password";
-  const autocomplete = attributeToken2(description, "autocomplete").split(/\s+/);
-  const heard = isEditableField2(description) ? normalise2(accessibleName) : "";
+  const autocomplete = attributeToken(description, "autocomplete").split(/\s+/);
+  const heard = isEditableField(description) ? normalise(accessibleName) : "";
   const identifier = [
-    ...identifierAttributes2.map((attribute) => normalise2(description.attributes[attribute] ?? "")),
+    ...identifierAttributes.map((attribute) => normalise(description.attributes[attribute] ?? "")),
     heard
   ].join(" ");
   if (autocomplete.some((token) => passwordAutocompleteTokens.includes(token)) || passwordIdentifierFragments.some((fragment) => identifier.includes(fragment))) {
@@ -783,6 +769,9 @@ async function readFrame(channel) {
   const url = nonEmptyText2(frame?.url);
   return frameId === undefined || loaderId === undefined || url === undefined ? undefined : { frameId, loaderId, url };
 }
+function isExactDocument(frame, arguments_) {
+  return frame.frameId === arguments_.frameId && frame.loaderId === arguments_.loaderId && frame.url === arguments_.url;
+}
 function checkFrame(frame, arguments_) {
   let origin;
   try {
@@ -792,7 +781,7 @@ function checkFrame(frame, arguments_) {
   }
   if (origin !== arguments_.origin)
     return "origin_changed";
-  return frame.frameId !== arguments_.frameId || frame.loaderId !== arguments_.loaderId || frame.url !== arguments_.url ? "identity_changed" : "same";
+  return isExactDocument(frame, arguments_) ? "same" : "identity_changed";
 }
 function attributeMap2(attributes) {
   const flat = Array.isArray(attributes) ? attributes : [];
@@ -901,9 +890,8 @@ async function deliverIntoPage(channel, arguments_, deliveredValue) {
   const after = await readFrame(channel);
   if (after === undefined)
     return say("unverified");
-  if (after.frameId !== arguments_.frameId || after.loaderId !== arguments_.loaderId || after.url !== arguments_.url) {
+  if (!isExactDocument(after, arguments_))
     return say("superseded");
-  }
   const readBack = await readField(channel, arguments_.backendNodeId);
   if (readBack === undefined)
     return say("unverified");
@@ -1045,6 +1033,8 @@ function readCredentialVaultConfiguration(environment = process.env) {
 }
 
 // packages/agent-browser/src/modules/private-delivery/contract.ts
+var privateDeliveryChildReplyLimit = 4096;
+var credentialWrapperOutputLimit = 1048576;
 var privateDeliveryChildOutcomes = [
   "delivered",
   "superseded",
@@ -3050,7 +3040,7 @@ function refuseLoginDelivery(parsed, paths, state, outcome) {
     case "vault_unsafe":
       staticFailure("login", runId, "STATE_UNSAFE", 20, "The configured Credential Vault file could not be proved safe.", "Repair the private credential-vault.json ownership and permissions before retrying.");
     case "wrapper_unavailable":
-      staticFailure("login", runId, "CREDENTIAL_VAULT_UNVERIFIED", 20, "The one credential wrapper Private Delivery invokes is unavailable.", "Restore the with-one-password-token wrapper before retrying.");
+      staticFailure("login", runId, "CREDENTIAL_WRAPPER_UNAVAILABLE", 20, "The one credential wrapper Private Delivery invokes is unavailable.", "Restore the with-one-password-token wrapper before retrying.");
     case "vault_unverified":
       staticFailure("login", runId, "CREDENTIAL_VAULT_UNVERIFIED", 20, "The Credential Vault could not be read or its reply could not be interpreted.", "Inspect the credential wrapper and the configured Credential Vault before retrying.");
     case "vault_mismatch":

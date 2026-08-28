@@ -81,6 +81,7 @@ export const snapshotTextLimit = 256
 
 /** The longest value one fill may type. */
 export const fillValueLimit = 4_096
+
 /** The most bytes one Screenshot of the Controlled Page may be. */
 export const screenshotByteLimit = 16 * 1024 * 1024
 
@@ -89,16 +90,3 @@ export const screenshotPixelLimit = 20_000
 
 /** The same bound expressed in the base64 the page answers with. */
 export const screenshotBase64Limit = Math.ceil(screenshotByteLimit / 3) * 4
-
-/**
- * The Private Delivery bounds. They live here because this file is the one
- * table every bound is read from, so no second bounds owner can drift beside
- * it, and they sit outside the start budget for the same reason the page
- * bounds do: a delivery runs after a start has finished and never extends one.
- */
-
-/** The longest reply the disposable Private Delivery child may print. */
-export const privateDeliveryChildReplyLimit = 4_096
-
-/** The longest credential wrapper output one reading may take in. */
-export const credentialWrapperOutputLimit = 1_048_576

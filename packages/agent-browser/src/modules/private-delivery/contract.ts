@@ -1,11 +1,17 @@
 /**
- * Private Delivery's own closed vocabulary.
+ * Private Delivery's own closed vocabulary and its own bounds.
  *
  * These names are the whole surface the login handler sees, and every one is
  * non-secret by construction: an outcome names what happened to a delivery,
  * never what was delivered, so nothing in this vocabulary can carry a
  * credential out of the Module that owns it.
  */
+
+/** The longest reply the disposable Private Delivery child may print. */
+export const privateDeliveryChildReplyLimit = 4_096
+
+/** The longest credential wrapper output one reading may take in. */
+export const credentialWrapperOutputLimit = 1_048_576
 
 /**
  * What one private delivery came to.

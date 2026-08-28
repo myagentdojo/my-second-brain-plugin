@@ -108,8 +108,9 @@ Result Vocabulary is `HELP`, `SESSION_STARTED`, `SESSION_RUNNING`,
 `NAVIGATION_TARGET_REFUSED`, `NAVIGATION_FAILED`, `PAGE_CONTROL_UNVERIFIED`,
 `LOGIN_FIELD_DELIVERED`, `APPROVAL_REQUIRED`, `LOGIN_FIELD_MISMATCH`,
 `LOGIN_FRAME_UNSUPPORTED`, `ORIGIN_UNSUPPORTED`, `ORIGIN_CHANGED`,
-`CREDENTIAL_VAULT_UNCONFIGURED`, `CREDENTIAL_VAULT_MISMATCH`,
-`CREDENTIAL_VAULT_UNVERIFIED`, `CREDENTIAL_MATCH_ABSENT`,
+`CREDENTIAL_VAULT_UNCONFIGURED`, `CREDENTIAL_WRAPPER_UNAVAILABLE`,
+`CREDENTIAL_VAULT_MISMATCH`, `CREDENTIAL_VAULT_UNVERIFIED`,
+`CREDENTIAL_MATCH_ABSENT`,
 `CREDENTIAL_MATCH_AMBIGUOUS`, `CREDENTIAL_FIELD_AMBIGUOUS`,
 `PRIVATE_DELIVERY_UNVERIFIED`, and `UNEXPECTED_FAILURE`.
 
@@ -230,7 +231,11 @@ item must carry exactly one field of the requested kind or the delivery is
 `CREDENTIAL_VAULT_MISMATCH`.
 
 The one credential wrapper is
-`$HOME/code/dotfiles/bin/with-one-password-token`. It alone holds the
+`$HOME/code/dotfiles/bin/with-one-password-token`. A wrapper that is
+unavailable is its own refusal, `CREDENTIAL_WRAPPER_UNAVAILABLE`, distinct
+from a vault that could not be read, `CREDENTIAL_VAULT_UNVERIFIED`, because
+restoring the wrapper and inspecting the configured vault are different
+repairs. The wrapper alone holds the
 service-account token, and its `inject-stdin` command resolves the one `op://`
 reference itself, hands the secret to a disposable child on standard input,
 and scrubs the child environment down to HOME, PATH, LANG, LC_ALL, and TMPDIR.

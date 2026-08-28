@@ -12,7 +12,10 @@ The ordering is fixed, and each step fails closed before the next. Approval is
 proved first, before anything is read and before any process exists, so a
 credential access without a human approval never begins. The configured
 Credential Vault is resolved second and the wrapper proved third, so the vault
-is never spoken to on an unconfigured or unsafe footing. Candidates are then
+is never spoken to on an unconfigured or unsafe footing. A wrapper that is
+unavailable is its own answer, distinct from a vault that could not be read,
+because restoring the wrapper and inspecting the configured vault are
+different repairs. Candidates are then
 listed and read one at a time; an item outside the configured vault refuses the
 whole delivery; and the Credential Match must be exactly one Login item whose
 declared website origin equals the current exact origin as one string, so
