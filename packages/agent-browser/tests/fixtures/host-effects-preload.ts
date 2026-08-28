@@ -233,13 +233,14 @@ const fake: typeof import("../../src/modules/warm-browser/host-effects") = {
 		}
 		if (current.listener !== undefined) return current.listener
 		// The ergonomic plan names an owner; the fake renders the canonical
-		// `lsof -Fp` bytes for it, so the production observer still does the
-		// interpreting. A raw `listener` reading bypasses this renderer.
+		// `lsof -Fp` process set including the descriptor field lsof always
+		// reports, so the production observer still does the interpreting. A raw
+		// `listener` reading bypasses this renderer.
 		const owner = current.listenerOwner ?? "unverifiable"
 		const pid = owner === "spawned" ? spawnedLeaders().at(-1)?.pid ?? "absent" : owner
 		if (pid === "unverifiable") return { status: 2, signal: null, failed: false, stdout: "" }
 		if (pid === "absent") return { status: 1, signal: null, failed: false, stdout: "" }
-		return { status: 0, signal: null, failed: false, stdout: `p${pid}\n` }
+		return { status: 0, signal: null, failed: false, stdout: `p${pid}\nf4\n` }
 	},
 	readLoopbackJson: async (url) => {
 		action({ action: "http", url })

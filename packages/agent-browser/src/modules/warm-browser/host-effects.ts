@@ -34,9 +34,11 @@ export function hostPlatform(): string {
 
 /** Reads the local process table without interpreting its bytes. */
 export function readProcessTable(): ProcessTableReading {
+	// `lstart` is the locale's `%c`; the C locale keeps its token in the shape the observer frames.
 	const result = spawnSync("/bin/ps", ["-axo", "pid=,pgid=,lstart=,command="], {
 		encoding: "utf8",
 		stdio: ["ignore", "pipe", "ignore"],
+		env: { ...process.env, LC_ALL: "C" },
 	})
 	return {
 		status: result.status,

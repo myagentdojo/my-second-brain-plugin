@@ -1408,7 +1408,8 @@ function hostPlatform() {
 function readProcessTable() {
   const result = spawnSync2("/bin/ps", ["-axo", "pid=,pgid=,lstart=,command="], {
     encoding: "utf8",
-    stdio: ["ignore", "pipe", "ignore"]
+    stdio: ["ignore", "pipe", "ignore"],
+    env: { ...process.env, LC_ALL: "C" }
   });
   return {
     status: result.status,
@@ -1486,6 +1487,22 @@ async function readLoopbackJson(url) {
 
 // packages/agent-browser/src/modules/warm-browser/listener-table.ts
 var processIdentityField = /^p([1-9][0-9]*)$/;
+var fileDescriptorField = /^f(0|[1-9][0-9]*)$/;
+function readProcessSet(lines, index) {
+  const processMatch = processIdentityField.exec(lines[index]);
+  if (!processMatch)
+    return null;
+  const owner = Number(processMatch[1]);
+  if (!Number.isSafeInteger(owner))
+    return null;
+  let next = index + 1;
+  while (next < lines.length && fileDescriptorField.test(lines[next])) {
+    next += 1;
+  }
+  if (next === index + 1)
+    return null;
+  return { owner, next };
+}
 function observeLoopbackListener(reading) {
   if (reading.failed || reading.signal !== null)
     return "unverifiable";
@@ -1499,16 +1516,15 @@ function observeLoopbackListener(reading) {
   if (stdout === "" || !stdout.endsWith(`
 `))
     return "unverifiable";
+  const lines = stdout.slice(0, -1).split(`
+`);
   const owners = new Set;
-  for (const line of stdout.slice(0, -1).split(`
-`)) {
-    const match = processIdentityField.exec(line);
-    if (!match)
+  for (let index = 0;index < lines.length; ) {
+    const processSet = readProcessSet(lines, index);
+    if (processSet === null)
       return "unverifiable";
-    const owner = Number(match[1]);
-    if (!Number.isSafeInteger(owner))
-      return "unverifiable";
-    owners.add(owner);
+    owners.add(processSet.owner);
+    index = processSet.next;
   }
   return owners.size === 1 ? [...owners][0] : "unverifiable";
 }

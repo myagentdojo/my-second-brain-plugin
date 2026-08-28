@@ -347,11 +347,14 @@ test("a delivered SIGTERM whose liveness probe fails never reports the owned gro
  * second owner behind an unparsed line cannot pass as a single proved one.
  */
 const unsafeListenerReadings = [
-	["a malformed line beside the expected owner", "p4242\nlsof: WARNING: unreadable\n"],
-	["a second distinct owner", "p4242\np4243\n"],
-	["a leading-zero process identity", "p04242\n"],
-	["a zero process identity", "p0\n"],
-	["output truncated before its final newline", "p4242"],
+	["a malformed line beside the expected owner", "p4242\nf4\nlsof: WARNING: unreadable\n"],
+	["a second distinct owner", "p4242\nf4\np4243\nf4\n"],
+	["a leading-zero process identity", "p04242\nf4\n"],
+	["a zero process identity", "p0\nf4\n"],
+	["output truncated before its final newline", "p4242\nf4"],
+	["a process identity with no file descriptor", "p4242\n"],
+	["a file descriptor before any process identity", "f4\np4242\nf4\n"],
+	["a non-numeric file descriptor", "p4242\nfcwd\n"],
 ] as const
 
 test.each(unsafeListenerReadings)(
@@ -493,7 +496,7 @@ test("an endpoint whose listener owner changed after the CDP reads is not verifi
 	const probe = productionCliProbe({
 		...launchPlan(),
 		// The owned process is unchanged; another process now holds the port.
-		listenerAfterJson: { status: 0, signal: null, failed: false, stdout: "p4243\n" },
+		listenerAfterJson: { status: 0, signal: null, failed: false, stdout: "p4243\nf4\n" },
 	})
 
 	const result = runProductionCli(probe, ["start", "--run-id", "endpoint-listener-changed"])
