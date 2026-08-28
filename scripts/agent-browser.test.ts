@@ -166,7 +166,21 @@ test("Agent Browser has the approved lifecycle workspace and generated activatio
 	expect(packageReadme).toContain("## Screenshots")
 	expect(packageReadme).toContain("SCREENSHOT_PATH_UNSUPPORTED")
 	expect(packageReadme).toMatch(/A successful\s+capture does not rewrite the durable receipt/)
-	expect(packageReadme).toMatch(/Profile Cutover has not\s+happened/)
+	// Profile Cutover happened in source. The package README must say which
+	// profile production now fixes, that the path is named once so the cutover
+	// is reversible by configuration, and that the live half is not claimed.
+	expect(packageReadme).toMatch(
+		/production fixes the existing Agent Chrome Profile path to\s+`\$HOME\/Library\/Application Support\/Agent Chrome\/Chrome User Data`/,
+	)
+	expect(packageReadme).toMatch(/inner\s+profile `Default` and explicit loopback port `9242`/)
+	expect(packageReadme).toContain("Profile Cutover has happened in source")
+	expect(packageReadme).toMatch(
+		/Retiring the\s+installed Agent Chrome launcher app and starting Warm Browser on the real\s+profile are separate live operations, and this package does not claim them/,
+	)
+	expect(packageReadme).toMatch(
+		/A row claims the profile when it carries\s+`--user-data-dir` with that path attached or separated, quoted or bare/,
+	)
+	expect(packageReadme).not.toContain(".agent-warm-profile")
 	expect(packageReadme).toContain(
 		"AGENT_BROWSER_CDP_FIXTURE_ACKNOWLEDGED=1 bun run prove:agent-browser-cdp -- --run-id <ID>",
 	)

@@ -20,15 +20,30 @@ accepts `--ref REFERENCE`, `fill` accepts `--ref REFERENCE` and
 this exact credential access immediately before it; the assertion is the
 human's to make and never an agent's own decision.
 
-On macOS, production fixes the existing profile path to
-`$HOME/.agent-warm-profile`, with inner profile `Default`. It does not honor the
-predecessor's `WARM_CHROME_PROFILE_DIR` override. It starts installed Google
-Chrome as one detached
+On macOS, production fixes the existing Agent Chrome Profile path to
+`$HOME/Library/Application Support/Agent Chrome/Chrome User Data`, with inner
+profile `Default` and explicit loopback port `9242`. That path is the whole
+configuration: it is named once, in the production Adapter, and rolling Profile
+Cutover back is that one value. Nothing here reads profile entries, copies,
+moves, repairs, or removes profile data in either direction. Production does not
+honor the predecessor's `WARM_CHROME_PROFILE_DIR` override, and it no longer
+names the retired predecessor root anywhere. It starts installed Google Chrome
+as one detached
 leader process group and records the leader PID, process-group ID, start token,
 executable, command line, verified loopback CDP endpoint, and sole Controlled
-Page. This is the implementation contract only: Profile Cutover has not
-happened, so this ticket does not claim exclusive profile ownership or prove a
-real-profile launch.
+Page. Profile Cutover has happened in source: this package reserves that profile
+and the predecessor routes owned by this cutover refuse it. Retiring the
+installed Agent Chrome launcher app and starting Warm Browser on the real
+profile are separate live operations, and this package does not claim them.
+
+The Agent Chrome Profile path contains spaces, so a process-table row cannot be
+split back into arguments. A row claims the profile when it carries
+`--user-data-dir` with that path attached or separated, quoted or bare. That
+reading is inclusive at its one remaining ambiguity: a longer path whose leading
+tokens are exactly this profile root reads as a claim. A claim only ever refuses
+a start or preserves a receipt, so reading one process too many costs a refusal,
+while reading one too few would let a live browser holding the profile read as
+proved absence.
 
 Before spawn, Warm Browser durably records a unique launch marker and passes it
 as `--agent-browser-launch-marker=...`. Recovery requires an exact marker,

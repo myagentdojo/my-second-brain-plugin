@@ -73,7 +73,7 @@ function fixture(plan: Record<string, unknown> = {}): Fixture {
 		sessionRoot,
 		sessionPath: join(sessionRoot, "session.lock", "session.json"),
 		lockPath: join(sessionRoot, "session.lock"),
-		profileRoot: join(fakeRoot, ".agent-warm-profile"),
+		profileRoot: join(fakeRoot, "Agent Chrome", "Chrome User Data"),
 		environment,
 	}
 }
@@ -431,7 +431,13 @@ test("help usage names every command from the single Command Vocabulary owner", 
 })
 
 test("production fixes the Agent Chrome Profile to HOME without predecessor overrides", () => {
-	const expected = join(homedir(), ".agent-warm-profile")
+	const expected = join(
+		homedir(),
+		"Library",
+		"Application Support",
+		"Agent Chrome",
+		"Chrome User Data",
+	)
 	expect(productionAdapter.profileRoot()).toBe(expected)
 	const source = readFileSync(
 		resolve(packageRoot, "src/modules/warm-browser/production-adapter.ts"),
@@ -440,6 +446,25 @@ test("production fixes the Agent Chrome Profile to HOME without predecessor over
 	expect(source).not.toContain("WARM_CHROME_PROFILE_DIR")
 	expect(source).not.toContain("createProductionAdapter")
 	expect(source).toContain("commandHasArgument(processIdentity.commandLine, marker)")
+})
+
+/** Every production TypeScript source this package ships, by path. */
+function productionSources(): string[] {
+	return [...new Bun.Glob("**/*.ts").scanSync({ cwd: resolve(packageRoot, "src"), absolute: true })]
+		.sort()
+}
+
+test("the Agent Chrome Profile has exactly one production owner and no retired fallback", () => {
+	// Rollback is a configuration change, so it has to be one configuration.
+	// Exactly one shipped file may name the profile, and the retired root may not
+	// survive anywhere as a second path a run could fall back to.
+	const naming = productionSources().filter((path) =>
+		readFileSync(path, "utf8").includes("Chrome User Data")
+	)
+	expect(naming).toEqual([resolve(packageRoot, "src/modules/warm-browser/production-adapter.ts")])
+	for (const path of productionSources()) {
+		expect(readFileSync(path, "utf8"), path).not.toContain(".agent-warm-profile")
+	}
 })
 
 test("the production entry passes the argument list and selects no Adapter", () => {

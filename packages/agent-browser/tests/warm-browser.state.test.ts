@@ -43,7 +43,7 @@ function ownedState(sessionId: string) {
 		startRunId: `run-${sessionId}`,
 		launchMarker: sessionId,
 		createdAtEpochMs: 1_800_000_000_000,
-		profileRoot: join(base, ".agent-warm-profile"),
+		profileRoot: join(base, "Agent Chrome", "Chrome User Data"),
 		launch: { executable: "/fixture/chrome", commandLine: "/fixture/chrome --fixture" },
 		endpoint: { host: "127.0.0.1", port: 9242 },
 	}

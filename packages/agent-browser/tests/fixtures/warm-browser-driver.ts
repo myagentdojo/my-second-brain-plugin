@@ -105,7 +105,7 @@ const adapter: WarmBrowserAdapter = {
 	platform: () => plan().platform ?? "darwin",
 	chromeExecutable: () => "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
 	inspectChrome: () => plan().chromeStatus ?? "installed",
-	profileRoot: () => join(fixtureRoot, ".agent-warm-profile"),
+	profileRoot: () => join(fixtureRoot, "Agent Chrome", "Chrome User Data"),
 	inspectProfile: () => plan().profileStatus ?? "safe",
 	findProfileProcesses: (profileRoot) =>
 		plan().profileProcessInspectionUnverifiable ? { kind: "unverifiable" } : {
@@ -138,7 +138,7 @@ const adapter: WarmBrowserAdapter = {
 						fakeProcess(
 							9_000 + index,
 							"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-							join(fixtureRoot, ".agent-warm-profile"),
+							join(fixtureRoot, "Agent Chrome", "Chrome User Data"),
 							9242,
 							launchMarker,
 						)),

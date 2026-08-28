@@ -44,9 +44,19 @@ export function productionCliProbe(plan: Record<string, unknown> = {}): Producti
 	const fakeRoot = join(root, "fake")
 	const stateHome = join(root, "state")
 	const home = join(root, "home")
-	const profileRoot = join(home, ".agent-warm-profile")
+	// The Agent Chrome Profile the production Adapter fixes, rebuilt under the
+	// probe's own HOME. Its path carries spaces, exactly as the real one does, so
+	// every production-CLI test here runs the argument list, the process-table
+	// reading, and the receipt rules against a space-containing profile root.
+	const profileRoot = join(
+		home,
+		"Library",
+		"Application Support",
+		"Agent Chrome",
+		"Chrome User Data",
+	)
 	for (const directory of [fakeRoot, stateHome, home, profileRoot, join(profileRoot, "Default")]) {
-		mkdirSync(directory, { mode: 0o700 })
+		mkdirSync(directory, { recursive: true, mode: 0o700 })
 		chmodSync(directory, 0o700)
 	}
 	// Private Delivery resolves its one credential wrapper under the caller's

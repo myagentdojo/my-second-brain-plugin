@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test"
-import { existsSync, readdirSync, readFileSync } from "node:fs"
+import { chmodSync, existsSync, readdirSync, readFileSync } from "node:fs"
 import { join, resolve } from "node:path"
 
 import {
@@ -844,3 +844,248 @@ test.each(["/bin/ps", "/usr/sbin/lsof"] as const)(
 		expect(readers).toEqual(["host-effects.ts"])
 	},
 )
+
+/**
+ * Independent oracle: the four ways one process-table row can name this profile
+ * as a Chrome user data directory. Chrome accepts the value attached to the
+ * flag and separated from it, and either may arrive quoted. The Agent Chrome
+ * Profile path carries spaces, so the separated forms are written on the row
+ * exactly as several arguments would be. Restated by hand so no production
+ * reader supplies its own expectation.
+ */
+const profileClaimForms = [
+	["the value attached to the flag", (root: string) => `--user-data-dir=${root}`],
+	["the attached value quoted", (root: string) => `--user-data-dir="${root}"`],
+	["the value separated from the flag", (root: string) => `--user-data-dir ${root}`],
+	["the separated value quoted", (root: string) => `--user-data-dir "${root}"`],
+] as const
+
+/**
+ * Independent oracle: the refusal one live unowned profile owner must produce.
+ * Restated here so no production table supplies it.
+ */
+function expectProfileInUse(result: Bun.ReadableSyncSubprocess, runId: string): void {
+	expectError(result, 21, {
+		schemaVersion: 1,
+		status: "error",
+		command: "start",
+		resultCode: "PROFILE_IN_USE",
+		runId,
+		transactionState: "unchanged",
+		retrySafe: false,
+		nextAction: "Close the existing profile owner, then retry Warm Browser start.",
+		message: "An unowned process is using the Agent Chrome Profile.",
+	})
+}
+
+/** One hand-launched installed Chrome row naming the profile in one given form. */
+function handLaunchedRow(profileRoot: string, form: (root: string) => string): string {
+	return `${systemRows}${
+		processRow("4242", "4242", `${installedChrome} ${form(profileRoot)} --no-first-run`)
+	}`
+}
+
+test.each(profileClaimForms)(
+	"a hand-launched Chrome naming the profile with %s is a live owner, not an absence",
+	(_name, form) => {
+		const probe = productionCliProbe()
+		writeHostEffectsPlan(probe, {
+			processTable: verifiedReading(handLaunchedRow(probe.profileRoot, form)),
+		})
+
+		const result = runProductionCli(probe, ["start", "--run-id", "hand-launched-owner"])
+
+		expectProfileInUse(result, "hand-launched-owner")
+		expect(existsSync(probe.lockPath)).toBe(false)
+		// Nothing was launched, signalled, probed, or dialled on the strength of
+		// a row that was almost read as nobody being there.
+		expect(hostEffects(probe)).toEqual([])
+	},
+)
+
+test.each(profileClaimForms)(
+	"a stale launch is never proved absent by %s while a hand-launched owner is live",
+	(_name, form) => {
+		const probe = productionCliProbe()
+		seedSessionState(probe, launchingState(probe))
+		const stateBefore = readFileSync(probe.sessionPath, "utf8")
+		// The row carries no launch marker at all, so the marker search finds
+		// nothing. Absence of the launch is only ever proved twice over, and the
+		// second proof is that nobody owns the profile.
+		writeHostEffectsPlan(probe, {
+			processTable: verifiedReading(handLaunchedRow(probe.profileRoot, form)),
+		})
+
+		const result = runProductionCli(probe, ["status", "--run-id", "hand-launched-absence"])
+
+		expectError(result, 20, {
+			schemaVersion: 1,
+			status: "error",
+			command: "status",
+			resultCode: "PROCESS_IDENTITY_UNVERIFIED",
+			runId: "hand-launched-absence",
+			transactionState: "unchanged",
+			retrySafe: false,
+			nextAction:
+				"Inspect the live process and private Warm Browser state; do not signal the stored process id.",
+			message: "The stored browser process identity does not match the live process.",
+		})
+		expectReceiptAndLockRetained(probe, stateBefore)
+	},
+)
+
+test("two live profile owners are ambiguous and neither is signalled", () => {
+	const probe = productionCliProbe()
+	// One names the profile in each form, so concurrency is proved across the
+	// two readings rather than twice through one of them.
+	writeHostEffectsPlan(probe, {
+		processTable: verifiedReading(
+			`${systemRows}${
+				processRow("4242", "4242", `${installedChrome} --user-data-dir=${probe.profileRoot}`)
+			}${processRow("4310", "4310", `${installedChrome} --user-data-dir ${probe.profileRoot}`)}`,
+		),
+	})
+
+	const result = runProductionCli(probe, ["start", "--run-id", "profile-concurrent"])
+
+	expectError(result, 20, {
+		schemaVersion: 1,
+		status: "error",
+		command: "start",
+		resultCode: "PROFILE_PROCESS_AMBIGUOUS",
+		runId: "profile-concurrent",
+		transactionState: "unchanged",
+		retrySafe: false,
+		nextAction:
+			"Inspect the profile process owners before retrying; Warm Browser will not signal them.",
+		message: "More than one live process claims the Agent Chrome Profile.",
+	})
+	expect(existsSync(probe.lockPath)).toBe(false)
+	expect(hostEffects(probe)).toEqual([])
+})
+
+test("a neighbouring profile whose path extends this one is refused rather than ignored", () => {
+	const probe = productionCliProbe()
+	// A row cannot say whether the tokens after this profile root are the rest
+	// of a longer path or the next argument, so this reading is inclusive. The
+	// cost is a refusal; the alternative would be a second browser launched onto
+	// a profile a live process is holding.
+	writeHostEffectsPlan(probe, {
+		processTable: verifiedReading(
+			`${systemRows}${
+				processRow(
+					"4242",
+					"4242",
+					`${installedChrome} --user-data-dir=${probe.profileRoot} Backup --no-first-run`,
+				)
+			}`,
+		),
+	})
+
+	const result = runProductionCli(probe, ["start", "--run-id", "neighbour-extends"])
+
+	expectProfileInUse(result, "neighbour-extends")
+	expect(hostEffects(probe)).toEqual([])
+})
+
+/**
+ * Independent oracle: installed-Chrome rows that name a profile this session
+ * does not own. None of them may read as a claim on the Agent Chrome Profile,
+ * because each refusal above would otherwise fire on an unrelated browser.
+ */
+const foreignProfileRows = [
+	[
+		"an unrelated absolute profile",
+		() => "/tmp/other-profile",
+	],
+	[
+		"the parent directory of this profile",
+		(profileRoot: string) => profileRoot.slice(0, profileRoot.lastIndexOf("/")),
+	],
+	[
+		"a sibling sharing this profile's leading path",
+		(profileRoot: string) => `${profileRoot.slice(0, profileRoot.lastIndexOf("/"))}/Chrome User Cache`,
+	],
+] as const
+
+test.each(foreignProfileRows)(
+	"an installed Chrome holding %s never claims the Agent Chrome Profile",
+	(_name, build) => {
+		const probe = productionCliProbe()
+		writeHostEffectsPlan(probe, {
+			processTable: verifiedReading(
+				`${systemRows}${
+					processRow("4242", "4242", `${installedChrome} --user-data-dir=${build(probe.profileRoot)}`)
+				}`,
+			),
+			spawnOutcome: "missing_executable",
+		})
+
+		const result = runProductionCli(probe, ["start", "--run-id", "foreign-profile"])
+
+		// The profile reads as unused, so start goes on to its own launch attempt
+		// rather than refusing on somebody else's browser.
+		const error = JSON.parse(result.stderr.toString())
+		expect(error.resultCode).toBe("UNEXPECTED_FAILURE")
+		expect(error.transactionState).toBe("rolled_back")
+		const effects = hostEffects(probe)
+		expect(effects).toHaveLength(2)
+		expect(effects[0]?.action).toBe("port")
+		expect(effects[1]?.action).toBe("spawn")
+		expect(effects.some(({ action }) => action === "signal")).toBe(false)
+	},
+)
+
+test("a receipt naming the retired predecessor profile is unsafe state, never acted on", () => {
+	// The rollback issue #42 asks for restores the previous ownership
+	// configuration; it never leaves one run half-cut-over. A receipt written
+	// before the cutover names the retired root under the same HOME, and this
+	// build must refuse it rather than observe, signal, or clean anything on its
+	// behalf, so the receipt is still there for a rolled-back configuration to
+	// find.
+	const probe = productionCliProbe()
+	const retiredRoot = join(probe.home, ".agent-warm-profile")
+	expect(retiredRoot).not.toBe(probe.profileRoot)
+	seedSessionState(probe, consistentRunningState(probe, { profileRoot: retiredRoot }))
+	const stateBefore = readFileSync(probe.sessionPath, "utf8")
+	writeHostEffectsPlan(probe, { processTable: ownedRowReading(probe) })
+
+	const result = runProductionCli(probe, ["stop", "--run-id", "retired-receipt"])
+
+	expectError(result, 20, {
+		schemaVersion: 1,
+		status: "error",
+		command: "stop",
+		resultCode: "STATE_UNSAFE",
+		runId: "retired-receipt",
+		transactionState: "unchanged",
+		retrySafe: false,
+		nextAction: "Repair the private XDG state ownership and permissions before retrying.",
+		message: "Warm Browser private state is unsafe or unreadable.",
+	})
+	expectReceiptAndLockRetained(probe, stateBefore)
+})
+
+test("a start refuses the profile before any host effect when its ownership is unsafe", () => {
+	// The cutover only moved which directory is fixed; the safety rule it is
+	// read through is unchanged, and it now answers about a path with spaces.
+	const probe = productionCliProbe({ processTable: verifiedReading(systemRows) })
+	chmodSync(probe.profileRoot, 0o755)
+
+	const result = runProductionCli(probe, ["start", "--run-id", "spacey-unsafe"])
+
+	expectError(result, 21, {
+		schemaVersion: 1,
+		status: "error",
+		command: "start",
+		resultCode: "PROFILE_UNSAFE",
+		runId: "spacey-unsafe",
+		transactionState: "unchanged",
+		retrySafe: false,
+		nextAction:
+			"Repair the Agent Chrome Profile ownership and private permissions before retrying.",
+		message: "The Agent Chrome Profile ownership or permissions are unsafe.",
+	})
+	expect(existsSync(probe.lockPath)).toBe(false)
+	expect(hostEffects(probe)).toEqual([])
+})

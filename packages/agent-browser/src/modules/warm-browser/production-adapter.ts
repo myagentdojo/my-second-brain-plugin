@@ -33,6 +33,7 @@ import {
 } from "./bounds"
 import { observeProcessTable } from "./process-table"
 import {
+	commandClaimsProfile,
 	commandHasArgument,
 	isOwnedLaunch,
 	isSameProcess,
@@ -41,6 +42,24 @@ import {
 } from "./ownership"
 
 const installedChrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+
+/**
+ * The one Agent Chrome Profile this Adapter owns, named relative to the
+ * caller's home directory.
+ *
+ * Profile Cutover moved it here from the retired predecessor root, which this
+ * package no longer names anywhere. This value is the whole configuration:
+ * rolling the cutover back is these segments and nothing else, and neither
+ * direction reads, copies, moves, repairs, or removes any profile data. The
+ * path carries spaces, which is why the profile-owner reading is a Module rule
+ * rather than one string compare.
+ */
+const agentChromeProfileSegments = [
+	"Library",
+	"Application Support",
+	"Agent Chrome",
+	"Chrome User Data",
+] as const
 
 function privateOwnedDirectory(path: string): boolean {
 	if (!existsSync(path)) return false
@@ -241,14 +260,12 @@ export const productionAdapter: WarmBrowserAdapter = {
 	platform: hostPlatform,
 	chromeExecutable: () => installedChrome,
 	inspectChrome: (executable) => isExecutableFile(executable) ? "installed" : "unavailable",
-	profileRoot: () => join(homedir(), ".agent-warm-profile"),
+	profileRoot: () => join(homedir(), ...agentChromeProfileSegments),
 	inspectProfile: (profileRoot) =>
 		privateOwnedDirectory(profileRoot) && privateOwnedDirectory(join(profileRoot, "Default"))
 			? "safe"
 			: "unsafe",
 	findProfileProcesses: (profileRoot) => {
-		const plain = `--user-data-dir=${profileRoot}`
-		const quoted = `--user-data-dir="${profileRoot}"`
 		const table = processTable()
 		if (table.kind === "unverifiable") return table
 		return {
@@ -256,8 +273,7 @@ export const productionAdapter: WarmBrowserAdapter = {
 			processes: table.processes.filter(
 				(processIdentity) =>
 					processIdentity.executable === installedChrome &&
-					(commandHasArgument(processIdentity.commandLine, plain) ||
-						commandHasArgument(processIdentity.commandLine, quoted)),
+					commandClaimsProfile(processIdentity.commandLine, profileRoot),
 			),
 		}
 	},

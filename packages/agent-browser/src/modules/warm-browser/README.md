@@ -18,6 +18,12 @@ environment variable selects a fake in production. The CDP transport is the one
 raw effect that is never substituted: the deterministic Controlled Page fixture
 is a real local endpoint, so replacing the transport would delete the protocol
 conversation under proof and leave an assertion about it in its place.
+The Agent Chrome Profile is one fixed path this Module names once, under
+`Library/Application Support/Agent Chrome/Chrome User Data`. It contains spaces,
+so who is using it is a Module rule rather than one string compare: a row claims
+it when `--user-data-dir` carries that path attached or separated, quoted or
+bare, and the reading is inclusive where a longer path cannot be told from a
+following argument, because a claim only refuses and never signals.
 The lifecycle contract fails closed on unsupported platforms, unsafe profile or
 state, ambiguous ownership, occupied or unverifiable ports, process mismatch,
 and CDP or Controlled Page identity failure. Ownership requires the whole

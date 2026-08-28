@@ -65,6 +65,44 @@ export function commandHasArgument(commandLine: string, argument: string): boole
 }
 
 /**
+ * The forms a Chrome command line can name one user-data directory in.
+ *
+ * Chrome accepts the value attached to the flag and separated from it, and a
+ * shell may leave either one quoted. A process-table row is an argument vector
+ * joined by single spaces, so a profile path that contains spaces is written
+ * exactly as several arguments would be and none of these four forms can be
+ * told apart from the others by shape alone.
+ */
+function profileArguments(profileRoot: string): readonly string[] {
+	return [
+		`--user-data-dir=${profileRoot}`,
+		`--user-data-dir="${profileRoot}"`,
+		`--user-data-dir ${profileRoot}`,
+		`--user-data-dir "${profileRoot}"`,
+	]
+}
+
+/**
+ * Reports whether one observed command line claims a profile root as its Chrome
+ * user data directory.
+ *
+ * Only the launched argument list decides ownership; this decides the weaker
+ * question of who is using the profile at all, which is what a hand-launched
+ * browser answers. It is read inclusively on purpose. A longer path whose
+ * leading tokens are exactly this profile root reads as a claim, because the
+ * process table cannot say whether the remaining tokens are the rest of that
+ * path or the next argument. That direction is the safe one: a claim refuses a
+ * start and preserves a receipt, and it never signals, cleans, or launches, so
+ * reading one process too many costs a refusal while reading one too few would
+ * let a live browser holding this profile read as proved absence.
+ */
+export function commandClaimsProfile(commandLine: string, profileRoot: string): boolean {
+	return profileArguments(profileRoot).some((argument) =>
+		commandHasArgument(commandLine, argument)
+	)
+}
+
+/**
  * Proves an observed process is the launch this ownership describes.
  *
  * The row must lead its own process group, run the launched executable, and

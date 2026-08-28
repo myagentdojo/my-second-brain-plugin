@@ -1371,6 +1371,17 @@ function launchOwnership(input) {
 function commandHasArgument(commandLine, argument) {
   return ` ${commandLine} `.includes(` ${argument} `);
 }
+function profileArguments(profileRoot) {
+  return [
+    `--user-data-dir=${profileRoot}`,
+    `--user-data-dir="${profileRoot}"`,
+    `--user-data-dir ${profileRoot}`,
+    `--user-data-dir "${profileRoot}"`
+  ];
+}
+function commandClaimsProfile(commandLine, profileRoot) {
+  return profileArguments(profileRoot).some((argument) => commandHasArgument(commandLine, argument));
+}
 function isOwnedLaunch(observed, ownership) {
   return observed.processGroupId === observed.pid && observed.executable === ownership.executable && observed.commandLine === ownership.commandLine && observed.startedAtToken !== "";
 }
@@ -1551,6 +1562,12 @@ function observeProcessTable(reading, knownExecutable) {
 
 // packages/agent-browser/src/modules/warm-browser/production-adapter.ts
 var installedChrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+var agentChromeProfileSegments = [
+  "Library",
+  "Application Support",
+  "Agent Chrome",
+  "Chrome User Data"
+];
 function privateOwnedDirectory(path) {
   if (!existsSync(path))
     return false;
@@ -1680,17 +1697,15 @@ var productionAdapter = {
   platform: hostPlatform,
   chromeExecutable: () => installedChrome,
   inspectChrome: (executable) => isExecutableFile(executable) ? "installed" : "unavailable",
-  profileRoot: () => join3(homedir2(), ".agent-warm-profile"),
+  profileRoot: () => join3(homedir2(), ...agentChromeProfileSegments),
   inspectProfile: (profileRoot) => privateOwnedDirectory(profileRoot) && privateOwnedDirectory(join3(profileRoot, "Default")) ? "safe" : "unsafe",
   findProfileProcesses: (profileRoot) => {
-    const plain = `--user-data-dir=${profileRoot}`;
-    const quoted = `--user-data-dir="${profileRoot}"`;
     const table = processTable();
     if (table.kind === "unverifiable")
       return table;
     return {
       kind: "verified",
-      processes: table.processes.filter((processIdentity) => processIdentity.executable === installedChrome && (commandHasArgument(processIdentity.commandLine, plain) || commandHasArgument(processIdentity.commandLine, quoted)))
+      processes: table.processes.filter((processIdentity) => processIdentity.executable === installedChrome && commandClaimsProfile(processIdentity.commandLine, profileRoot))
     };
   },
   findLaunchProcesses: (launchMarker) => {
