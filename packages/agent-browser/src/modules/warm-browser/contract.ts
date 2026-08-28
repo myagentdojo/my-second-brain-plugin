@@ -22,6 +22,21 @@ export const runIdOption: CommandOption = { flag: "--run-id", value: "ID", requi
  */
 export const refusedSelectorFlags = ["--selector", "--css", "--xpath", "--text"] as const
 
+/**
+ * Output destinations are outside this interface as well. Warm Browser has no output
+ * destination at any command, because a Screenshot is written to a path the
+ * Browser Session owns, so a caller that names one is told exactly that rather
+ * than being told its argument was unrecognised.
+ */
+export const refusedDestinationFlags = [
+	"--path",
+	"--out",
+	"--output",
+	"--file",
+	"--dir",
+	"--directory",
+] as const
+
 export const commandVocabulary = [
 	{ name: "help", sideEffects: "none", options: [] },
 	{
@@ -51,6 +66,12 @@ export const commandVocabulary = [
 		options: [],
 	},
 	{
+		name: "screenshot",
+		sideEffects:
+			"captures the Controlled Page to one private Browser Session-owned PNG, replacing the Screenshot that session owned, and may invalidate every earlier Snapshot Reference",
+		options: [],
+	},
+	{
 		name: "click",
 		sideEffects:
 			"dispatches one click on one referenced element of the Controlled Page and may invalidate every earlier Snapshot Reference",
@@ -76,7 +97,7 @@ export const commandVocabulary = [
 export type CliCommand = (typeof commandVocabulary)[number]["name"]
 export type SliceCommand = Exclude<CliCommand, "help">
 /** A command that acts on the Controlled Page of an already running session. */
-export type PageCommand = Extract<CliCommand, "open" | "snapshot" | "click" | "fill">
+export type PageCommand = Extract<CliCommand, "open" | "snapshot" | "screenshot" | "click" | "fill">
 export type TransactionState =
 	| "unchanged"
 	| "started"
@@ -119,6 +140,7 @@ export type ResultCode =
 	| "START_IN_PROGRESS"
 	| "PAGE_OPENED"
 	| "SNAPSHOT_TAKEN"
+	| "SCREENSHOT_CAPTURED"
 	| "ELEMENT_CLICKED"
 	| "FIELD_FILLED"
 	| "SNAPSHOT_ABSENT"
@@ -127,6 +149,7 @@ export type ResultCode =
 	| "SNAPSHOT_REFERENCE_STALE"
 	| "PAGE_IDENTITY_CHANGED"
 	| "SELECTOR_UNSUPPORTED"
+	| "SCREENSHOT_PATH_UNSUPPORTED"
 	| "CREDENTIAL_FIELD_REFUSED"
 	| "NAVIGATION_TARGET_REFUSED"
 	| "NAVIGATION_FAILED"
@@ -237,6 +260,12 @@ export type PageSnapshotReading =
 		readonly truncated: boolean
 	}
 	/** The page moved while it was being read, so no reference may be issued. */
+	| { readonly kind: "identity_changed" }
+	| { readonly kind: "unverified" }
+
+export type PageCapture =
+	| { readonly kind: "captured"; readonly basis: ControlledPageBasis; readonly png: Uint8Array }
+	/** The page moved while it was being captured, so the image describes a page that is gone. */
 	| { readonly kind: "identity_changed" }
 	| { readonly kind: "unverified" }
 

@@ -8,6 +8,7 @@ import {
 	renameSync,
 	rmdirSync,
 	rmSync,
+	type Stats,
 	statSync,
 	unlinkSync,
 	writeFileSync,
@@ -17,6 +18,7 @@ import { dirname, join, resolve } from "node:path"
 import { snapshotElementLimit, snapshotTextLimit } from "./bounds"
 import type { BrowserProcessIdentity, ControlledPageElement, VerifiedEndpoint } from "./contract"
 import type { LaunchOwnership } from "./ownership"
+import { isOwnedScreenshotName, ownedScreenshotFile } from "./screenshot"
 import type { SnapshotGeneration } from "./snapshot"
 
 interface BrowserSessionBase {
@@ -67,6 +69,7 @@ export interface StatePaths {
 	readonly root: string
 	readonly lock: string
 	readonly session: string
+	readonly screenshots: string
 }
 
 export class UnsafeStateError extends Error {
@@ -76,6 +79,29 @@ export class UnsafeStateError extends Error {
 	}
 }
 
+/**
+ * The two rules that decide whether the Module may read, write, or delete a
+ * path, so each is written once: a second copy is a second rule, and the
+ * weakest copy would govern the most dangerous act.
+ */
+function isOwnedPrivateDirectory(metadata: Stats): boolean {
+	return (
+		metadata.isDirectory() &&
+		!metadata.isSymbolicLink() &&
+		(typeof process.getuid !== "function" || metadata.uid === process.getuid()) &&
+		(metadata.mode & 0o7777) === 0o700
+	)
+}
+
+function isOwnedPrivateFile(metadata: Stats, mode: number): boolean {
+	return (
+		metadata.isFile() &&
+		!metadata.isSymbolicLink() &&
+		(typeof process.getuid !== "function" || metadata.uid === process.getuid()) &&
+		(metadata.mode & 0o7777) === mode
+	)
+}
+
 function exactPrivateDirectory(path: string): void {
 	if (!existsSync(path)) {
 		mkdirSync(path, { mode: 0o700 })
@@ -83,14 +109,7 @@ function exactPrivateDirectory(path: string): void {
 		return
 	}
 	const metadata = lstatSync(path)
-	if (
-		!metadata.isDirectory() ||
-		metadata.isSymbolicLink() ||
-		(typeof process.getuid === "function" && metadata.uid !== process.getuid()) ||
-		(metadata.mode & 0o7777) !== 0o700
-	) {
-		throw new UnsafeStateError()
-	}
+	if (!isOwnedPrivateDirectory(metadata)) throw new UnsafeStateError()
 }
 
 export function resolveStatePaths(environment: NodeJS.ProcessEnv = process.env): StatePaths {
@@ -102,7 +121,12 @@ export function resolveStatePaths(environment: NodeJS.ProcessEnv = process.env):
 	if (base === undefined) throw new UnsafeStateError()
 	const root = join(base, "my-second-brain", "warm-browser")
 	const lock = join(root, "session.lock")
-	return { root, lock, session: join(lock, "session.json") }
+	return {
+		root,
+		lock,
+		session: join(lock, "session.json"),
+		screenshots: join(lock, "screenshots"),
+	}
 }
 
 /** A cleanup that detached its lock and has not finished repairing it. */
@@ -153,14 +177,7 @@ export function validateSessionLock(paths: StatePaths): boolean {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return false
 		throw new UnsafeStateError()
 	}
-	if (
-		!metadata.isDirectory() ||
-		metadata.isSymbolicLink() ||
-		(typeof process.getuid === "function" && metadata.uid !== process.getuid()) ||
-		(metadata.mode & 0o7777) !== 0o700
-	) {
-		throw new UnsafeStateError()
-	}
+	if (!isOwnedPrivateDirectory(metadata)) throw new UnsafeStateError()
 	return true
 }
 
@@ -330,14 +347,7 @@ export function readSessionState(paths: StatePaths): BrowserSessionState | undef
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined
 		throw new UnsafeStateError()
 	}
-	if (
-		!metadata.isFile() ||
-		metadata.isSymbolicLink() ||
-		(typeof process.getuid === "function" && metadata.uid !== process.getuid()) ||
-		(metadata.mode & 0o7777) !== 0o600
-	) {
-		throw new UnsafeStateError()
-	}
+	if (!isOwnedPrivateFile(metadata, 0o600)) throw new UnsafeStateError()
 	let parsed: unknown
 	try {
 		parsed = JSON.parse(readFileSync(paths.session, "utf8"))
@@ -386,10 +396,89 @@ export function removeNewEmptyLock(paths: StatePaths): void {
 	rmdirSync(paths.lock)
 }
 
+/** What one attempt to remove this Browser Session's Screenshots came to. */
+export type ScreenshotRemoval =
+	/** Every Screenshot the session owned is gone, or it owned none. */
+	| { readonly kind: "removed" }
+	/**
+	 * Nothing was deleted. The directory held something this Module cannot prove
+	 * it wrote, so all of it is still there.
+	 */
+	| { readonly kind: "refused" }
+	/**
+	 * Deletion had begun and could not be finished, so what this session owns can
+	 * no longer be stated.
+	 */
+	| { readonly kind: "incomplete" }
+
+/**
+ * Removes every Screenshot inside one owned private directory.
+ *
+ * A directory that is not exactly this Module's own, and an entry that is not a
+ * Screenshot this Module wrote at its own exact mode, are unsafe state rather
+ * than something to delete: a removal that cannot prove what it is deleting is
+ * a removal that must not run. Every entry is proved before any is deleted, so
+ * a refusal always answers for a directory it left whole, and only a deletion
+ * that had already begun can answer `incomplete`.
+ */
+function removeScreenshotDirectory(directory: string): ScreenshotRemoval {
+	if (!existsSync(directory)) return { kind: "removed" }
+	const owned: string[] = []
+	try {
+		if (!isOwnedPrivateDirectory(lstatSync(directory))) return { kind: "refused" }
+		for (const entry of readdirSync(directory)) {
+			const path = join(directory, entry)
+			if (!isOwnedPrivateFile(lstatSync(path), 0o600)) return { kind: "refused" }
+			owned.push(path)
+		}
+	} catch {
+		// The prove pass deletes nothing, so a reading it could not finish still
+		// leaves everything in place.
+		return { kind: "refused" }
+	}
+	try {
+		for (const path of owned) unlinkSync(path)
+		rmdirSync(directory)
+	} catch {
+		return { kind: "incomplete" }
+	}
+	return { kind: "removed" }
+}
+
+/** Removes every Screenshot this Browser Session owns. */
+export function removeOwnedScreenshots(paths: StatePaths): ScreenshotRemoval {
+	return removeScreenshotDirectory(paths.screenshots)
+}
+
+/**
+ * Writes one owned Screenshot and answers the owned path it now has. The name is
+ * proved to be one this Module could have minted before it becomes a path, so a
+ * name that could steer the write elsewhere never reaches the filesystem.
+ */
+export function writeOwnedScreenshot(paths: StatePaths, name: string, bytes: Uint8Array): string {
+	if (!validateSessionLock(paths) || !isOwnedScreenshotName(name)) throw new UnsafeStateError()
+	exactPrivateDirectory(paths.screenshots)
+	const target = join(paths.screenshots, ownedScreenshotFile(name))
+	const temporary = `${target}.tmp-${process.pid}`
+	try {
+		writeFileSync(temporary, bytes, { flag: "wx", mode: 0o600 })
+		chmodSync(temporary, 0o600)
+		renameSync(temporary, target)
+		chmodSync(target, 0o600)
+	} finally {
+		rmSync(temporary, { force: true })
+	}
+	const metadata = lstatSync(target)
+	if (!isOwnedPrivateFile(metadata, 0o600)) throw new UnsafeStateError()
+	return target
+}
+
 /**
  * Removes one owned session's durable state. The lock is detached by a single
  * atomic rename before anything inside it is touched, so a concurrent owner
  * never observes a half-removed lock: it sees the lock gone and is refused.
+ * The Screenshots the session owned go with its state, so no capture outlives
+ * the Browser Session that owned it.
  */
 export function removeOwnedState(paths: StatePaths, sessionId: string): void {
 	if (!validateSessionLock(paths)) throw new UnsafeStateError()
@@ -400,6 +489,9 @@ export function removeOwnedState(paths: StatePaths, sessionId: string): void {
 	renameSync(paths.lock, detached)
 	const detachedSession = join(detached, "session.json")
 	try {
+		if (removeScreenshotDirectory(join(detached, "screenshots")).kind !== "removed") {
+			throw new UnsafeStateError()
+		}
 		unlinkSync(detachedSession)
 		rmdirSync(detached)
 	} catch (error) {

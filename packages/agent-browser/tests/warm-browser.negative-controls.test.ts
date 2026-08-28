@@ -367,8 +367,11 @@ test("removing the post-read re-proof issues references for a page that moved wh
 	expect(
 		await scenario(mutatedPackage({
 			file: "src/modules/warm-browser/controlled-page.ts",
-			find: '\t\t\tif (!sameBasis(before, after)) return { kind: "identity_changed" }',
-			replace: removed,
+			// Paired with the line only the snapshot reader has, because the capture reader proves its page identity the same way.
+			find:
+				'\t\t\tif (!sameBasis(before, after)) return { kind: "identity_changed" }\n\t\t\tconst { elements, truncated } = interpretElements(nodes, reading.descriptions)',
+			replace:
+				`${removed}\n\t\t\tconst { elements, truncated } = interpretElements(nodes, reading.descriptions)`,
 		})),
 	).toEqual({ resultCode: "SNAPSHOT_TAKEN", exitCode: 0 })
 })
@@ -943,3 +946,51 @@ test.each([
 			.toEqual({ resultCode, exitCode, retained: true })
 	},
 )
+
+/** The post-capture identity guard keeps a moved page from becoming a Screenshot. */
+test("removing the post-capture identity proof lets an image of a page that moved be kept", async () => {
+	const scenario = async (root: string): Promise<Reading> => {
+		const { probe } = await pageProbe(
+			{
+				url: "https://fixture.test/start",
+				navigateAfterMethod: {
+					method: "Page.captureScreenshot",
+					url: "https://fixture.test/elsewhere",
+				},
+			},
+			root,
+		)
+		return reading(
+			await runProductionCliAsync(probe, ["screenshot", "--run-id", "control-capture"], root),
+		)
+	}
+
+	expect(await scenario(packageRoot)).toEqual({ resultCode: "PAGE_IDENTITY_CHANGED", exitCode: 21 })
+	expect(
+		await scenario(mutatedPackage({
+			file: "src/modules/warm-browser/controlled-page.ts",
+			find: "\t\t\tif (!sameBasis(before, after)) return { kind: \"identity_changed\" }\n\t\t\tif (data.length % 4 !== 0 || !strictBase64.test(data)) return { kind: \"unverified\" }",
+			replace:
+				removed + "\n\t\t\tif (data.length % 4 !== 0 || !strictBase64.test(data)) return { kind: \"unverified\" }",
+		})),
+	).toEqual({ resultCode: "SCREENSHOT_CAPTURED", exitCode: 0 })
+})
+
+/** The PNG completeness guard keeps a truncated stream from becoming a Screenshot. */
+test("removing the completeness proof lets a truncated stream be kept as a Screenshot", async () => {
+	const scenario = async (root: string): Promise<Reading> => {
+		const { probe } = await pageProbe({ screenshotBytes: "truncated" }, root)
+		return reading(
+			await runProductionCliAsync(probe, ["screenshot", "--run-id", "control-capture"], root),
+		)
+	}
+
+	expect(await scenario(packageRoot)).toEqual({ resultCode: "PAGE_CONTROL_UNVERIFIED", exitCode: 20 })
+	expect(
+		await scenario(mutatedPackage({
+			file: "src/modules/warm-browser/screenshot.ts",
+			find: "\tif (!pngTrailer.every((expected, index) => bytes[trailerAt + index] === expected)) {\n\t\treturn undefined\n\t}",
+			replace: removed,
+		})),
+	).toEqual({ resultCode: "SCREENSHOT_CAPTURED", exitCode: 0 })
+})

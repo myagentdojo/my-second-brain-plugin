@@ -1,4 +1,6 @@
 import type { Server, ServerWebSocket } from "bun"
+import { Buffer } from "node:buffer"
+import { deflateSync } from "node:zlib"
 
 /**
  * The deterministic local Controlled Page fixture: one real loopback endpoint
@@ -82,6 +84,17 @@ export interface CdpPageFixtureOptions {
 	}
 	/** The socket path the target list declares, when it should name another one. */
 	readonly declaredPagePath?: string
+	/** The image `Page.captureScreenshot` answers with. */
+	readonly screenshot?: {
+		readonly width: number
+		readonly height: number
+		readonly pixel?: readonly [number, number, number]
+	}
+	/**
+	 * Answers the capture with bytes that are not one complete PNG, so the caller
+	 * meets a real malformed answer rather than an assertion about one.
+	 */
+	readonly screenshotBytes?: "not-png" | "truncated"
 }
 
 export interface WitnessEntry {
@@ -127,6 +140,14 @@ const documentBackendNodeId = 1
 const htmlBackendNodeId = 2
 const bodyBackendNodeId = 3
 
+const crcTable = Array.from({ length: 256 }, (_, index) => {
+	let crc = index
+	for (let bit = 0; bit < 8; bit += 1) {
+		crc = (crc & 1) === 0 ? crc >>> 1 : (crc >>> 1) ^ 0xEDB88320
+	}
+	return crc >>> 0
+})
+
 function attributeList(attributes: Readonly<Record<string, string>> | undefined): string[] {
 	return Object.entries(attributes ?? {}).flatMap(([name, value]) => [name, value])
 }
@@ -156,6 +177,88 @@ function accessibilityNode(element: FixtureElement, index: number): Record<strin
 		properties,
 		backendDOMNodeId: element.backendNodeId,
 	}
+}
+
+/** The PNG chunk checksum, computed the way the format defines it. */
+function crc32(bytes: Uint8Array): number {
+	let crc = 0xFFFFFFFF
+	for (const byte of bytes) {
+		crc = (crc >>> 8) ^ crcTable[(crc ^ byte) & 0xFF]!
+	}
+	return (crc ^ 0xFFFFFFFF) >>> 0
+}
+
+/** One PNG chunk: its length, its type, its data, and its checksum. */
+function pngChunk(type: string, data: Uint8Array): Uint8Array {
+	const chunk = new Uint8Array(4 + 4 + data.length + 4)
+	chunk[0] = (data.length >>> 24) & 0xFF
+	chunk[1] = (data.length >>> 16) & 0xFF
+	chunk[2] = (data.length >>> 8) & 0xFF
+	chunk[3] = data.length & 0xFF
+	for (let index = 0; index < 4; index += 1) {
+		chunk[4 + index] = type.charCodeAt(index)
+	}
+	chunk.set(data, 8)
+	const checksum = crc32(chunk.subarray(4, 8 + data.length))
+	const checksumOffset = 8 + data.length
+	chunk[checksumOffset] = (checksum >>> 24) & 0xFF
+	chunk[checksumOffset + 1] = (checksum >>> 16) & 0xFF
+	chunk[checksumOffset + 2] = (checksum >>> 8) & 0xFF
+	chunk[checksumOffset + 3] = checksum & 0xFF
+	return chunk
+}
+
+/**
+ * One real PNG image of a single flat colour. The fixture encodes it rather
+ * than serving a canned string, so the production reader decodes an image that
+ * genuinely carries the dimensions this test asked for.
+ */
+function encodePng(
+	width: number,
+	height: number,
+	pixel: readonly [number, number, number],
+): Uint8Array {
+	const signature = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10])
+	const ihdr = new Uint8Array(13)
+	ihdr[0] = (width >>> 24) & 0xFF
+	ihdr[1] = (width >>> 16) & 0xFF
+	ihdr[2] = (width >>> 8) & 0xFF
+	ihdr[3] = width & 0xFF
+	ihdr[4] = (height >>> 24) & 0xFF
+	ihdr[5] = (height >>> 16) & 0xFF
+	ihdr[6] = (height >>> 8) & 0xFF
+	ihdr[7] = height & 0xFF
+	ihdr[8] = 8
+	ihdr[9] = 2
+	ihdr[10] = 0
+	ihdr[11] = 0
+	ihdr[12] = 0
+
+	const raw = new Uint8Array(height * (1 + width * 3))
+	for (let row = 0; row < height; row += 1) {
+		const rowOffset = row * (1 + width * 3)
+		raw[rowOffset] = 0
+		for (let column = 0; column < width; column += 1) {
+			const pixelOffset = rowOffset + 1 + column * 3
+			raw[pixelOffset] = pixel[0]
+			raw[pixelOffset + 1] = pixel[1]
+			raw[pixelOffset + 2] = pixel[2]
+		}
+	}
+
+	const chunks = [
+		signature,
+		pngChunk("IHDR", ihdr),
+		pngChunk("IDAT", deflateSync(raw)),
+		pngChunk("IEND", new Uint8Array()),
+	]
+	const png = new Uint8Array(chunks.reduce((total, chunk) => total + chunk.length, 0))
+	let offset = 0
+	for (const chunk of chunks) {
+		png.set(chunk, offset)
+		offset += chunk.length
+	}
+	return png
 }
 
 export function startCdpPageFixture(options: CdpPageFixtureOptions = {}): CdpPageFixture {
@@ -352,6 +455,17 @@ export function startCdpPageFixture(options: CdpPageFixtureOptions = {}): CdpPag
 			if (options.driftDuringSnapshot === true) moveIdentity(url)
 			describedAfterSnapshot = true
 			return { nodes }
+		}
+		if (method === "Page.captureScreenshot") {
+			const { width, height } = options.screenshot ?? { width: 4, height: 3 }
+			const pixel: readonly [number, number, number] = options.screenshot?.pixel ?? [18, 52, 86]
+			const png = encodePng(width, height, pixel)
+			const bytes = options.screenshotBytes === "not-png"
+				? new TextEncoder().encode("this is not a portable network graphic")
+				: options.screenshotBytes === "truncated"
+					? png.slice(0, png.length - 12)
+					: png
+			return { data: Buffer.from(bytes).toString("base64") }
 		}
 		if (method === "DOM.describeNode") {
 			const element = findElement(parameters.backendNodeId)

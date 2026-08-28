@@ -19,6 +19,7 @@ export interface WarmBrowserAdapter {
 	createRunId(): string
 	createSessionId(): string
 	createSnapshotId(): string
+	createScreenshotId(): string
 	nowEpochMs(): number
 	platform(): string
 	chromeExecutable(): string

@@ -7,7 +7,9 @@ import {
 	type ControlledPageBasis,
 	type EndpointVerification,
 	type ErrorEnvelope,
+	type PageCapture,
 	type PageCommand,
+	refusedDestinationFlags,
 	refusedSelectorFlags,
 	type ResultCode,
 	runIdOption,
@@ -22,6 +24,7 @@ import type { WarmBrowserAdapter } from "./adapter"
 import { fillValueLimit, startingTimeoutMs } from "./bounds"
 import {
 	actOnControlledPage,
+	captureControlledPage,
 	type ControlledPageAction,
 	openControlledPage,
 	readControlledPageSnapshot,
@@ -34,6 +37,7 @@ import {
 	launchOwnership,
 } from "./ownership"
 import { productionAdapter } from "./production-adapter"
+import { readPortableNetworkGraphic } from "./screenshot"
 import {
 	publishedElements,
 	type ReferenceResolution,
@@ -47,6 +51,7 @@ import {
 	lockAgeMs,
 	readSessionState,
 	removeNewEmptyLock,
+	removeOwnedScreenshots,
 	removeOwnedState,
 	resolveStatePaths,
 	type RunningBrowserSessionState,
@@ -54,6 +59,7 @@ import {
 	type StatePaths,
 	UnsafeStateError,
 	validateSessionLock,
+	writeOwnedScreenshot,
 	writeSessionState,
 } from "./state"
 
@@ -62,6 +68,7 @@ const runIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
 const controlCharacter = /\p{Cc}/u
 const commandNames = new Set<string>(commandVocabulary.map(({ name }) => name))
 const selectorFlags = new Set<string>(refusedSelectorFlags)
+const destinationFlags = new Set<string>(refusedDestinationFlags)
 
 /** One option rendered the way usage names it. */
 function renderOption(option: CommandOption): string {
@@ -179,6 +186,23 @@ function selectorRefusal(runId: string, command: CliCommand | "unknown", flag: s
 	})
 }
 
+/**
+ * Refuses an output destination by name. No command anywhere accepts one: a
+ * Screenshot is written where the Browser Session owns it and nowhere else, so
+ * the caller is told that rather than being told its argument was unrecognised.
+ */
+function destinationRefusal(runId: string, command: CliCommand | "unknown", flag: string): never {
+	raise({
+		command,
+		resultCode: "SCREENSHOT_PATH_UNSUPPORTED",
+		exitCode: 21,
+		runId,
+		retrySafe: false,
+		nextAction: "Run warm-browser screenshot --run-id ID and read the owned path it returns.",
+		message: `Warm Browser writes a Screenshot where its Browser Session owns it, not to the ${flag} destination.`,
+	})
+}
+
 /** The shape of an option name, which is the only argument text ever repeated. */
 const optionFlag = /^--[a-z][a-z0-9-]{0,31}$/
 
@@ -271,6 +295,7 @@ function readOptions(
 	for (let index = firstOptionIndex; index < arguments_.length; index += 1) {
 		const argument = arguments_[index]!
 		if (selectorFlags.has(argument)) selectorRefusal(runId, command, argument)
+		if (destinationFlags.has(argument)) destinationRefusal(runId, command, argument)
 		const option = accepted.get(argument)
 		if (option === undefined) usage(runId, command, unsupportedArgument(argument))
 		if (seen.has(option.flag)) usage(runId, command, `The ${option.flag} flag may appear only once.`)
@@ -303,6 +328,11 @@ function parseArguments(arguments_: readonly string[], adapter: WarmBrowserAdapt
 		// behalf of a command it never ran.
 		if (first !== undefined && selectorFlags.has(first)) {
 			selectorRefusal(generatedRunId, command, first)
+		}
+		// A destination in the command position is still a destination, for the
+		// same reason.
+		if (first !== undefined && destinationFlags.has(first)) {
+			destinationRefusal(generatedRunId, command, first)
 		}
 		usage(generatedRunId, command, "Unknown Warm Browser command.")
 	}
@@ -1492,6 +1522,123 @@ async function snapshot(
 	})
 }
 
+/**
+ * Captures the Controlled Page to the one Screenshot its Browser Session owns.
+ * The success path deliberately calls nothing that writes the durable receipt:
+ * leaving it untouched is what makes it provable that capturing does not
+ * change the Snapshot Generation, and does not invalidate a single reference
+ * it issued.
+ */
+async function screenshot(
+	parsed: ParsedCommand,
+	paths: StatePaths,
+	adapter: WarmBrowserAdapter,
+): Promise<CliOutcome> {
+	const session = await requireControlledPage(parsed, "screenshot", paths, adapter)
+	const state = session.state
+	const capture: PageCapture = await captureControlledPage({
+		port: state.endpoint.port,
+		targetId: state.endpoint.controlledPageTargetId,
+	})
+	if (capture.kind === "identity_changed") {
+		// The page moved, so the generation this session was still holding
+		// described a page that is gone. No Screenshot was kept and none of the
+		// old references survives the reading that proved the page moved.
+		const transaction = invalidationState(state)
+		invalidateReferences("screenshot", parsed.runId, paths, state, "invalidated")
+		staticFailure(
+			"screenshot",
+			parsed.runId,
+			"PAGE_IDENTITY_CHANGED",
+			21,
+			"The Controlled Page moved while it was being captured, so no Screenshot was kept.",
+			freshSnapshotAction,
+			false,
+			transaction,
+		)
+	}
+	if (capture.kind === "unverified") {
+		pageControlUnverified(
+			"screenshot",
+			parsed.runId,
+			"Warm Browser could not capture the Controlled Page.",
+			"unchanged",
+		)
+	}
+	const image = readPortableNetworkGraphic(capture.png)
+	if (image === undefined) {
+		pageControlUnverified(
+			"screenshot",
+			parsed.runId,
+			"The Controlled Page answered with something that is not one complete PNG image.",
+			"unchanged",
+		)
+	}
+	const name = adapter.createScreenshotId()
+	// Clear then write, so at most one artifact ever exists and a failure leaves
+	// less rather than more.
+	const removal = removeOwnedScreenshots(paths)
+	// The two removal failures differ only in what the module can still prove
+	// about its own state, which is exactly what the transaction names: a refusal
+	// deleted nothing, an incomplete removal may have.
+	if (removal.kind === "refused") {
+		staticFailure(
+			"screenshot",
+			parsed.runId,
+			"STATE_UNSAFE",
+			20,
+			"Warm Browser could not remove the Screenshot its Browser Session already owned.",
+			"Repair the private Warm Browser Screenshot state before capturing again.",
+			false,
+			"unchanged",
+		)
+	}
+	if (removal.kind === "incomplete") {
+		staticFailure(
+			"screenshot",
+			parsed.runId,
+			"STATE_UNSAFE",
+			20,
+			"Warm Browser began removing the Screenshot its Browser Session owned and could not finish.",
+			"Repair the private Warm Browser Screenshot state before capturing again.",
+			false,
+			"acted",
+		)
+	}
+	let path: string
+	try {
+		path = writeOwnedScreenshot(paths, name, capture.png)
+	} catch {
+		staticFailure(
+			"screenshot",
+			parsed.runId,
+			"STATE_UNSAFE",
+			20,
+			"Warm Browser removed the Screenshot its Browser Session owned and could not write the new one.",
+			"Repair the private Warm Browser Screenshot state before capturing again.",
+			false,
+			"acted",
+		)
+	}
+	return success({
+		schemaVersion,
+		status: "ok",
+		command: "screenshot",
+		resultCode: "SCREENSHOT_CAPTURED",
+		runId: parsed.runId,
+		transactionState: "acted",
+		retrySafe: true,
+		nextAction:
+			"Read the Screenshot at the private path this result names; Warm Browser removes it when the Browser Session stops.",
+		data: {
+			screenshot: { path, width: image.width, height: image.height, sha256: image.sha256 },
+			controlledPage: controlledPageData(capture.basis),
+			invalidatedReferences: false,
+			postcondition: "running",
+		},
+	})
+}
+
 async function actOnPage(
 	parsed: ParsedCommand,
 	command: Extract<PageCommand, "click" | "fill">,
@@ -1619,6 +1766,7 @@ const sliceCommands: Readonly<Record<SliceCommand, SliceHandler>> = {
 	status,
 	open,
 	snapshot,
+	screenshot,
 	click: (parsed, paths, adapter) => actOnPage(parsed, "click", paths, adapter),
 	fill: (parsed, paths, adapter) => actOnPage(parsed, "fill", paths, adapter),
 	stop,

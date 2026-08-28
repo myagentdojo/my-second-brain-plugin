@@ -81,3 +81,12 @@ export const snapshotTextLimit = 256
 
 /** The longest value one fill may type. */
 export const fillValueLimit = 4_096
+
+/** The most bytes one Screenshot of the Controlled Page may be. */
+export const screenshotByteLimit = 16 * 1024 * 1024
+
+/** The largest pixel dimension one Screenshot may declare. */
+export const screenshotPixelLimit = 20_000
+
+/** The same bound expressed in the base64 the page answers with. */
+export const screenshotBase64Limit = Math.ceil(screenshotByteLimit / 3) * 4

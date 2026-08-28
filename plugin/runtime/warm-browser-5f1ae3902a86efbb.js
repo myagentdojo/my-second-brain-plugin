@@ -3,6 +3,14 @@
 var schemaVersion = 1;
 var runIdOption = { flag: "--run-id", value: "ID", required: false };
 var refusedSelectorFlags = ["--selector", "--css", "--xpath", "--text"];
+var refusedDestinationFlags = [
+  "--path",
+  "--out",
+  "--output",
+  "--file",
+  "--dir",
+  "--directory"
+];
 var commandVocabulary = [
   { name: "help", sideEffects: "none", options: [] },
   {
@@ -26,6 +34,11 @@ var commandVocabulary = [
   {
     name: "snapshot",
     sideEffects: "reads the Controlled Page and replaces every earlier Snapshot Reference",
+    options: []
+  },
+  {
+    name: "screenshot",
+    sideEffects: "captures the Controlled Page to one private Browser Session-owned PNG, replacing the Screenshot that session owned, and may invalidate every earlier Snapshot Reference",
     options: []
   },
   {
@@ -74,6 +87,12 @@ var snapshotReferenceTimeoutMs = 60000;
 var snapshotElementLimit = 500;
 var snapshotTextLimit = 256;
 var fillValueLimit = 4096;
+var screenshotByteLimit = 16 * 1024 * 1024;
+var screenshotPixelLimit = 20000;
+var screenshotBase64Limit = Math.ceil(screenshotByteLimit / 3) * 4;
+
+// packages/agent-browser/src/modules/warm-browser/controlled-page.ts
+import { Buffer } from "buffer";
 
 // packages/agent-browser/src/modules/warm-browser/cdp-channel.ts
 var failedReply = { ok: false, result: undefined };
@@ -473,6 +492,31 @@ async function readControlledPageSnapshot(input) {
       return { kind: "identity_changed" };
     const { elements, truncated } = interpretElements(nodes, reading.descriptions);
     return { kind: "observed", basis: after, elements, truncated };
+  });
+}
+var strictBase64 = /^[A-Za-z0-9+/]+={0,2}$/;
+async function captureControlledPage(input) {
+  return await withControlledPage(input.port, input.targetId, { kind: "unverified" }, async (channel) => {
+    if (!(await channel.call("Page.enable", {})).ok)
+      return { kind: "unverified" };
+    const before = await readBasis(channel, input.targetId);
+    if (before === undefined)
+      return { kind: "unverified" };
+    const captured = await channel.call("Page.captureScreenshot", { format: "png" });
+    if (!captured.ok)
+      return { kind: "unverified" };
+    const data = record(captured.result)?.data;
+    if (typeof data !== "string" || data === "" || data.length > screenshotBase64Limit) {
+      return { kind: "unverified" };
+    }
+    const after = await readBasis(channel, input.targetId);
+    if (after === undefined)
+      return { kind: "unverified" };
+    if (!sameBasis(before, after))
+      return { kind: "identity_changed" };
+    if (data.length % 4 !== 0 || !strictBase64.test(data))
+      return { kind: "unverified" };
+    return { kind: "captured", basis: after, png: Buffer.from(data, "base64") };
   });
 }
 function undeliverable(reason) {
@@ -946,6 +990,7 @@ var productionAdapter = {
   createRunId: () => `wb-${randomUUID()}`,
   createSessionId: () => `session-${randomUUID()}`,
   createSnapshotId: () => `snapshot-${randomUUID()}`,
+  createScreenshotId: () => `screenshot-${randomUUID()}`,
   nowEpochMs: () => Date.now(),
   platform: hostPlatform,
   chromeExecutable: () => installedChrome,
@@ -1017,6 +1062,50 @@ var productionAdapter = {
   }
 };
 
+// packages/agent-browser/src/modules/warm-browser/screenshot.ts
+import { createHash } from "crypto";
+var ownedScreenshotName = /^[a-z0-9][a-z0-9-]{0,63}$/;
+function isOwnedScreenshotName(value) {
+  return typeof value === "string" && ownedScreenshotName.test(value);
+}
+function ownedScreenshotFile(name) {
+  return `${name}.png`;
+}
+var pngSignature = [137, 80, 78, 71, 13, 10, 26, 10];
+var pngTrailer = [0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130];
+var pngBitDepths = [1, 2, 4, 8, 16];
+var pngColourTypes = [0, 2, 3, 4, 6];
+var pngLengthFloor = 8 + 25 + 12;
+function readUint32(bytes, offset) {
+  return bytes[offset] * 16777216 + bytes[offset + 1] * 65536 + bytes[offset + 2] * 256 + bytes[offset + 3];
+}
+function readPortableNetworkGraphic(bytes) {
+  if (bytes.length < pngLengthFloor || bytes.length > screenshotByteLimit)
+    return;
+  if (!pngSignature.every((expected, index) => bytes[index] === expected))
+    return;
+  if (readUint32(bytes, 8) !== 13)
+    return;
+  if (bytes[12] !== 73 || bytes[13] !== 72 || bytes[14] !== 68 || bytes[15] !== 82) {
+    return;
+  }
+  const width = readUint32(bytes, 16);
+  const height = readUint32(bytes, 20);
+  if (width < 1 || width > screenshotPixelLimit)
+    return;
+  if (height < 1 || height > screenshotPixelLimit)
+    return;
+  if (!pngBitDepths.includes(bytes[24]))
+    return;
+  if (!pngColourTypes.includes(bytes[25]))
+    return;
+  const trailerAt = bytes.length - pngTrailer.length;
+  if (!pngTrailer.every((expected, index) => bytes[trailerAt + index] === expected)) {
+    return;
+  }
+  return { width, height, sha256: createHash("sha256").update(bytes).digest("hex") };
+}
+
 // packages/agent-browser/src/modules/warm-browser/snapshot.ts
 var referencePattern = /^e([1-9][0-9]{0,3})@([A-Za-z0-9][A-Za-z0-9._:-]{0,127})$/;
 function snapshotReference(generationId, ordinal) {
@@ -1071,6 +1160,12 @@ class UnsafeStateError extends Error {
     this.name = "UnsafeStateError";
   }
 }
+function isOwnedPrivateDirectory(metadata) {
+  return metadata.isDirectory() && !metadata.isSymbolicLink() && (typeof process.getuid !== "function" || metadata.uid === process.getuid()) && (metadata.mode & 4095) === 448;
+}
+function isOwnedPrivateFile(metadata, mode) {
+  return metadata.isFile() && !metadata.isSymbolicLink() && (typeof process.getuid !== "function" || metadata.uid === process.getuid()) && (metadata.mode & 4095) === mode;
+}
 function exactPrivateDirectory(path) {
   if (!existsSync2(path)) {
     mkdirSync(path, { mode: 448 });
@@ -1078,9 +1173,8 @@ function exactPrivateDirectory(path) {
     return;
   }
   const metadata = lstatSync3(path);
-  if (!metadata.isDirectory() || metadata.isSymbolicLink() || typeof process.getuid === "function" && metadata.uid !== process.getuid() || (metadata.mode & 4095) !== 448) {
+  if (!isOwnedPrivateDirectory(metadata))
     throw new UnsafeStateError;
-  }
 }
 function resolveStatePaths(environment = process.env) {
   const base = environment.XDG_STATE_HOME ? resolve(environment.XDG_STATE_HOME) : environment.HOME ? resolve(environment.HOME, ".local", "state") : undefined;
@@ -1088,7 +1182,12 @@ function resolveStatePaths(environment = process.env) {
     throw new UnsafeStateError;
   const root = join2(base, "my-second-brain", "warm-browser");
   const lock = join2(root, "session.lock");
-  return { root, lock, session: join2(lock, "session.json") };
+  return {
+    root,
+    lock,
+    session: join2(lock, "session.json"),
+    screenshots: join2(lock, "screenshots")
+  };
 }
 function detachedCleanupExists(paths) {
   return readdirSync(paths.root).some((entry) => entry.startsWith(".cleanup-"));
@@ -1125,9 +1224,8 @@ function validateSessionLock(paths) {
       return false;
     throw new UnsafeStateError;
   }
-  if (!metadata.isDirectory() || metadata.isSymbolicLink() || typeof process.getuid === "function" && metadata.uid !== process.getuid() || (metadata.mode & 4095) !== 448) {
+  if (!isOwnedPrivateDirectory(metadata))
     throw new UnsafeStateError;
-  }
   return true;
 }
 function lockAgeMs(paths, nowEpochMs) {
@@ -1225,9 +1323,8 @@ function readSessionState(paths) {
       return;
     throw new UnsafeStateError;
   }
-  if (!metadata.isFile() || metadata.isSymbolicLink() || typeof process.getuid === "function" && metadata.uid !== process.getuid() || (metadata.mode & 4095) !== 384) {
+  if (!isOwnedPrivateFile(metadata, 384))
     throw new UnsafeStateError;
-  }
   let parsed;
   try {
     parsed = JSON.parse(readFileSync(paths.session, "utf8"));
@@ -1267,6 +1364,53 @@ function removeNewEmptyLock(paths) {
   }
   rmdirSync(paths.lock);
 }
+function removeScreenshotDirectory(directory) {
+  if (!existsSync2(directory))
+    return { kind: "removed" };
+  const owned = [];
+  try {
+    if (!isOwnedPrivateDirectory(lstatSync3(directory)))
+      return { kind: "refused" };
+    for (const entry of readdirSync(directory)) {
+      const path = join2(directory, entry);
+      if (!isOwnedPrivateFile(lstatSync3(path), 384))
+        return { kind: "refused" };
+      owned.push(path);
+    }
+  } catch {
+    return { kind: "refused" };
+  }
+  try {
+    for (const path of owned)
+      unlinkSync(path);
+    rmdirSync(directory);
+  } catch {
+    return { kind: "incomplete" };
+  }
+  return { kind: "removed" };
+}
+function removeOwnedScreenshots(paths) {
+  return removeScreenshotDirectory(paths.screenshots);
+}
+function writeOwnedScreenshot(paths, name, bytes) {
+  if (!validateSessionLock(paths) || !isOwnedScreenshotName(name))
+    throw new UnsafeStateError;
+  exactPrivateDirectory(paths.screenshots);
+  const target = join2(paths.screenshots, ownedScreenshotFile(name));
+  const temporary = `${target}.tmp-${process.pid}`;
+  try {
+    writeFileSync(temporary, bytes, { flag: "wx", mode: 384 });
+    chmodSync(temporary, 384);
+    renameSync(temporary, target);
+    chmodSync(target, 384);
+  } finally {
+    rmSync(temporary, { force: true });
+  }
+  const metadata = lstatSync3(target);
+  if (!isOwnedPrivateFile(metadata, 384))
+    throw new UnsafeStateError;
+  return target;
+}
 function removeOwnedState(paths, sessionId) {
   if (!validateSessionLock(paths))
     throw new UnsafeStateError;
@@ -1279,6 +1423,9 @@ function removeOwnedState(paths, sessionId) {
   renameSync(paths.lock, detached);
   const detachedSession = join2(detached, "session.json");
   try {
+    if (removeScreenshotDirectory(join2(detached, "screenshots")).kind !== "removed") {
+      throw new UnsafeStateError;
+    }
     unlinkSync(detachedSession);
     rmdirSync(detached);
   } catch (error) {
@@ -1300,6 +1447,7 @@ var runIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 var controlCharacter = /\p{Cc}/u;
 var commandNames = new Set(commandVocabulary.map(({ name }) => name));
 var selectorFlags = new Set(refusedSelectorFlags);
+var destinationFlags = new Set(refusedDestinationFlags);
 function renderOption(option) {
   return option.value === null ? `[${option.flag}]` : `[${option.flag} ${option.value}]`;
 }
@@ -1377,6 +1525,17 @@ function selectorRefusal(runId, command, flag) {
     message: `Warm Browser acts through Snapshot References, not the ${flag} selector.`
   });
 }
+function destinationRefusal(runId, command, flag) {
+  raise({
+    command,
+    resultCode: "SCREENSHOT_PATH_UNSUPPORTED",
+    exitCode: 21,
+    runId,
+    retrySafe: false,
+    nextAction: "Run warm-browser screenshot --run-id ID and read the owned path it returns.",
+    message: `Warm Browser writes a Screenshot where its Browser Session owns it, not to the ${flag} destination.`
+  });
+}
 var optionFlag = /^--[a-z][a-z0-9-]{0,31}$/;
 function unsupportedArgument(argument) {
   return optionFlag.test(argument) ? `Warm Browser does not accept the ${argument} option here.` : "Warm Browser accepts options here, and this argument is not one.";
@@ -1440,6 +1599,8 @@ function readOptions(arguments_, firstOptionIndex, command, accepted, generatedR
     const argument = arguments_[index];
     if (selectorFlags.has(argument))
       selectorRefusal(runId, command, argument);
+    if (destinationFlags.has(argument))
+      destinationRefusal(runId, command, argument);
     const option = accepted.get(argument);
     if (option === undefined)
       usage(runId, command, unsupportedArgument(argument));
@@ -1467,6 +1628,9 @@ function parseArguments(arguments_, adapter) {
   if (command === "unknown") {
     if (first !== undefined && selectorFlags.has(first)) {
       selectorRefusal(generatedRunId, command, first);
+    }
+    if (first !== undefined && destinationFlags.has(first)) {
+      destinationRefusal(generatedRunId, command, first);
     }
     usage(generatedRunId, command, "Unknown Warm Browser command.");
   }
@@ -2048,6 +2212,56 @@ async function snapshot(parsed, paths, adapter) {
     }
   });
 }
+async function screenshot(parsed, paths, adapter) {
+  const session = await requireControlledPage(parsed, "screenshot", paths, adapter);
+  const state = session.state;
+  const capture = await captureControlledPage({
+    port: state.endpoint.port,
+    targetId: state.endpoint.controlledPageTargetId
+  });
+  if (capture.kind === "identity_changed") {
+    const transaction = invalidationState(state);
+    invalidateReferences("screenshot", parsed.runId, paths, state, "invalidated");
+    staticFailure("screenshot", parsed.runId, "PAGE_IDENTITY_CHANGED", 21, "The Controlled Page moved while it was being captured, so no Screenshot was kept.", freshSnapshotAction, false, transaction);
+  }
+  if (capture.kind === "unverified") {
+    pageControlUnverified("screenshot", parsed.runId, "Warm Browser could not capture the Controlled Page.", "unchanged");
+  }
+  const image = readPortableNetworkGraphic(capture.png);
+  if (image === undefined) {
+    pageControlUnverified("screenshot", parsed.runId, "The Controlled Page answered with something that is not one complete PNG image.", "unchanged");
+  }
+  const name = adapter.createScreenshotId();
+  const removal = removeOwnedScreenshots(paths);
+  if (removal.kind === "refused") {
+    staticFailure("screenshot", parsed.runId, "STATE_UNSAFE", 20, "Warm Browser could not remove the Screenshot its Browser Session already owned.", "Repair the private Warm Browser Screenshot state before capturing again.", false, "unchanged");
+  }
+  if (removal.kind === "incomplete") {
+    staticFailure("screenshot", parsed.runId, "STATE_UNSAFE", 20, "Warm Browser began removing the Screenshot its Browser Session owned and could not finish.", "Repair the private Warm Browser Screenshot state before capturing again.", false, "acted");
+  }
+  let path;
+  try {
+    path = writeOwnedScreenshot(paths, name, capture.png);
+  } catch {
+    staticFailure("screenshot", parsed.runId, "STATE_UNSAFE", 20, "Warm Browser removed the Screenshot its Browser Session owned and could not write the new one.", "Repair the private Warm Browser Screenshot state before capturing again.", false, "acted");
+  }
+  return success({
+    schemaVersion,
+    status: "ok",
+    command: "screenshot",
+    resultCode: "SCREENSHOT_CAPTURED",
+    runId: parsed.runId,
+    transactionState: "acted",
+    retrySafe: true,
+    nextAction: "Read the Screenshot at the private path this result names; Warm Browser removes it when the Browser Session stops.",
+    data: {
+      screenshot: { path, width: image.width, height: image.height, sha256: image.sha256 },
+      controlledPage: controlledPageData(capture.basis),
+      invalidatedReferences: false,
+      postcondition: "running"
+    }
+  });
+}
 async function actOnPage(parsed, command, paths, adapter) {
   const session = await requireControlledPage(parsed, command, paths, adapter);
   const state = session.state;
@@ -2119,6 +2333,7 @@ var sliceCommands = {
   status,
   open,
   snapshot,
+  screenshot,
   click: (parsed, paths, adapter) => actOnPage(parsed, "click", paths, adapter),
   fill: (parsed, paths, adapter) => actOnPage(parsed, "fill", paths, adapter),
   stop

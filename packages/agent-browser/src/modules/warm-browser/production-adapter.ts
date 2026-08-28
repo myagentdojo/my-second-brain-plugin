@@ -236,6 +236,7 @@ export const productionAdapter: WarmBrowserAdapter = {
 	createRunId: () => `wb-${randomUUID()}`,
 	createSessionId: () => `session-${randomUUID()}`,
 	createSnapshotId: () => `snapshot-${randomUUID()}`,
+	createScreenshotId: () => `screenshot-${randomUUID()}`,
 	nowEpochMs: () => Date.now(),
 	platform: hostPlatform,
 	chromeExecutable: () => installedChrome,

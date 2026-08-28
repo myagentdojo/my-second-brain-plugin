@@ -4,10 +4,10 @@ Warm Browser is one of the two Agent Browser Modules, and the implemented one.
 
 It owns the Command Vocabulary and Result Vocabulary, and each command declares
 the options it accepts beside its own name there. The implemented slice is the
-`help` meta-surface and the `start`, `status`, `open`, `snapshot`, `click`,
-`fill`, and `stop` product commands; `screenshot` and `login` are not callable
-yet. Browser Session, Controlled Page, Snapshot Generation, Snapshot Reference
-validity, and Screenshot lifecycle remain internal to this Module.
+`help` meta-surface and the `start`, `status`, `open`, `snapshot`, `screenshot`, `click`,
+`fill`, and `stop` product commands; `login` is not callable yet. Browser
+Session, Controlled Page, Snapshot Generation, Snapshot Reference validity, and
+Screenshot lifecycle remain internal to this Module.
 
 The production Adapter is fixed: one value, no factory, no injected dependency.
 Tests inject the internal Adapter through a private test-only driver, or
@@ -88,9 +88,16 @@ identifier is classified with the password, because it is the half of the pair
 that names the account; both refusals route to `login`.
 
 A Screenshot is a private session-owned PNG of the Controlled Page, distinct
-from the structured interaction snapshot. Warm Browser returns only its owned
-path, dimensions, and SHA-256 metadata, refuses arbitrary output paths, and
-deletes owned Screenshots on stop or bounded stale-session cleanup.
+from the structured interaction snapshot. The artifact lives inside the
+session's own ownership lock, so the lock that proves the session is what proves
+the Screenshot belongs to it. Warm Browser returns only its owned path,
+dimensions, and SHA-256 metadata, refuses arbitrary output paths, and a capture
+clears the one before it and writes the new one, so at most one exists. A
+successful capture writes no durable receipt, which is what makes it provable
+that it issues no Snapshot Reference and changes no Snapshot Generation. Bytes
+that are not one complete PNG are never kept. Owned Screenshots are removed
+with session state on stop or bounded stale-session cleanup, and a cleanup that
+cannot be completed fails closed with the state left repairable.
 
 Later interface and testing work may cross the Command Vocabulary and Result
 Vocabulary only. Any mock remains internal.

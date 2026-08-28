@@ -6,14 +6,15 @@ plugin launcher is `plugin/bin/warm-browser`; the package entry is `src/main.ts`
 
 ## Warm Browser lifecycle
 
-The callable slice is `help`, `start`, `status`, `open`, `snapshot`, `click`,
-`fill`, and `stop`. `help` is a CLI meta-surface, not one of the nine accepted
-product commands; `screenshot` and `login` are still not callable. Every command
-accepts `--run-id <ID>`, and each command declares the options it accepts beside
-its own name in the Command Vocabulary: `start` accepts one
+The callable slice is `help`, `start`, `status`, `open`, `snapshot`,
+`screenshot`, `click`, `fill`, and `stop`. `help` is a CLI meta-surface, not one
+of the nine accepted product commands; `login` is still not callable. Every
+command accepts `--run-id <ID>`, and each command declares the options it
+accepts beside its own name in the Command Vocabulary: `start` accepts one
 `--port <1024..65535>` override and otherwise uses loopback port `9242`, `open`
-accepts `--url URL` and `--adopt-page`, `click` accepts `--ref REFERENCE`, and
-`fill` accepts `--ref REFERENCE` and `--value TEXT`.
+accepts `--url URL` and `--adopt-page`, `screenshot` accepts none, `click`
+accepts `--ref REFERENCE`, and `fill` accepts `--ref REFERENCE` and
+`--value TEXT`.
 
 On macOS, production fixes the existing profile path to
 `$HOME/.agent-warm-profile`, with inner profile `Default`. It does not honor the
@@ -78,8 +79,10 @@ non-empty `nextAction`, and `runId`. Exit classes are `0` success, `2` usage,
 
 The closed transaction vocabulary is `unchanged`, `started`, `stopped`,
 `recovered`, `rolled_back`, `acted`, and `invalidated`. A page command that
-changed the Controlled Page, or that cannot prove it did not, records `acted`.
-That includes an act that dispatched nothing: bringing an element into view
+changed the Controlled Page, or that cannot prove it did not, records `acted`,
+as does a command that leaves durable session state behind. A `screenshot`
+records `acted` because it replaces the private Screenshot the Browser Session
+owns, though it never changes the page. That includes an act that dispatched nothing: bringing an element into view
 scrolls the page and asking a field for focus moves it, so a refusal that got
 that far records `acted`, and only one decided before the page was asked for
 anything records `unchanged`. A command that reached nothing but dropped the
@@ -94,9 +97,9 @@ Result Vocabulary is `HELP`, `SESSION_STARTED`, `SESSION_RUNNING`,
 `CONTROLLED_PAGE_UNAVAILABLE`, `CONTROLLED_PAGE_AMBIGUOUS`,
 `CONTROLLED_PAGE_REPLACED`, `SESSION_ALREADY_RUNNING`, `PORT_OCCUPIED`,
 `PORT_UNVERIFIABLE`, `START_IN_PROGRESS`, `PAGE_OPENED`, `SNAPSHOT_TAKEN`,
-`ELEMENT_CLICKED`, `FIELD_FILLED`, `SNAPSHOT_ABSENT`, `ELEMENT_NOT_ACTIONABLE`,
+`SCREENSHOT_CAPTURED`, `ELEMENT_CLICKED`, `FIELD_FILLED`, `SNAPSHOT_ABSENT`, `ELEMENT_NOT_ACTIONABLE`,
 `SNAPSHOT_REFERENCE_INVALID`, `SNAPSHOT_REFERENCE_STALE`,
-`PAGE_IDENTITY_CHANGED`, `SELECTOR_UNSUPPORTED`, `CREDENTIAL_FIELD_REFUSED`,
+`PAGE_IDENTITY_CHANGED`, `SELECTOR_UNSUPPORTED`, `SCREENSHOT_PATH_UNSUPPORTED`, `CREDENTIAL_FIELD_REFUSED`,
 `NAVIGATION_TARGET_REFUSED`, `NAVIGATION_FAILED`, `PAGE_CONTROL_UNVERIFIED`,
 and `UNEXPECTED_FAILURE`.
 
@@ -159,6 +162,25 @@ could go into, because a link or a button carries its own visible text as that
 name and `Log in` says what the control does rather than what a field holds. Both
 refusals name `login`, which is not callable in this slice. Warm Browser never
 types authentication material, and `--value` carries non-secret text only.
+
+## Screenshots
+
+A Screenshot is a private session-owned PNG of the Controlled Page, not the
+semantic Snapshot. It lives inside the session's own ownership lock at
+`session.lock/screenshots/`: the directory is exactly `0700`, and the image is
+exactly `0600`. The result names only the owned path, pixel dimensions, and
+SHA-256. No command anywhere accepts an output destination; one named by flag
+is refused with `SCREENSHOT_PATH_UNSUPPORTED`.
+
+Each capture clears the Screenshot the session owned before writing the new one,
+so at most one exists and a failure leaves less rather than more. A successful
+capture does not rewrite the durable receipt, which makes it provable that it
+issues no Snapshot Reference and does not change the Snapshot Generation. Before
+anything is written, the bytes must prove one complete PNG through its
+signature, IHDR, bounded dimensions, and IEND trailer, so a truncated or
+invented answer is never kept. Every Screenshot goes with the session state on
+stop and on bounded stale-session cleanup; a cleanup that cannot be completed
+fails closed and leaves the state repairable.
 
 ## Deterministic Controlled Page proof
 

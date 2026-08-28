@@ -1,9 +1,12 @@
-import { snapshotElementLimit, snapshotTextLimit } from "./bounds"
+import { Buffer } from "node:buffer"
+
+import { screenshotBase64Limit, snapshotElementLimit, snapshotTextLimit } from "./bounds"
 import { type CdpChannel, openCdpChannel } from "./cdp-channel"
 import type {
 	ControlledPageBasis,
 	ControlledPageElement,
 	PageActionOutcome,
+	PageCapture,
 	PageNavigation,
 	PageSnapshotReading,
 	UndeliverableAct,
@@ -380,6 +383,51 @@ export async function readControlledPageSnapshot(input: {
 			if (!sameBasis(before, after)) return { kind: "identity_changed" }
 			const { elements, truncated } = interpretElements(nodes, reading.descriptions)
 			return { kind: "observed", basis: after, elements, truncated }
+		},
+	)
+}
+
+/**
+ * The base64 alphabet and nothing else. Buffer's own decoder skips whatever it
+ * does not recognise, so the answer is proved to be inside the alphabet before
+ * it is decoded: bytes recovered from a string the page half-invented are not
+ * an image of anything.
+ */
+const strictBase64 = /^[A-Za-z0-9+/]+={0,2}$/
+
+/**
+ * Captures the Controlled Page as one PNG image of its viewport. Nothing
+ * beyond the viewport is asked for and no clip is named: the viewport is the
+ * one bounded surface, and a capture allowed past it would be sized by the
+ * page rather than by this Module.
+ */
+export async function captureControlledPage(input: {
+	readonly port: number
+	readonly targetId: string
+}): Promise<PageCapture> {
+	return await withControlledPage<PageCapture>(
+		input.port,
+		input.targetId,
+		{ kind: "unverified" },
+		async (channel) => {
+			if (!(await channel.call("Page.enable", {})).ok) return { kind: "unverified" }
+			const before = await readBasis(channel, input.targetId)
+			if (before === undefined) return { kind: "unverified" }
+			const captured = await channel.call("Page.captureScreenshot", { format: "png" })
+			if (!captured.ok) return { kind: "unverified" }
+			const data = record(captured.result)?.data
+			if (typeof data !== "string" || data === "" || data.length > screenshotBase64Limit) {
+				return { kind: "unverified" }
+			}
+			// The image describes the page as it was a moment ago. The identity is
+			// proved again before the bytes are decoded, exactly as the snapshot
+			// reading proves the page before it interprets anything: an image of a
+			// page that moved describes a page that is gone.
+			const after = await readBasis(channel, input.targetId)
+			if (after === undefined) return { kind: "unverified" }
+			if (!sameBasis(before, after)) return { kind: "identity_changed" }
+			if (data.length % 4 !== 0 || !strictBase64.test(data)) return { kind: "unverified" }
+			return { kind: "captured", basis: after, png: Buffer.from(data, "base64") }
 		},
 	)
 }

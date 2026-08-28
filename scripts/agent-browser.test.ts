@@ -49,6 +49,7 @@ test("Agent Browser lifecycle source follows the repository discovery contract",
 		"packages/agent-browser/tests/warm-browser.production-launch.test.ts",
 		"packages/agent-browser/tests/warm-browser.production-process-table.test.ts",
 		"packages/agent-browser/tests/warm-browser.public-process.test.ts",
+		"packages/agent-browser/tests/warm-browser.screenshot.test.ts",
 		"packages/agent-browser/tests/warm-browser.state.test.ts",
 		"plugin/bin/warm-browser",
 		"scripts/agent-browser.test.ts",
@@ -68,6 +69,7 @@ test("Agent Browser lifecycle source follows the repository discovery contract",
 	expect(glossary).toContain("**Warm Browser**")
 	expect(glossary).toContain("**Screenshot**")
 	expect(skill).toContain("`screenshot`")
+	expect(skill).toMatch(/`screenshot`, `click`, `fill`, and\s+`stop`/)
 	expect(standards).toContain("## One vocabulary owner")
 	expect(standards).toContain("## Prove the public process")
 	expect(standards).toContain("## YAGNI exclusions")
@@ -109,7 +111,7 @@ test("Agent Browser has the approved lifecycle workspace and generated activatio
 	expect(warmBrowser).toContain("one of the two Agent Browser Modules, and the implemented one")
 	expect(warmBrowser).toContain("owns the Command Vocabulary and Result Vocabulary")
 	expect(warmBrowser).toContain(
-		"`start`, `status`, `open`, `snapshot`, `click`,\n`fill`, and `stop`",
+		"`start`, `status`, `open`, `snapshot`, `screenshot`, `click`,\n`fill`, and `stop` product commands; `login` is not callable yet.",
 	)
 	expect(warmBrowser).toContain("never through a\npublic selector")
 	expect(warmBrowser).toContain("refuses a credential field from the snapshot")
@@ -124,6 +126,10 @@ test("Agent Browser has the approved lifecycle workspace and generated activatio
 	expect(warmBrowser).toContain("private session-owned PNG")
 	expect(warmBrowser).toContain("SHA-256 metadata")
 	expect(warmBrowser).toContain("refuses arbitrary output paths")
+	expect(warmBrowser).toMatch(
+		/the lock that proves the session is what proves\s+the Screenshot belongs to it/,
+	)
+	expect(warmBrowser).toMatch(/A\s+successful capture writes no durable receipt/)
 	expect(warmBrowser).toContain("production Adapter is fixed")
 	expect(warmBrowser).toContain("no factory, no injected dependency")
 	const privateDelivery = readFileSync(join(moduleRoot, "private-delivery", "README.md"), "utf8")
@@ -150,6 +156,9 @@ test("Agent Browser has the approved lifecycle workspace and generated activatio
 	expect(packageText).toContain('"playwright-core": "1.62.1"')
 	const packageReadme = readFileSync(join(packageRoot, "README.md"), "utf8")
 	expect(packageReadme).toContain("$XDG_STATE_HOME/my-second-brain/warm-browser/")
+	expect(packageReadme).toContain("## Screenshots")
+	expect(packageReadme).toContain("SCREENSHOT_PATH_UNSUPPORTED")
+	expect(packageReadme).toMatch(/A successful\s+capture does not rewrite the durable receipt/)
 	expect(packageReadme).toMatch(/Profile Cutover has not\s+happened/)
 	expect(packageReadme).toContain(
 		"AGENT_BROWSER_CDP_FIXTURE_ACKNOWLEDGED=1 bun run prove:agent-browser-cdp -- --run-id <ID>",
