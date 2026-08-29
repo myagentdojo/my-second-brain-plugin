@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process"
+import { spawn, spawnSync } from "node:child_process"
 import { existsSync, readFileSync } from "node:fs"
 import { resolve } from "node:path"
 
@@ -7,6 +7,7 @@ import { expect, test } from "bun:test"
 import {
 	chromeLaunchArguments,
 	fixtureAcknowledgementVariable,
+	guardChromeLaunchErrors,
 	parseProofOptions,
 	realChromeFixtureAcknowledged,
 } from "./prove-cdp-compatibility"
@@ -54,6 +55,30 @@ test("Chrome launch contract isolates password storage from the macOS login keyc
 	expect(arguments_.filter((argument) => argument === "--password-store=basic")).toHaveLength(1)
 	expect(arguments_.filter((argument) => argument === "--use-mock-keychain")).toHaveLength(1)
 	expect(arguments_).toContain("--user-data-dir=/private/agent-browser-fixture/profile")
+})
+
+test("asynchronous Chrome spawn errors become one redacted typed launch failure", async () => {
+	const missingExecutable = resolve(packageRoot, "fixtures", "missing-chrome")
+	const child = spawn(missingExecutable)
+	const assertLaunchHealthy = guardChromeLaunchErrors(child)
+	await new Promise<void>((resolveError) => {
+		child.once("error", () => resolveError())
+	})
+
+	try {
+		assertLaunchHealthy()
+		throw new Error("expected the launch guard to reject the observed spawn error")
+	} catch (error) {
+		expect(error).toEqual(
+			expect.objectContaining({
+				code: "CHROME_LAUNCH_FAILED",
+				message: "Google Chrome could not start its owned compatibility-proof process",
+				retrySafe: false,
+				nextAction: "Inspect the installed Chrome executable locally before retrying.",
+			}),
+		)
+		expect(String(error)).not.toContain(missingExecutable)
+	}
 })
 
 test.each([

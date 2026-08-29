@@ -251,7 +251,9 @@ The one credential wrapper is
 unavailable is its own refusal, `CREDENTIAL_WRAPPER_UNAVAILABLE`, distinct
 from a vault that could not be read, `CREDENTIAL_VAULT_UNVERIFIED`, because
 restoring the wrapper and inspecting the configured vault are different
-repairs. Before any vault access, the wrapper and the shipped Bun entry must be
+repairs. Each wrapper invocation is bounded to 30 seconds and forcibly stopped
+with `SIGKILL` if it exceeds that bound. Before any vault access, the wrapper
+and the shipped Bun entry must be
 current-user-owned regular non-symlinks with no group or world write bits, and
 their parent chains must be owned by root or the current user and resist
 replacement by another user. The wrapper alone holds the

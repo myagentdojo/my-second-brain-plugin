@@ -565,38 +565,44 @@ test(
 		// A real start reaches endpoint verification and stays there, with its
 		// durable receipt already written.
 		const started = spawnProductionCli(probe, ["start", "--run-id", "held-start"])
-		for (let attempt = 0; attempt < 2_000; attempt += 1) {
-			if (hostEffects(probe).some(({ action }) => action === "http")) break
-			await new Promise((resolve) => setTimeout(resolve, 5))
+		try {
+			for (let attempt = 0; attempt < 2_000; attempt += 1) {
+				if (hostEffects(probe).some(({ action }) => action === "http")) break
+				await new Promise((resolve) => setTimeout(resolve, 5))
+			}
+			expect(JSON.parse(readFileSync(probe.sessionPath, "utf8"))).toMatchObject({
+				phase: "starting",
+			})
+			const receiptWhileWorking = readFileSync(probe.sessionPath, "utf8")
+
+			// Wait past the bound this code used to treat as abandonment.
+			await new Promise((resolve) => setTimeout(resolve, 15_500))
+
+			const second = runProductionCli(probe, ["status", "--run-id", "second-command"])
+
+			// The start is still legally working, so the second command waits for it.
+			expect(second.exitCode).toBe(22)
+			expect(JSON.parse(second.stderr.toString())).toMatchObject({
+				resultCode: "START_IN_PROGRESS",
+				transactionState: "unchanged",
+			})
+			// It signalled nothing and removed nothing; the first start still owns it.
+			expect(hostEffects(probe).filter(({ action }) => action === "signal")).toEqual([])
+			expect(readFileSync(probe.sessionPath, "utf8")).toBe(receiptWhileWorking)
+			expect(existsSync(probe.lockPath)).toBe(true)
+
+			writeFileSync(barrier, "release\n")
+			const [exitCode, stdout] = await Promise.all([
+				started.exited,
+				new Response(started.stdout).text(),
+			])
+			expect(exitCode).toBe(0)
+			expect(JSON.parse(stdout)).toMatchObject({ resultCode: "SESSION_STARTED" })
+		} finally {
+			if (!existsSync(barrier)) writeFileSync(barrier, "release\n")
+			if (started.exitCode === null) started.kill()
+			await started.exited
 		}
-		expect(JSON.parse(readFileSync(probe.sessionPath, "utf8"))).toMatchObject({
-			phase: "starting",
-		})
-		const receiptWhileWorking = readFileSync(probe.sessionPath, "utf8")
-
-		// Wait past the bound this code used to treat as abandonment.
-		await new Promise((resolve) => setTimeout(resolve, 15_500))
-
-		const second = runProductionCli(probe, ["status", "--run-id", "second-command"])
-
-		// The start is still legally working, so the second command waits for it.
-		expect(second.exitCode).toBe(22)
-		expect(JSON.parse(second.stderr.toString())).toMatchObject({
-			resultCode: "START_IN_PROGRESS",
-			transactionState: "unchanged",
-		})
-		// It signalled nothing and removed nothing; the first start still owns it.
-		expect(hostEffects(probe).filter(({ action }) => action === "signal")).toEqual([])
-		expect(readFileSync(probe.sessionPath, "utf8")).toBe(receiptWhileWorking)
-		expect(existsSync(probe.lockPath)).toBe(true)
-
-		writeFileSync(barrier, "release\n")
-		const [exitCode, stdout] = await Promise.all([
-			started.exited,
-			new Response(started.stdout).text(),
-		])
-		expect(exitCode).toBe(0)
-		expect(JSON.parse(stdout)).toMatchObject({ resultCode: "SESSION_STARTED" })
 	},
 	40_000,
 )
@@ -643,32 +649,38 @@ test("a start that passed the tombstone precheck refuses once a cleanup detaches
 	// The starter passes the tombstone precheck against a clean state root, then
 	// is held in the window immediately before it acquires ownership.
 	const started = spawnProductionCli(probe, ["start", "--run-id", "acquire-race"])
-	await waitForPortInspection(probe)
-	expect(existsSync(probe.lockPath)).toBe(false)
+	try {
+		await waitForPortInspection(probe)
+		expect(existsSync(probe.lockPath)).toBe(false)
 
-	// Another owner's cleanup detaches its lock into a tombstone and then fails,
-	// which is the exact state the held starter must refuse to acquire into.
-	mkdirSync(join(probe.sessionRoot, ".cleanup-old-session"), { recursive: true, mode: 0o700 })
-	writeFileSync(barrier, "release\n")
+		// Another owner's cleanup detaches its lock into a tombstone and then fails,
+		// which is the exact state the held starter must refuse to acquire into.
+		mkdirSync(join(probe.sessionRoot, ".cleanup-old-session"), { recursive: true, mode: 0o700 })
+		writeFileSync(barrier, "release\n")
 
-	const [exitCode, stdout, stderr] = await Promise.all([
-		started.exited,
-		new Response(started.stdout).text(),
-		new Response(started.stderr).text(),
-	])
+		const [exitCode, stdout, stderr] = await Promise.all([
+			started.exited,
+			new Response(started.stdout).text(),
+			new Response(started.stderr).text(),
+		])
 
-	expect(exitCode).toBe(20)
-	expect(stdout).toBe("")
-	expect(JSON.parse(stderr)).toMatchObject({
-		resultCode: "STATE_UNSAFE",
-		transactionState: "unchanged",
-	})
-	// It refused before writing any receipt and before launching anything.
-	expect(existsSync(probe.sessionPath)).toBe(false)
-	expect(existsSync(probe.lockPath)).toBe(false)
-	expect(hostEffects(probe).filter(({ action }) => action === "spawn")).toEqual([])
-	// The other owner's tombstone is left exactly as its cleanup left it.
-	expect(existsSync(join(probe.sessionRoot, ".cleanup-old-session"))).toBe(true)
+		expect(exitCode).toBe(20)
+		expect(stdout).toBe("")
+		expect(JSON.parse(stderr)).toMatchObject({
+			resultCode: "STATE_UNSAFE",
+			transactionState: "unchanged",
+		})
+		// It refused before writing any receipt and before launching anything.
+		expect(existsSync(probe.sessionPath)).toBe(false)
+		expect(existsSync(probe.lockPath)).toBe(false)
+		expect(hostEffects(probe).filter(({ action }) => action === "spawn")).toEqual([])
+		// The other owner's tombstone is left exactly as its cleanup left it.
+		expect(existsSync(join(probe.sessionRoot, ".cleanup-old-session"))).toBe(true)
+	} finally {
+		if (!existsSync(barrier)) writeFileSync(barrier, "release\n")
+		if (started.exitCode === null) started.kill()
+		await started.exited
+	}
 })
 
 /**

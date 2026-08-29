@@ -94,6 +94,7 @@ export interface AdmittedDependency {
 	version: string
 	license: string
 	licenseText?: string
+	noticeText?: string
 }
 
 /** One materialized bundle identity owned by the generated inventory. */
@@ -1217,6 +1218,15 @@ function readLicenseText(directory: string): string | undefined {
 	return undefined
 }
 
+function readNoticeText(directory: string): string | undefined {
+	for (const entry of readdirSync(directory).sort(compareCodeUnits)) {
+		if (/^notice(\.(md|txt))?$/i.test(entry)) {
+			return readFileSync(join(directory, entry), "utf8")
+		}
+	}
+	return undefined
+}
+
 /**
  * Admit only pure-JavaScript, lifecycle-free, permissively licensed dependencies from the frozen lock.
  *
@@ -1353,6 +1363,7 @@ export function admitDependencyClosure(root: string): AdmittedDependency[] {
 			version,
 			license: manifest.license,
 			licenseText: readLicenseText(packageDirectory),
+			noticeText: readNoticeText(packageDirectory),
 		})
 	}
 	}
@@ -1374,9 +1385,11 @@ export function renderThirdPartyNotices(dependencies: AdmittedDependency[]): str
 	const sections = dependencies.map((dependency) => {
 		const heading = `## ${dependency.name}@${dependency.version} (${dependency.license})`
 		const text = dependency.licenseText?.replace(/\r\n?/g, "\n").trimEnd()
-		return text
+		const licenseSection = text
 			? `${heading}\n\n${text}\n`
 			: `${heading}\n\nLicense text not distributed by the package.\n`
+		const notice = dependency.noticeText?.replace(/\r\n?/g, "\n").trimEnd()
+		return notice ? `${licenseSection}\n### Upstream NOTICE\n\n${notice}\n` : licenseSection
 	})
 	return `# Third-Party Notices\n\nGenerated from bun.lock. Edit workspace dependencies, run bun install, then bun run build.\n\n${sections.join("\n")}`
 }

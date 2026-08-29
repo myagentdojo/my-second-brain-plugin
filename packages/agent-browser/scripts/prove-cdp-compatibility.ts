@@ -186,6 +186,24 @@ async function terminateOwnedChrome(child: ChildProcess | undefined, force = fal
 	return waitForProcessGroupExit(pid, 5_000)
 }
 
+export function guardChromeLaunchErrors(
+	child: Pick<ChildProcess, "once">,
+): () => void {
+	let launchFailed = false
+	child.once("error", () => {
+		launchFailed = true
+	})
+	return () => {
+		if (!launchFailed) return
+		throw new ProofFailure(
+			"CHROME_LAUNCH_FAILED",
+			"Google Chrome could not start its owned compatibility-proof process",
+			false,
+			"Inspect the installed Chrome executable locally before retrying.",
+		)
+	}
+}
+
 async function readIndependentCdpTarget(endpoint: string): Promise<{
 	browser: string
 	protocolVersion: string
@@ -214,10 +232,15 @@ async function readIndependentCdpTarget(endpoint: string): Promise<{
 	return { browser, protocolVersion }
 }
 
-async function waitForCdpEndpoint(profileRoot: string, child: ChildProcess): Promise<string> {
+async function waitForCdpEndpoint(
+	profileRoot: string,
+	child: ChildProcess,
+	assertLaunchHealthy: () => void,
+): Promise<string> {
 	const activePortPath = join(profileRoot, "DevToolsActivePort")
 	const deadline = Date.now() + 15_000
 	while (Date.now() < deadline) {
+		assertLaunchHealthy()
 		if (child.exitCode !== null) {
 			throw new ProofFailure(
 				"CHROME_LAUNCH_FAILED",
@@ -235,6 +258,7 @@ async function waitForCdpEndpoint(profileRoot: string, child: ChildProcess): Pro
 		}
 		await Bun.sleep(50)
 	}
+	assertLaunchHealthy()
 	throw new ProofFailure(
 		"CDP_ENDPOINT_UNAVAILABLE",
 		"Google Chrome did not publish a valid explicit CDP endpoint within the bounded wait",
@@ -332,7 +356,9 @@ export async function proveCdpCompatibility(options: ProofOptions): Promise<Reco
 				stdio: "ignore",
 			},
 		)
+		const assertLaunchHealthy = guardChromeLaunchErrors(child)
 		child.unref()
+		assertLaunchHealthy()
 		if (child.pid === undefined) {
 			throw new ProofFailure(
 				"CHROME_LAUNCH_FAILED",
@@ -342,7 +368,8 @@ export async function proveCdpCompatibility(options: ProofOptions): Promise<Reco
 			)
 		}
 
-		const endpoint = await waitForCdpEndpoint(profileRoot, child)
+		const endpoint = await waitForCdpEndpoint(profileRoot, child, assertLaunchHealthy)
+		assertLaunchHealthy()
 		let independentTarget: Awaited<ReturnType<typeof readIndependentCdpTarget>>
 		try {
 			independentTarget = await readIndependentCdpTarget(endpoint)

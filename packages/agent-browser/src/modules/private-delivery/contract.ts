@@ -13,6 +13,12 @@ export const privateDeliveryChildReplyLimit = 4_096
 /** The longest credential wrapper output one reading may take in. */
 export const credentialWrapperOutputLimit = 1_048_576
 
+/** The longest one credential-wrapper process may run before forced termination. */
+export const credentialWrapperTimeoutMs = 30_000
+
+/** The unignorable signal used when one credential-wrapper process exceeds its bound. */
+export const credentialWrapperKillSignal = "SIGKILL" as const
+
 /**
  * What one private delivery came to.
  *

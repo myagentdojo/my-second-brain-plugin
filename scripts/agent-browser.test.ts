@@ -178,6 +178,11 @@ test("Agent Browser has the approved lifecycle workspace and generated activatio
 	expect(packageReadme).toMatch(
 		/Retiring the\s+installed Agent Chrome launcher app and starting Warm Browser on the real\s+profile are separate live operations, and this package does not claim them/,
 	)
+	const skillText = readFileSync(join(root, "plugin", "skills", "agent-browser", "SKILL.md"), "utf8")
+	expect(skillText).toContain("Profile Cutover has happened in source")
+	expect(skillText).toMatch(
+		/Installation, a real-profile launch, retirement of the installed Agent Chrome\s+launcher, and release remain separate live operations/,
+	)
 	expect(packageReadme).toMatch(
 		/A row claims the profile when it carries\s+`--user-data-dir` with that path attached or separated, quoted or bare/,
 	)

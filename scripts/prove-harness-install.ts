@@ -1306,7 +1306,19 @@ export function proveInstalledCapabilityEvidence(
 		}
 		const matches = launchers.filter((launcherName) => {
 			const contents = readFileSync(join(pluginRoot, "bin", launcherName), "utf8")
-			return contents.includes(`runtime/runtime-exec\" run ${skillId} --`)
+			// Deliberate independent oracle: exact bytes prove the runtime command is
+			// the launcher's executed command, rather than text hidden in a comment or
+			// another non-executing shell construct.
+			return contents === `#!/bin/sh
+# Generated from runtime/skill-catalog.json. Edit the source, then run bun run generate.
+set -eu
+case "$0" in
+*/*) launcher_dir=\${0%/*} ;;
+*) launcher_dir=. ;;
+esac
+plugin_root=$(CDPATH='' cd -- "$launcher_dir/.." && pwd -P)
+exec "$plugin_root/runtime/runtime-exec" run ${skillId} -- "$@"
+`
 		})
 		if (matches.length !== 1 || claimedLaunchers.has(matches[0]!)) {
 			throw new Error(`${client} installed launcher inventory differs`)

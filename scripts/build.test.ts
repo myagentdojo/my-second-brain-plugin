@@ -401,6 +401,9 @@ test("dependency admission returns the pure-JavaScript permissive-license closur
 			dependency.name === "playwright-core" ? "Apache License" : "Permission",
 		)
 	}
+	expect(
+		dependencies.find((dependency) => dependency.name === "playwright-core")?.noticeText,
+	).toContain("Puppeteer project")
 })
 
 function admissionFixture(options: {
@@ -1044,6 +1047,20 @@ test("third-party notices normalize CRLF license text to repository LF", () => {
 	])
 	expect(notices).not.toContain("\r")
 	expect(notices).toContain("First license line\nSecond license line\n")
+})
+
+test("third-party notices carry and normalize upstream attribution notices", () => {
+	const notices = renderThirdPartyNotices([
+		{
+			name: "playwright-core",
+			version: "1.62.1",
+			license: "Apache-2.0",
+			licenseText: "Apache License\n",
+			noticeText: "Playwright\r\nDerived from Puppeteer.\r\n",
+		},
+	])
+	expect(notices).toContain("### Upstream NOTICE\n\nPlaywright\nDerived from Puppeteer.\n")
+	expect(notices).not.toContain("\r")
 })
 
 test("a phantom bare import fails with a precise unresolved-import error", async () => {

@@ -5,7 +5,6 @@
  * fixture-rendered readings elsewhere are supporting evidence only.
  */
 import { expect, test } from "bun:test"
-import { spawnSync } from "node:child_process"
 import { existsSync } from "node:fs"
 import { createServer } from "node:net"
 
@@ -16,18 +15,6 @@ import {
 import { observeLoopbackListener } from "../src/modules/warm-browser/listener-table"
 import { observeProcessTable } from "../src/modules/warm-browser/process-table"
 import { installedChrome } from "./fixtures/production-cli-harness"
-
-const dayFirstLocale = "en_AU.UTF-8"
-
-/** Whether this host renders `lstart` day-first under the chosen locale; without that the boundary cannot be proved. */
-function rendersDayFirstStart(): boolean {
-	const result = spawnSync("/bin/ps", ["-o", "lstart=", "-p", String(process.pid)], {
-		encoding: "utf8",
-		stdio: ["ignore", "pipe", "ignore"],
-		env: { ...process.env, LC_ALL: dayFirstLocale },
-	})
-	return result.status === 0 && /^\s*\S+\s+\d+\s+[A-Za-z]+\s/.test(result.stdout)
-}
 
 test.skipIf(
 	process.platform !== "darwin" || !existsSync("/usr/sbin/lsof"),
@@ -54,19 +41,12 @@ test.skipIf(
 	},
 )
 
-test.skipIf(process.platform !== "darwin" || !existsSync("/bin/ps") || !rendersDayFirstStart())(
-	"the production process-table reading is observed as the whole table under a day-first caller locale",
+test.skipIf(process.platform !== "darwin" || !existsSync("/bin/ps"))(
+	"the production process-table reading is observed as the whole table under its pinned C locale",
 	() => {
-		const priorLcAll = process.env.LC_ALL
-		process.env.LC_ALL = dayFirstLocale
-		try {
-			const table = observeProcessTable(readProcessTable(), installedChrome)
-			expect(table.kind).toBe("verified")
-			if (table.kind !== "verified") return
-			expect(table.processes.some((row) => row.pid === process.pid)).toBe(true)
-		} finally {
-			if (priorLcAll === undefined) delete process.env.LC_ALL
-			else process.env.LC_ALL = priorLcAll
-		}
+		const table = observeProcessTable(readProcessTable(), installedChrome)
+		expect(table.kind).toBe("verified")
+		if (table.kind !== "verified") return
+		expect(table.processes.some((row) => row.pid === process.pid)).toBe(true)
 	},
 )

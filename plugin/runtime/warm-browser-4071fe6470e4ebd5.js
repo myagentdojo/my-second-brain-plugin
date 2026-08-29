@@ -657,7 +657,7 @@ async function actOnControlledPage(input) {
 
 // packages/agent-browser/src/modules/private-delivery/field-kind.ts
 var passwordAutocompleteTokens = ["current-password", "new-password"];
-var passwordIdentifierFragments = [
+var passwordIdentifierTokens = [
   "password",
   "passwd",
   "passphrase",
@@ -665,20 +665,23 @@ var passwordIdentifierFragments = [
   "pwd"
 ];
 var usernameAutocompleteTokens = ["username"];
-var usernameIdentifierFragments = ["username", "userid", "login", "email"];
+var usernameIdentifierTokens = ["username", "userid", "login", "email"];
+function identifierTokens(value) {
+  return value.trim().toLowerCase().split(/[^a-z0-9]+/).filter((token) => token !== "");
+}
 function credentialFieldKind(description, accessibleName = "") {
   if (attributeToken(description, "type") === "password")
     return "password";
   const autocomplete = attributeToken(description, "autocomplete").split(/\s+/);
-  const heard = isEditableField(description) ? normalise(accessibleName) : "";
-  const identifier = [
-    ...identifierAttributes.map((attribute) => normalise(description.attributes[attribute] ?? "")),
-    heard
-  ].join(" ");
-  if (autocomplete.some((token) => passwordAutocompleteTokens.includes(token)) || passwordIdentifierFragments.some((fragment) => identifier.includes(fragment))) {
+  const heard = isEditableField(description) ? identifierTokens(accessibleName) : [];
+  const identifiers = [
+    ...identifierAttributes.flatMap((attribute) => identifierTokens(description.attributes[attribute] ?? "")),
+    ...heard
+  ];
+  if (autocomplete.some((token) => passwordAutocompleteTokens.includes(token)) || identifiers.some((token) => passwordIdentifierTokens.includes(token))) {
     return "password";
   }
-  if (autocomplete.some((token) => usernameAutocompleteTokens.includes(token)) || usernameIdentifierFragments.some((fragment) => identifier.includes(fragment))) {
+  if (autocomplete.some((token) => usernameAutocompleteTokens.includes(token)) || identifiers.some((token) => usernameIdentifierTokens.includes(token))) {
     return "username";
   }
   return;
@@ -1052,6 +1055,8 @@ function readCredentialVaultConfiguration(environment = process.env) {
 // packages/agent-browser/src/modules/private-delivery/contract.ts
 var privateDeliveryChildReplyLimit = 4096;
 var credentialWrapperOutputLimit = 1048576;
+var credentialWrapperTimeoutMs = 30000;
+var credentialWrapperKillSignal = "SIGKILL";
 var privateDeliveryChildOutcomes = [
   "delivered",
   "superseded",
@@ -1070,7 +1075,9 @@ function runVaultCommand(wrapper, argumentList) {
   const result = spawnSync(wrapper, [...argumentList], {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "ignore"],
-    maxBuffer: credentialWrapperOutputLimit
+    maxBuffer: credentialWrapperOutputLimit,
+    timeout: credentialWrapperTimeoutMs,
+    killSignal: credentialWrapperKillSignal
   });
   return {
     status: result.status,
@@ -1083,7 +1090,9 @@ function runPrivateDelivery(input) {
   const result = spawnSync(input.wrapper, ["inject-stdin", input.reference, "--", ...input.command], {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
-    maxBuffer: credentialWrapperOutputLimit
+    maxBuffer: credentialWrapperOutputLimit,
+    timeout: credentialWrapperTimeoutMs,
+    killSignal: credentialWrapperKillSignal
   });
   return {
     status: result.status,
@@ -1199,6 +1208,10 @@ function declaresExactOrigin(item, origin) {
 // packages/agent-browser/src/modules/private-delivery/private-delivery.ts
 var credentialWrapperPath = join2(homedir(), "code/dotfiles/bin/with-one-password-token");
 var reservedWrapperExits = [2, 3, 4, 5, 70];
+var credentialFieldPurposes = {
+  username: "USERNAME",
+  password: "PASSWORD"
+};
 var referenceSafeSegment = /^[A-Za-z0-9_.-]{1,128}$/;
 var writableByAnotherUserMask = 18;
 var stickyDirectoryMask = 512;
@@ -1372,7 +1385,7 @@ async function deliverPrivately(input) {
     return { kind: "vault_mismatch" };
   if (!declaresExactOrigin(matched, input.origin))
     return { kind: "vault_unverified" };
-  const purpose = input.field === "username" ? "USERNAME" : "PASSWORD";
+  const purpose = credentialFieldPurposes[input.field];
   const selected = matched.fields.filter((field) => field.purpose === purpose && field.id !== "");
   if (selected.length !== 1)
     return { kind: "field_ambiguous" };

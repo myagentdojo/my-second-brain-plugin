@@ -1,6 +1,10 @@
 import { spawnSync } from "node:child_process"
 
-import { credentialWrapperOutputLimit } from "./contract"
+import {
+	credentialWrapperKillSignal,
+	credentialWrapperOutputLimit,
+	credentialWrapperTimeoutMs,
+} from "./contract"
 
 /**
  * Every raw credential-wrapper effect Private Delivery performs: one vault
@@ -42,6 +46,8 @@ export function runVaultCommand(
 		encoding: "utf8",
 		stdio: ["ignore", "pipe", "ignore"],
 		maxBuffer: credentialWrapperOutputLimit,
+		timeout: credentialWrapperTimeoutMs,
+		killSignal: credentialWrapperKillSignal,
 	})
 	return {
 		status: result.status,
@@ -76,6 +82,8 @@ export function runPrivateDelivery(input: {
 			encoding: "utf8",
 			stdio: ["ignore", "pipe", "pipe"],
 			maxBuffer: credentialWrapperOutputLimit,
+			timeout: credentialWrapperTimeoutMs,
+			killSignal: credentialWrapperKillSignal,
 		},
 	)
 	return {

@@ -3,7 +3,6 @@ import {
 	type DomNodeDescription,
 	identifierAttributes,
 	isEditableField,
-	normalise,
 } from "../warm-browser/credential-fields"
 
 /**
@@ -31,8 +30,8 @@ export type CredentialFieldKind = "username" | "password"
 /** Autocomplete tokens the platform reserves for the password half. */
 const passwordAutocompleteTokens = ["current-password", "new-password"] as const
 
-/** Identifier fragments that name the password half. */
-const passwordIdentifierFragments = [
+/** Whole identifier tokens that name the password half. */
+const passwordIdentifierTokens = [
 	"password",
 	"passwd",
 	"passphrase",
@@ -43,8 +42,22 @@ const passwordIdentifierFragments = [
 /** The autocomplete token the platform reserves for the account-name half. */
 const usernameAutocompleteTokens = ["username"] as const
 
-/** Identifier fragments that name the account-name half. */
-const usernameIdentifierFragments = ["username", "userid", "login", "email"] as const
+/** Whole identifier tokens that name the account-name half. */
+const usernameIdentifierTokens = ["username", "userid", "login", "email"] as const
+
+/**
+ * Reads page-provided identifier words without inventing camel-case
+ * boundaries. `password-field` carries the whole token `password`, while
+ * `passwordHint` and `notpassword` do not: those longer names are not a
+ * definitive statement that the field itself receives a password.
+ */
+function identifierTokens(value: string): string[] {
+	return value
+		.trim()
+		.toLowerCase()
+		.split(/[^a-z0-9]+/)
+		.filter((token) => token !== "")
+}
 
 /**
  * Classifies one field as one half of the credential pair, or as neither.
@@ -59,16 +72,20 @@ export function credentialFieldKind(
 ): CredentialFieldKind | undefined {
 	if (attributeToken(description, "type") === "password") return "password"
 	const autocomplete = attributeToken(description, "autocomplete").split(/\s+/)
-	const heard = isEditableField(description) ? normalise(accessibleName) : ""
-	const identifier = [
-		...identifierAttributes.map((attribute) => normalise(description.attributes[attribute] ?? "")),
-		heard,
-	].join(" ")
+	const heard = isEditableField(description) ? identifierTokens(accessibleName) : []
+	const identifiers = [
+		...identifierAttributes.flatMap((attribute) =>
+			identifierTokens(description.attributes[attribute] ?? "")
+		),
+		...heard,
+	]
 	if (
 		autocomplete.some((token) =>
 			(passwordAutocompleteTokens as readonly string[]).includes(token)
 		) ||
-		passwordIdentifierFragments.some((fragment) => identifier.includes(fragment))
+		identifiers.some((token) =>
+			(passwordIdentifierTokens as readonly string[]).includes(token)
+		)
 	) {
 		return "password"
 	}
@@ -76,7 +93,9 @@ export function credentialFieldKind(
 		autocomplete.some((token) =>
 			(usernameAutocompleteTokens as readonly string[]).includes(token)
 		) ||
-		usernameIdentifierFragments.some((fragment) => identifier.includes(fragment))
+		identifiers.some((token) =>
+			(usernameIdentifierTokens as readonly string[]).includes(token)
+		)
 	) {
 		return "username"
 	}

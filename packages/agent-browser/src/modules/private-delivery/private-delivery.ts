@@ -55,6 +55,12 @@ const credentialWrapperPath = join(homedir(), "code/dotfiles/bin/with-one-passwo
  */
 const reservedWrapperExits = [2, 3, 4, 5, 70] as const
 
+/** The one exhaustive mapping from a requested credential half to its Login purpose. */
+const credentialFieldPurposes: Record<CredentialFieldKind, "USERNAME" | "PASSWORD"> = {
+	username: "USERNAME",
+	password: "PASSWORD",
+}
+
 /**
  * The one shape a secret-reference segment may take.
  *
@@ -324,7 +330,7 @@ export async function deliverPrivately(input: {
 	if (matched.id !== matchedCandidate.id) return { kind: "vault_unverified" }
 	if (matched.vaultId !== vault && matched.vaultName !== vault) return { kind: "vault_mismatch" }
 	if (!declaresExactOrigin(matched, input.origin)) return { kind: "vault_unverified" }
-	const purpose = input.field === "username" ? "USERNAME" : "PASSWORD"
+	const purpose = credentialFieldPurposes[input.field]
 	const selected = matched.fields.filter((field) => field.purpose === purpose && field.id !== "")
 	if (selected.length !== 1) return { kind: "field_ambiguous" }
 	// The reference names the vault, the item, and the field by id, never by

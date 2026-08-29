@@ -308,12 +308,12 @@ test("approval provably precedes credential access", async () => {
 })
 
 test.each([
-	["password", 1, "Email"],
-	["username", 2, "Password"],
-	["username", 4, "Search"],
+	["password", "Email", 1],
+	["username", "Password", 2],
+	["username", "Search", 4],
 ] as const)(
 	"asking %s of the %s field is a mismatch decided before any vault access",
-	async (field, elementIndex, _label) => {
+	async (field, _label, elementIndex) => {
 		const { probe, snapshot } = await signInProbe()
 		// The vault is configured and would match, so a mismatch that slipped past
 		// the field gate would show up below as a recorded vault reading.
@@ -344,6 +344,56 @@ test.each([
 			message: "The referenced live field is not a credential field of the requested kind.",
 		})
 		expect(vaultActions(probe)).toEqual([])
+	},
+)
+
+test.each([
+	["passwordHint", "password", "Hint"],
+	["notpassword", "password", "Account note"],
+	["emailPreferences", "username", "Preferences"],
+] as const)(
+	"the deceptive identifier %s does not classify its field as %s",
+	async (identifier, field, accessibleName) => {
+		const { probe, snapshot } = await signInProbe({
+			elements: [
+				{
+					backendNodeId: 21,
+					role: "textbox",
+					name: accessibleName,
+					nodeName: "INPUT",
+					attributes: { type: "text", name: identifier },
+					box: [10, 20, 200, 24],
+				},
+			],
+		})
+		configureCredentialVault(probe, "Agent Vault")
+		writeCredentialPlan(probe, oneItemPlan(["https://fixture.test"]))
+
+		const result = await runProductionCliAsync(probe, [
+			"login",
+			"--ref",
+			snapshot.elements[0]!.ref,
+			"--field",
+			field,
+			"--human-approved",
+			"--run-id",
+			"login-deceptive-identifier",
+		])
+
+		expectError(result, 21, {
+			schemaVersion: 1,
+			status: "error",
+			command: "login",
+			resultCode: "LOGIN_FIELD_MISMATCH",
+			runId: "login-deceptive-identifier",
+			transactionState: "unchanged",
+			retrySafe: false,
+			nextAction:
+				"Run warm-browser snapshot --run-id ID and select the credential field of the requested kind.",
+			message: "The referenced live field is not a credential field of the requested kind.",
+		})
+		expect(vaultActions(probe)).toEqual([])
+		expect(deliveryActions(probe)).toEqual([])
 	},
 )
 

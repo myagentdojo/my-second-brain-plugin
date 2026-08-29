@@ -498,6 +498,32 @@ test("installed capability evidence rejects a bundled model-only tour", () => {
 	}
 })
 
+test("installed capability evidence rejects a launcher token present only in a comment", () => {
+	const temporaryRoot = mkdtempSync(join(tmpdir(), "installed-capability-launcher-comment-"))
+	const pluginRoot = join(temporaryRoot, "plugin")
+	try {
+		cpSync(join(root, "plugin"), pluginRoot, { recursive: true })
+		const launcherPath = join(pluginRoot, "bin", "hello-world")
+		const executableCommand =
+			'exec "$plugin_root/runtime/runtime-exec" run hello-world -- "$@"'
+		const launcher = readFileSync(launcherPath, "utf8")
+		expect(launcher).toContain(executableCommand)
+		writeFileSync(launcherPath, launcher.replace(executableCommand, `# ${executableCommand}`))
+		const candidatePayloadHash = runtimeClosureEvidence(pluginRoot).payloadHash
+
+		expect(() =>
+			proveInstalledCapabilityEvidence(
+				pluginRoot,
+				"claude",
+				"a".repeat(40),
+				candidatePayloadHash,
+			),
+		).toThrow("installed launcher inventory differs")
+	} finally {
+		rmSync(temporaryRoot, { recursive: true, force: true })
+	}
+})
+
 test("release proof requires both native harness CLIs", () => {
 	const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8"))
 	expect(packageJson.scripts["prove:harness-install"]).toBe(

@@ -73,7 +73,8 @@ Maturity: `private-login-slice`. The generated payload activates Warm Browser
 beside the password, and routes it to
 `warm-browser login --ref REFERENCE --field KIND --human-approved --run-id ID`,
 which delivers one Credential Match field through Private Delivery without the
-credential entering the agent process. Profile Cutover, installation, and
-release remain separate tickets.
-Do not claim profile exclusivity or a real-profile launch until their owning
-proofs complete.
+credential entering the agent process. Profile Cutover has happened in source.
+Installation, a real-profile launch, retirement of the installed Agent Chrome
+launcher, and release remain separate live operations.
+Claim profile exclusivity or a real-profile launch only after its owning proof
+completes.
