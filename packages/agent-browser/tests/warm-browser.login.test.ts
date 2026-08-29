@@ -1,5 +1,14 @@
 import { afterEach, expect, test } from "bun:test"
-import { chmodSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs"
+import {
+	chmodSync,
+	cpSync,
+	mkdtempSync,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+} from "node:fs"
+import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import type { CdpPageFixtureOptions } from "./fixtures/cdp-page-fixture"
@@ -45,7 +54,21 @@ import {
 afterEach(() => {
 	stopControlledPageFixtures()
 	removeProductionCliProbes()
+	for (const root of copiedPackageRoots.splice(0)) rmSync(root, { recursive: true, force: true })
 })
+
+const copiedPackageRoots: string[] = []
+
+/** One private package copy whose entry permissions a test may safely perturb. */
+function copiedPackage(): string {
+	const root = mkdtempSync(join(tmpdir(), "agent-browser-entry-custody-"))
+	copiedPackageRoots.push(root)
+	chmodSync(root, 0o700)
+	mkdirSync(join(root, "tests"), { mode: 0o700 })
+	cpSync(join(packageRoot, "src"), join(root, "src"), { recursive: true })
+	cpSync(join(packageRoot, "tests/fixtures"), join(root, "tests/fixtures"), { recursive: true })
+	return root
+}
 
 /**
  * The one secret these proofs deliver. It is owned by this file alone, and its
@@ -360,11 +383,16 @@ test("a credential field inside a frame is refused before any vault access", asy
 	expect(vaultActions(probe)).toEqual([])
 })
 
-test("a page with no exact origin is refused with the vault never spoken to", async () => {
-	// about:blank is a real page a Browser Session can hold, and it has no
-	// exact http or https origin, so it has nothing a Credential Match could
-	// be equal to.
-	const { probe, snapshot } = await signInProbe({ url: "about:blank" })
+test.each([
+	["about:blank", "login-no-origin"],
+	["http://fixture.test/sign-in", "login-insecure-origin"],
+	["http://localhost:9311/login", "login-localhost-alias"],
+	["http://127.1:9311/login", "login-numeric-loopback-alias"],
+] as const)("a page at %s is refused before the vault is spoken to", async (url, runId) => {
+	// Independent oracle: neither a non-origin page nor remote HTTP is eligible
+	// for Private Delivery. The literal table does not reuse the production
+	// predicate that enforces that boundary.
+	const { probe, snapshot } = await signInProbe({ url })
 	configureCredentialVault(probe, "Agent Vault")
 	writeCredentialPlan(probe, oneItemPlan(["https://fixture.test"]))
 
@@ -376,7 +404,7 @@ test("a page with no exact origin is refused with the vault never spoken to", as
 		"password",
 		"--human-approved",
 		"--run-id",
-		"login-no-origin",
+		runId,
 	])
 
 	expectError(result, 21, {
@@ -384,15 +412,41 @@ test("a page with no exact origin is refused with the vault never spoken to", as
 		status: "error",
 		command: "login",
 		resultCode: "ORIGIN_UNSUPPORTED",
-		runId: "login-no-origin",
+		runId,
 		transactionState: "unchanged",
 		retrySafe: false,
 		nextAction:
-			"Run warm-browser open --url URL --run-id ID with an http or https address, then retry login.",
-		message: "The Controlled Page has no exact http or https origin.",
+			"Run warm-browser open --url URL --run-id ID with an HTTPS address, or 127.0.0.1 or [::1] HTTP for local testing, then retry login.",
+		message: "The Controlled Page must use HTTPS, except for literal 127.0.0.1 or [::1] HTTP.",
 	})
 	expect(vaultActions(probe)).toEqual([])
 	expect(deliveryActions(probe)).toEqual([])
+})
+
+test.each([
+	["http://127.0.0.1:9311", "login-ipv4-loopback-origin"],
+	["http://[::1]:9311", "login-ipv6-loopback-origin"],
+] as const)("a literal loopback HTTP origin at %s remains eligible for local login", async (origin, runId) => {
+	const { fixture, probe, snapshot } = await signInProbe({ url: `${origin}/login` })
+	configureCredentialVault(probe, "Agent Vault")
+	writeCredentialPlan(probe, oneItemPlan([origin]))
+
+	const result = await runProductionCliAsync(probe, [
+		"login",
+		"--ref",
+		snapshot.elements[2]!.ref,
+		"--field",
+		"password",
+		"--human-approved",
+		"--run-id",
+		runId,
+	])
+
+	expect(result.stderr).toBe("")
+	expect(result.exitCode).toBe(0)
+	expect(JSON.parse(result.stdout).resultCode).toBe("LOGIN_FIELD_DELIVERED")
+	expect(vaultActions(probe)).toHaveLength(2)
+	expect(fixture.insertedText()).toEqual([sentinel])
 })
 
 test("a reference from an earlier generation or from no generation is refused", async () => {
@@ -577,6 +631,115 @@ test("a missing wrapper refuses by name with the vault never spoken to", async (
 		retrySafe: false,
 		nextAction: "Restore the with-one-password-token wrapper before retrying.",
 		message: "The one credential wrapper Private Delivery invokes is unavailable.",
+	})
+	expect(vaultActions(probe)).toEqual([])
+	expect(deliveryActions(probe)).toEqual([])
+})
+
+test.each([
+	["group-writable wrapper", "wrapper", 0o720, "login-group-writable-wrapper"],
+	["world-writable wrapper", "wrapper", 0o702, "login-world-writable-wrapper"],
+	["replaceable wrapper parent", "parent", 0o777, "login-replaceable-wrapper-parent"],
+] as const)("a %s is refused before vault access", async (_name, target, mode, runId) => {
+	const { probe, snapshot } = await signInProbe()
+	configureCredentialVault(probe, "Agent Vault")
+	writeCredentialPlan(probe, oneItemPlan(["https://fixture.test"]))
+	chmodSync(
+		target === "wrapper"
+			? join(probe.home, "code/dotfiles/bin/with-one-password-token")
+			: join(probe.home, "code/dotfiles/bin"),
+		mode,
+	)
+
+	const result = await runProductionCliAsync(probe, [
+		"login",
+		"--ref",
+		snapshot.elements[2]!.ref,
+		"--field",
+		"password",
+		"--human-approved",
+		"--run-id",
+		runId,
+	])
+
+	expectError(result, 20, {
+		schemaVersion: 1,
+		status: "error",
+		command: "login",
+		resultCode: "CREDENTIAL_WRAPPER_UNAVAILABLE",
+		runId,
+		transactionState: "unchanged",
+		retrySafe: false,
+		nextAction: "Restore the with-one-password-token wrapper before retrying.",
+		message: "The one credential wrapper Private Delivery invokes is unavailable.",
+	})
+	expect(vaultActions(probe)).toEqual([])
+	expect(deliveryActions(probe)).toEqual([])
+})
+
+test("a sticky writable wrapper directory preserves another user's exclusion", async () => {
+	const { fixture, probe, snapshot } = await signInProbe()
+	configureCredentialVault(probe, "Agent Vault")
+	writeCredentialPlan(probe, oneItemPlan(["https://fixture.test"]))
+	chmodSync(join(probe.home, "code/dotfiles/bin"), 0o1777)
+
+	const result = await runProductionCliAsync(probe, [
+		"login",
+		"--ref",
+		snapshot.elements[2]!.ref,
+		"--field",
+		"password",
+		"--human-approved",
+		"--run-id",
+		"login-sticky-wrapper-parent",
+	])
+
+	expect(result.stderr).toBe("")
+	expect(result.exitCode).toBe(0)
+	expect(JSON.parse(result.stdout).resultCode).toBe("LOGIN_FIELD_DELIVERED")
+	expect(vaultActions(probe)).toHaveLength(2)
+	expect(fixture.insertedText()).toEqual([sentinel])
+})
+
+test.each([
+	["entry", 0o664, "login-group-writable-entry"],
+	["parent", 0o777, "login-replaceable-entry-parent"],
+] as const)("a writable shipped %s is refused before vault access", async (target, mode, runId) => {
+	const root = copiedPackage()
+	chmodSync(target === "entry" ? join(root, "src/main.ts") : join(root, "src"), mode)
+	const { probe } = await pageProbe(
+		{ url: "https://fixture.test/sign-in", elements: signInPage },
+		root,
+	)
+	const snapshot = await takeSnapshot(probe, `${runId}-snapshot`, root)
+	configureCredentialVault(probe, "Agent Vault")
+	writeCredentialPlan(probe, oneItemPlan(["https://fixture.test"]))
+
+	const result = await runProductionCliAsync(
+		probe,
+		[
+			"login",
+			"--ref",
+			snapshot.elements[2]!.ref,
+			"--field",
+			"password",
+			"--human-approved",
+			"--run-id",
+			runId,
+		],
+		root,
+	)
+
+	expectError(result, 20, {
+		schemaVersion: 1,
+		status: "error",
+		command: "login",
+		resultCode: "PRIVATE_DELIVERY_UNVERIFIED",
+		runId,
+		transactionState: "unchanged",
+		retrySafe: false,
+		nextAction: "Inspect the credential wrapper and the Controlled Page before retrying.",
+		message: "The disposable child did not prove what it did with the delivery.",
 	})
 	expect(vaultActions(probe)).toEqual([])
 	expect(deliveryActions(probe)).toEqual([])

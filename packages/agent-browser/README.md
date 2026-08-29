@@ -221,8 +221,9 @@ The ordering is fixed and each step fails closed before the next. Warm Browser
 proves everything non-secret first: the verified Browser Session, the resolved
 Snapshot Reference, the live page identity before and after the field reading,
 that the field sits in the top document rather than inside a frame
-(`LOGIN_FRAME_UNSUPPORTED`), that the page has an exact http or https origin
-(`ORIGIN_UNSUPPORTED`), that the field is empty, and that the live field is a
+(`LOGIN_FRAME_UNSUPPORTED`), that the page uses HTTPS or a literal
+`127.0.0.1` or `[::1]` HTTP origin (`ORIGIN_UNSUPPORTED`), that the field is
+empty, and that the live field is a
 credential field of exactly the requested kind (`LOGIN_FIELD_MISMATCH`); a
 one-time-code or verification-code field has no kind and is refused. None of
 those refusals has spoken to the Credential Vault. Private Delivery then proves
@@ -250,7 +251,10 @@ The one credential wrapper is
 unavailable is its own refusal, `CREDENTIAL_WRAPPER_UNAVAILABLE`, distinct
 from a vault that could not be read, `CREDENTIAL_VAULT_UNVERIFIED`, because
 restoring the wrapper and inspecting the configured vault are different
-repairs. The wrapper alone holds the
+repairs. Before any vault access, the wrapper and the shipped Bun entry must be
+current-user-owned regular non-symlinks with no group or world write bits, and
+their parent chains must be owned by root or the current user and resist
+replacement by another user. The wrapper alone holds the
 service-account token, and its `inject-stdin` command resolves the one `op://`
 reference itself, hands the secret to a disposable child on standard input,
 and scrubs the child environment down to HOME, PATH, LANG, LC_ALL, and TMPDIR.

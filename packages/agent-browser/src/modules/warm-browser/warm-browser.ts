@@ -246,15 +246,18 @@ function safeUrl(value: string): URL | undefined {
 }
 
 /**
- * The exact origin of one Controlled Page address, or nothing. An address
- * whose protocol is not http or https, or whose origin is "null" or empty,
- * has no exact origin, and a page without one has nothing a Credential Match
- * could be equal to.
+ * The exact credential-bearing origin of one Controlled Page address, or
+ * nothing. HTTPS is required except for the two literal IP loopback hosts
+ * admitted for local testing. An address outside that boundary has no origin
+ * eligible for Private Delivery.
  */
 function exactOrigin(url: string): string | undefined {
 	const parsed = safeUrl(url)
 	if (parsed === undefined) return undefined
-	if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return undefined
+	const loopbackHttp =
+		parsed.protocol === "http:" &&
+		/^http:\/\/(?:127\.0\.0\.1|\[::1\])(?::[0-9]+)?(?:[/?#]|$)/i.test(url)
+	if (parsed.protocol !== "https:" && !loopbackHttp) return undefined
 	return parsed.origin === "" || parsed.origin === "null" ? undefined : parsed.origin
 }
 
@@ -2028,8 +2031,8 @@ async function login(
 			parsed.runId,
 			"ORIGIN_UNSUPPORTED",
 			21,
-			"The Controlled Page has no exact http or https origin.",
-			"Run warm-browser open --url URL --run-id ID with an http or https address, then retry login.",
+			"The Controlled Page must use HTTPS, except for literal 127.0.0.1 or [::1] HTTP.",
+			"Run warm-browser open --url URL --run-id ID with an HTTPS address, or 127.0.0.1 or [::1] HTTP for local testing, then retry login.",
 		)
 	}
 	if (reading.holdsValue) undeliverableAct("login", parsed.runId, "field_not_empty", false)

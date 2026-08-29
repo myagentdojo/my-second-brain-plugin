@@ -65,6 +65,10 @@ write its own credential policy could be steered into configuring itself.
 The one credential wrapper this Module invokes is
 `$HOME/code/dotfiles/bin/with-one-password-token`, proved to be a regular,
 non-symlink, executable file owned by the current user before any invocation.
+It and the shipped Bun entry have no group or world write bits, and every
+component in their named and resolved parent chains is root- or current-user
+owned and cannot be replaced by another user. These checks happen before any
+vault access and fail closed when filesystem metadata cannot prove them.
 Vault readings run through its `op` command and write nothing to it; the
 delivery runs through its `inject-stdin` command, which resolves the one
 reference itself, hands the secret to the child on its standard input, and

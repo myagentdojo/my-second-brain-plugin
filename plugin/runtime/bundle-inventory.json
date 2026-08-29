@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "bundles": {
     "agent-browser": {
-      "path": "runtime/warm-browser-17d555baf77e842e.js",
-      "bytes": 130841,
-      "sha256": "17d555baf77e842eb1b8f38ec26f81974264287ec0fe1be71a616f1bf51c36b7"
+      "path": "runtime/warm-browser-4b80bf12b401cecc.js",
+      "bytes": 132412,
+      "sha256": "4b80bf12b401cecc053bce310123ba0a0773051cde06801ce165addf1f3ba8ca"
     },
     "frontier-runner": {
       "path": "runtime/frontier-runner-659b5dedecb84722.js",

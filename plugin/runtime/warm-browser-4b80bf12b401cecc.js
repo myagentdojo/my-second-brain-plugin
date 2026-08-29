@@ -994,9 +994,9 @@ class SpawnCleanupUnverifiedError extends Error {
 }
 
 // packages/agent-browser/src/modules/private-delivery/private-delivery.ts
-import { accessSync, constants, lstatSync as lstatSync2 } from "fs";
+import { accessSync, constants, lstatSync as lstatSync2, realpathSync } from "fs";
 import { homedir } from "os";
-import { join as join2 } from "path";
+import { dirname, join as join2, resolve as resolve2 } from "path";
 
 // packages/agent-browser/src/modules/private-delivery/configuration.ts
 import { lstatSync, readFileSync } from "fs";
@@ -1200,22 +1200,58 @@ function declaresExactOrigin(item, origin) {
 var credentialWrapperPath = join2(homedir(), "code/dotfiles/bin/with-one-password-token");
 var reservedWrapperExits = [2, 3, 4, 5, 70];
 var referenceSafeSegment = /^[A-Za-z0-9_.-]{1,128}$/;
-function isOwnedRegularFile(path) {
+var writableByAnotherUserMask = 18;
+var stickyDirectoryMask = 512;
+function directoryChain(path) {
+  const chain = [];
+  let current = resolve2(path);
+  while (true) {
+    chain.push(current);
+    const parent = dirname(current);
+    if (parent === current)
+      return chain.reverse();
+    current = parent;
+  }
+}
+function isTrustedParent(path, currentUserId) {
   try {
     const metadata = lstatSync2(path);
-    return metadata.isFile() && !metadata.isSymbolicLink() && (typeof process.getuid !== "function" || metadata.uid === process.getuid());
+    if (metadata.uid !== 0 && metadata.uid !== currentUserId)
+      return false;
+    if (metadata.isSymbolicLink())
+      return true;
+    if (!metadata.isDirectory())
+      return false;
+    return (metadata.mode & writableByAnotherUserMask) === 0 || (metadata.mode & stickyDirectoryMask) !== 0;
   } catch {
     return false;
   }
 }
-function isOwnedExecutable(path) {
-  if (!isOwnedRegularFile(path))
-    return false;
+function hasTrustedParentChain(path, currentUserId) {
   try {
-    accessSync(path, constants.X_OK);
-    return true;
+    const parent = dirname(path);
+    const resolvedParent = realpathSync(parent);
+    const parents = new Set([...directoryChain(parent), ...directoryChain(resolvedParent)]);
+    return [...parents].every((candidate) => isTrustedParent(candidate, currentUserId));
   } catch {
     return false;
+  }
+}
+function verifiedCredentialFile(path, role) {
+  if (typeof process.getuid !== "function")
+    return;
+  const currentUserId = process.getuid();
+  const absolutePath = resolve2(path);
+  try {
+    const metadata = lstatSync2(absolutePath);
+    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.uid !== currentUserId || (metadata.mode & writableByAnotherUserMask) !== 0 || !hasTrustedParentChain(absolutePath, currentUserId)) {
+      return;
+    }
+    if (role === "wrapper")
+      accessSync(absolutePath, constants.X_OK);
+    return absolutePath;
+  } catch {
+    return;
   }
 }
 function vaultReplyText(reading) {
@@ -1292,9 +1328,14 @@ async function deliverPrivately(input) {
   if (configuration.kind === "unsafe")
     return { kind: "vault_unsafe" };
   const vault = configuration.vault;
-  if (!isOwnedExecutable(credentialWrapperPath))
+  const wrapper = verifiedCredentialFile(credentialWrapperPath, "wrapper");
+  if (wrapper === undefined)
     return { kind: "wrapper_unavailable" };
-  const listReading = runVaultCommand(credentialWrapperPath, [
+  const entryArgument = process.argv[1];
+  const entry = entryArgument === undefined ? undefined : verifiedCredentialFile(entryArgument, "entry");
+  if (entry === undefined)
+    return { kind: "unverified", touchedPage: false };
+  const listReading = runVaultCommand(wrapper, [
     "op",
     "item",
     "list",
@@ -1320,7 +1361,7 @@ async function deliverPrivately(input) {
   if (matches.length > 1)
     return { kind: "match_ambiguous" };
   const matchedCandidate = matches[0];
-  const detailReading = runVaultCommand(credentialWrapperPath, ["op", "item", "get", matchedCandidate.id, "--vault", vault, "--format", "json"]);
+  const detailReading = runVaultCommand(wrapper, ["op", "item", "get", matchedCandidate.id, "--vault", vault, "--format", "json"]);
   const detail = vaultReplyText(detailReading);
   const matched = detail === undefined ? undefined : interpretLoginItemDetail(detail);
   if (matched === undefined)
@@ -1340,10 +1381,6 @@ async function deliverPrivately(input) {
     return { kind: "vault_unverified" };
   }
   const reference = `op://${segments.join("/")}`;
-  const entry = process.argv[1];
-  if (entry === undefined || !isOwnedRegularFile(entry)) {
-    return { kind: "unverified", touchedPage: false };
-  }
   const command = [
     process.execPath,
     "--config=/dev/null",
@@ -1368,7 +1405,7 @@ async function deliverPrivately(input) {
     "--field",
     input.field
   ];
-  return interpretDelivery(runPrivateDelivery({ wrapper: credentialWrapperPath, reference, command }));
+  return interpretDelivery(runPrivateDelivery({ wrapper, reference, command }));
 }
 
 // packages/agent-browser/src/modules/warm-browser/ownership.ts
@@ -1455,9 +1492,9 @@ function isExecutableFile(path) {
 }
 async function startDetachedProcess(executable, argumentList) {
   const child = spawn(executable, [...argumentList], { detached: true, stdio: "ignore" });
-  await new Promise((resolve2, reject) => {
+  await new Promise((resolve3, reject) => {
     child.once("error", reject);
-    child.once("spawn", resolve2);
+    child.once("spawn", resolve3);
   });
   if (child.pid === undefined)
     throw new Error("the launched process returned no process identity");
@@ -1480,7 +1517,7 @@ function signalProcessGroup(processGroupId, signal) {
   }
 }
 async function connectLoopbackPort(port) {
-  return await new Promise((resolve2) => {
+  return await new Promise((resolve3) => {
     const socket = createConnection({ host: "127.0.0.1", port });
     let settled = false;
     const finish = (result) => {
@@ -1488,7 +1525,7 @@ async function connectLoopbackPort(port) {
         return;
       settled = true;
       socket.destroy();
-      resolve2(result);
+      resolve3(result);
     };
     socket.once("connect", () => finish("occupied"));
     socket.once("error", (error) => finish(error.code === "ECONNREFUSED" ? "free" : "unverifiable"));
@@ -1627,7 +1664,7 @@ function observeProcessGroup(processGroupId) {
   return outcome === "absent" ? "absent" : "unverified";
 }
 async function pause(milliseconds) {
-  await new Promise((resolve2) => setTimeout(resolve2, milliseconds));
+  await new Promise((resolve3) => setTimeout(resolve3, milliseconds));
 }
 async function awaitProcessGroupAbsence(processGroupId, attempts) {
   for (let attempt = 0;attempt < attempts; attempt += 1) {
@@ -1893,7 +1930,7 @@ import {
   unlinkSync,
   writeFileSync
 } from "fs";
-import { dirname, join as join4, resolve as resolve2 } from "path";
+import { dirname as dirname2, join as join4, resolve as resolve3 } from "path";
 class UnsafeStateError extends Error {
   constructor() {
     super("Warm Browser private state could not be proved safe");
@@ -1917,7 +1954,7 @@ function exactPrivateDirectory(path) {
     throw new UnsafeStateError;
 }
 function resolveStatePaths(environment = process.env) {
-  const base = environment.XDG_STATE_HOME ? resolve2(environment.XDG_STATE_HOME) : environment.HOME ? resolve2(environment.HOME, ".local", "state") : undefined;
+  const base = environment.XDG_STATE_HOME ? resolve3(environment.XDG_STATE_HOME) : environment.HOME ? resolve3(environment.HOME, ".local", "state") : undefined;
   if (base === undefined)
     throw new UnsafeStateError;
   const root = join4(base, "my-second-brain", "warm-browser");
@@ -1933,8 +1970,8 @@ function detachedCleanupExists(paths) {
   return readdirSync(paths.root).some((entry) => entry.startsWith(".cleanup-"));
 }
 function ensurePrivateState(paths) {
-  mkdirSync(dirname(paths.root), { recursive: true, mode: 448 });
-  exactPrivateDirectory(dirname(paths.root));
+  mkdirSync(dirname2(paths.root), { recursive: true, mode: 448 });
+  exactPrivateDirectory(dirname2(paths.root));
   exactPrivateDirectory(paths.root);
   if (detachedCleanupExists(paths))
     throw new UnsafeStateError;
@@ -2291,7 +2328,8 @@ function exactOrigin(url) {
   const parsed = safeUrl(url);
   if (parsed === undefined)
     return;
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:")
+  const loopbackHttp = parsed.protocol === "http:" && /^http:\/\/(?:127\.0\.0\.1|\[::1\])(?::[0-9]+)?(?:[/?#]|$)/i.test(url);
+  if (parsed.protocol !== "https:" && !loopbackHttp)
     return;
   return parsed.origin === "" || parsed.origin === "null" ? undefined : parsed.origin;
 }
@@ -3165,7 +3203,7 @@ async function login(parsed, paths, adapter) {
   }
   const origin = exactOrigin(reading.basis.url);
   if (origin === undefined) {
-    staticFailure("login", parsed.runId, "ORIGIN_UNSUPPORTED", 21, "The Controlled Page has no exact http or https origin.", "Run warm-browser open --url URL --run-id ID with an http or https address, then retry login.");
+    staticFailure("login", parsed.runId, "ORIGIN_UNSUPPORTED", 21, "The Controlled Page must use HTTPS, except for literal 127.0.0.1 or [::1] HTTP.", "Run warm-browser open --url URL --run-id ID with an HTTPS address, or 127.0.0.1 or [::1] HTTP for local testing, then retry login.");
   }
   if (reading.holdsValue)
     undeliverableAct("login", parsed.runId, "field_not_empty", false);

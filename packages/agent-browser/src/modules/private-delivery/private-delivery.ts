@@ -1,6 +1,6 @@
-import { accessSync, constants, lstatSync } from "node:fs"
+import { accessSync, constants, lstatSync, realpathSync } from "node:fs"
 import { homedir } from "node:os"
-import { join } from "node:path"
+import { dirname, join, resolve } from "node:path"
 
 import type { ControlledPageBasis } from "../warm-browser/contract"
 import { privateDeliveryChildArgument } from "./child"
@@ -67,28 +67,83 @@ const reservedWrapperExits = [2, 3, 4, 5, 70] as const
  */
 const referenceSafeSegment = /^[A-Za-z0-9_.-]{1,128}$/
 
-/** Whether one path is a regular, non-symlink file owned by the current user. */
-function isOwnedRegularFile(path: string): boolean {
+const writableByAnotherUserMask = 0o022
+const stickyDirectoryMask = 0o1000
+
+/** Every lexical directory from the filesystem root through one parent. */
+function directoryChain(path: string): string[] {
+	const chain: string[] = []
+	let current = resolve(path)
+	while (true) {
+		chain.push(current)
+		const parent = dirname(current)
+		if (parent === current) return chain.reverse()
+		current = parent
+	}
+}
+
+/**
+ * Whether one parent component cannot be replaced by another user.
+ *
+ * Root and the current user are the only trusted owners. A group- or
+ * world-writable directory is safe only when the sticky bit prevents another
+ * writer from replacing an entry it does not own. A trusted symlink is
+ * admitted only because its containing chain and resolved target chain are
+ * checked separately.
+ */
+function isTrustedParent(path: string, currentUserId: number): boolean {
 	try {
 		const metadata = lstatSync(path)
+		if (metadata.uid !== 0 && metadata.uid !== currentUserId) return false
+		if (metadata.isSymbolicLink()) return true
+		if (!metadata.isDirectory()) return false
 		return (
-			metadata.isFile() &&
-			!metadata.isSymbolicLink() &&
-			(typeof process.getuid !== "function" || metadata.uid === process.getuid())
+			(metadata.mode & writableByAnotherUserMask) === 0 ||
+			(metadata.mode & stickyDirectoryMask) !== 0
 		)
 	} catch {
 		return false
 	}
 }
 
-/** Whether the wrapper is that same kind of file and executable as well. */
-function isOwnedExecutable(path: string): boolean {
-	if (!isOwnedRegularFile(path)) return false
+/** Whether both the named and resolved parent chains are trusted. */
+function hasTrustedParentChain(path: string, currentUserId: number): boolean {
 	try {
-		accessSync(path, constants.X_OK)
-		return true
+		const parent = dirname(path)
+		const resolvedParent = realpathSync(parent)
+		const parents = new Set([...directoryChain(parent), ...directoryChain(resolvedParent)])
+		return [...parents].every((candidate) => isTrustedParent(candidate, currentUserId))
 	} catch {
 		return false
+	}
+}
+
+/**
+ * Proves one credential-chain file and returns the exact absolute path proved.
+ * The wrapper must be executable; Bun reads the entry as a regular file.
+ */
+function verifiedCredentialFile(
+	path: string,
+	role: "wrapper" | "entry",
+): string | undefined {
+	if (typeof process.getuid !== "function") return undefined
+	const currentUserId = process.getuid()
+	const absolutePath = resolve(path)
+	try {
+		const metadata = lstatSync(absolutePath)
+		if (
+			!metadata.isFile() ||
+			metadata.isSymbolicLink() ||
+			metadata.uid !== currentUserId ||
+			(metadata.mode & writableByAnotherUserMask) !== 0 ||
+			!hasTrustedParentChain(absolutePath, currentUserId)
+		) {
+			return undefined
+		}
+		if (role === "wrapper") accessSync(absolutePath, constants.X_OK)
+		return absolutePath
+	} catch {
+		return undefined
 	}
 }
 
@@ -226,8 +281,13 @@ export async function deliverPrivately(input: {
 	if (configuration.kind === "unconfigured") return { kind: "vault_unconfigured" }
 	if (configuration.kind === "unsafe") return { kind: "vault_unsafe" }
 	const vault = configuration.vault
-	if (!isOwnedExecutable(credentialWrapperPath)) return { kind: "wrapper_unavailable" }
-	const listReading = runVaultCommand(credentialWrapperPath, [
+	const wrapper = verifiedCredentialFile(credentialWrapperPath, "wrapper")
+	if (wrapper === undefined) return { kind: "wrapper_unavailable" }
+	const entryArgument = process.argv[1]
+	const entry =
+		entryArgument === undefined ? undefined : verifiedCredentialFile(entryArgument, "entry")
+	if (entry === undefined) return { kind: "unverified", touchedPage: false }
+	const listReading = runVaultCommand(wrapper, [
 		"op",
 		"item",
 		"list",
@@ -255,7 +315,7 @@ export async function deliverPrivately(input: {
 	// many Login items the vault holds, and no unmatched item's field values
 	// ever enter this process.
 	const detailReading = runVaultCommand(
-		credentialWrapperPath,
+		wrapper,
 		["op", "item", "get", matchedCandidate.id, "--vault", vault, "--format", "json"],
 	)
 	const detail = vaultReplyText(detailReading)
@@ -286,12 +346,7 @@ export async function deliverPrivately(input: {
 	}
 	const reference = `op://${segments.join("/")}`
 	// The child re-enters through the same entry this process was started from,
-	// so one bundle still ships. The entry is proved owned before the wrapper
-	// is asked to hand a secret to it.
-	const entry = process.argv[1]
-	if (entry === undefined || !isOwnedRegularFile(entry)) {
-		return { kind: "unverified", touchedPage: false }
-	}
+	// so one bundle still ships and the checked path is the one used.
 	// Everything in this list is non-secret. The runtime flags keep the child
 	// from reading any configuration or environment file and from installing
 	// anything on its own account.
@@ -320,6 +375,6 @@ export async function deliverPrivately(input: {
 		input.field,
 	]
 	return interpretDelivery(
-		runPrivateDelivery({ wrapper: credentialWrapperPath, reference, command }),
+		runPrivateDelivery({ wrapper, reference, command }),
 	)
 }
