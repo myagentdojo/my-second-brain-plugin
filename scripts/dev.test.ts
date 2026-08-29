@@ -279,6 +279,22 @@ test("dev:codex is the preview-only shortcut", () => {
 	expect(packageJson.scripts["dev:codex"]).toBe("bun run scripts/dev.ts codex install")
 })
 
+test("Codex dev-mode reference follows the candidate-bound lifecycle", () => {
+	const reference = readFileSync(
+		join(root, "plugin/skills/dev-mode/references/codex.md"),
+		"utf8",
+	)
+
+	expect(reference).toContain("bun run dev -- codex check --json --no-input")
+	expect(reference).toContain("bun run dev -- codex install --json --no-input --no-launch")
+	expect(reference).toContain(
+		"bun run dev -- codex install --apply --candidate-hash <sha256> --json --no-input --no-launch",
+	)
+	expect(reference).not.toContain("bun run dev -- codex --dry-run")
+	expect(reference).not.toContain("bun run dev -- codex --check")
+	expect(reference).not.toContain("bun run dev -- codex --no-launch")
+})
+
 interface FakeCodexPlugin {
 	pluginId: string
 	name: string
