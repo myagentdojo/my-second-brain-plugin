@@ -27,7 +27,13 @@ export interface VaultCommandReading {
 	readonly stdout: string | null
 }
 
-/** Runs one wrapper-mediated op command and reads its reply without interpreting it. */
+/**
+ * Runs one wrapper-mediated op command and reads its reply without
+ * interpreting it. Neither vault command this Module runs writes anything to
+ * the wrapper, so the wrapper reads no standard input at all: the listing and
+ * the one uniquely selected detail read each name what they want in their own
+ * argument list.
+ */
 export function runVaultCommand(
 	wrapper: string,
 	argumentList: readonly string[],

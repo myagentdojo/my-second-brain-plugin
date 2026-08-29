@@ -1016,9 +1016,13 @@ const controlSentinel = "control-sentinel-1b9be2d4-never-in-any-public-surface"
  */
 function controlVaultPlan(websites: readonly string[]): Record<string, unknown> {
 	return {
-		vaultList: vaultReading([{ id: "item-1" }]),
-		vaultGet: {
-			"item-1": vaultReading(loginItem({
+		vaultList: vaultReading([{
+			id: "item-1",
+			vault: { id: "vlt-1", name: "Agent Vault" },
+			urls: websites.map((href) => ({ href })),
+		}]),
+		vaultGet: vaultReading(
+			loginItem({
 				id: "item-1",
 				vault: { id: "vlt-1", name: "Agent Vault" },
 				websites,
@@ -1026,8 +1030,8 @@ function controlVaultPlan(websites: readonly string[]): Record<string, unknown> 
 					{ id: "username-field", purpose: "USERNAME" },
 					{ id: "password-field", purpose: "PASSWORD" },
 				],
-			})),
-		},
+			}),
+		),
 		sentinel: controlSentinel,
 	}
 }
@@ -1190,21 +1194,24 @@ test("removing the unique-match rule delivers when two items declare the origin"
 		const snapshot = await takeSnapshot(probe, "control-unique", root)
 		configureCredentialVault(probe, "Agent Vault")
 		writeCredentialPlan(probe, {
-			vaultList: vaultReading([{ id: "item-1" }, { id: "item-2" }]),
-			vaultGet: {
-				"item-1": vaultReading(loginItem({
+			vaultList: vaultReading([
+				{
 					id: "item-1",
 					vault: { id: "vlt-1", name: "Agent Vault" },
-					websites: ["https://fixture.test"],
-					fields: [{ id: "password-field", purpose: "PASSWORD" }],
-				})),
-				"item-2": vaultReading(loginItem({
+					urls: [{ href: "https://fixture.test" }],
+				},
+				{
 					id: "item-2",
 					vault: { id: "vlt-1", name: "Agent Vault" },
-					websites: ["https://fixture.test"],
-					fields: [{ id: "password-field", purpose: "PASSWORD" }],
-				})),
-			},
+					urls: [{ href: "https://fixture.test" }],
+				},
+			]),
+			vaultGet: vaultReading(loginItem({
+				id: "item-1",
+				vault: { id: "vlt-1", name: "Agent Vault" },
+				websites: ["https://fixture.test"],
+				fields: [{ id: "password-field", purpose: "PASSWORD" }],
+			})),
 			sentinel: controlSentinel,
 		})
 		const result = reading(
@@ -1336,4 +1343,66 @@ test("removing the post-delivery invalidation leaves the used reference alive", 
 			replace: removed,
 		})),
 	).toEqual({ resultCode: "ELEMENT_CLICKED", exitCode: 0, retained: true })
+})
+
+test("removing the reference alphabet builds a reference the host would not resolve", async () => {
+	const scenario = async (root: string): Promise<Reading & { typed: readonly string[] }> => {
+		const { fixture, probe } = await pageProbe(
+			{ url: "https://fixture.test/sign-in", elements: signInPage },
+			root,
+		)
+		const snapshot = await takeSnapshot(probe, "control-reference", root)
+		configureCredentialVault(probe, "Agent Vault")
+		// One vault whose password field is named with a segment separator. A
+		// secret reference has no escape syntax, so this id cannot be named
+		// exactly and must not be named at all.
+		writeCredentialPlan(probe, {
+			vaultList: vaultReading([{
+				id: "item-1",
+				vault: { id: "vlt-1", name: "Agent Vault" },
+				urls: [{ href: "https://fixture.test" }],
+			}]),
+			vaultGet: vaultReading(loginItem({
+				id: "item-1",
+				vault: { id: "vlt-1", name: "Agent Vault" },
+				websites: ["https://fixture.test"],
+				fields: [{ id: "password/field", purpose: "PASSWORD" }],
+			})),
+			sentinel: controlSentinel,
+		})
+		const result = reading(
+			await runProductionCliAsync(
+				probe,
+				[
+					"login",
+					"--ref",
+					snapshot.elements[2]!.ref,
+					"--field",
+					"password",
+					"--human-approved",
+					"--run-id",
+					"control-login",
+				],
+				root,
+			),
+		)
+		return { ...result, typed: fixture.insertedText() }
+	}
+
+	// With the rule, the vault reading is refused before any wrapper runs. With
+	// it gone, the Module hands the wrapper a four-segment reference the
+	// installed CLI reads as a section, which resolves nothing and leaves the
+	// caller unable to say what happened to the page.
+	expect(await scenario(packageRoot)).toEqual({
+		resultCode: "CREDENTIAL_VAULT_UNVERIFIED",
+		exitCode: 20,
+		typed: [],
+	})
+	expect(
+		await scenario(mutatedPackage({
+			file: "src/modules/private-delivery/private-delivery.ts",
+			find: "\tif (!segments.every((segment) => referenceSafeSegment.test(segment))) {",
+			replace: "\tif (false) {",
+		})),
+	).toEqual({ resultCode: "PRIVATE_DELIVERY_UNVERIFIED", exitCode: 20, typed: [] })
 })

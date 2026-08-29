@@ -25,6 +25,7 @@ import {
 } from "./fixtures/login-probe"
 import {
 	expectError,
+	expectRefusal,
 	packageRoot,
 	productionCliProbe,
 	productionEntry,
@@ -67,17 +68,29 @@ const credentialPair = [
  */
 function oneItemPlan(websites: readonly string[]): Record<string, unknown> {
 	return {
-		vaultList: vaultReading([{ id: "item-1" }]),
-		vaultGet: {
-			"item-1": vaultReading(loginItem({
-				id: "item-1",
-				vault: { id: "vlt-1", name: "Agent Vault" },
-				websites,
-				fields: credentialPair,
-			})),
-		},
+		vaultList: vaultReading([vaultListingItem("item-1", websites)]),
+		vaultGet: vaultReading(vaultItem("item-1", websites)),
 		sentinel,
 	}
+}
+
+/** One Login-item list record, which carries no fields and no secret values. */
+function vaultListingItem(id: string, websites: readonly string[]): Record<string, unknown> {
+	return {
+		id,
+		vault: { id: "vlt-1", name: "Agent Vault" },
+		urls: websites.map((href) => ({ href })),
+	}
+}
+
+/** One Login item of the configured vault declaring the given websites. Fixture input only. */
+function vaultItem(id: string, websites: readonly string[]): Record<string, unknown> {
+	return loginItem({
+		id,
+		vault: { id: "vlt-1", name: "Agent Vault" },
+		websites,
+		fields: credentialPair,
+	})
 }
 
 interface LoginProbe extends PageProbe {
@@ -573,17 +586,11 @@ test("a resolved item outside the configured vault refuses the whole login", asy
 	const { probe, snapshot } = await signInProbe()
 	configureCredentialVault(probe, "Agent Vault")
 	writeCredentialPlan(probe, {
-		vaultList: vaultReading([{ id: "item-9" }]),
-		vaultGet: {
-			"item-9": vaultReading(loginItem({
-				id: "item-9",
-				// Neither the id nor the name is the configured vault, so this item
-				// answered for a vault the Module never asked about.
-				vault: { id: "other-vault", name: "Other Vault" },
-				websites: ["https://fixture.test"],
-				fields: credentialPair,
-			})),
-		},
+		vaultList: vaultReading([{
+			id: "item-9",
+			vault: { id: "other-vault", name: "Other Vault" },
+			urls: [{ href: "https://fixture.test" }],
+		}]),
 		sentinel,
 	})
 
@@ -609,6 +616,7 @@ test("a resolved item outside the configured vault refuses the whole login", asy
 		nextAction: "Inspect the configured Credential Vault before retrying.",
 		message: "A resolved Login item does not belong to the configured Credential Vault.",
 	})
+	expect(vaultActions(probe)).toHaveLength(1)
 	expect(deliveryActions(probe)).toEqual([])
 })
 
@@ -639,6 +647,44 @@ test("zero items declaring the exact origin is a refusal with nothing delivered"
 		nextAction: "Add exactly one Login item whose website is this exact origin, then retry.",
 		message: "No Login item in the Credential Vault declares this exact origin.",
 	})
+	// The no-match listing decides before any candidate id can reach argv.
+	expect(vaultActions(probe)).toHaveLength(1)
+	expect(deliveryActions(probe)).toEqual([])
+})
+
+test("a listing naming no Login item is no match, with the vault asked for nothing more", async () => {
+	const { probe, snapshot } = await signInProbe()
+	configureCredentialVault(probe, "Agent Vault")
+	// No batch reading is planned on purpose: a Module that asked for one
+	// would be answered with nothing and could not report the match absent.
+	writeCredentialPlan(probe, { vaultList: vaultReading([]), sentinel })
+
+	const result = await runProductionCliAsync(probe, [
+		"login",
+		"--ref",
+		snapshot.elements[2]!.ref,
+		"--field",
+		"password",
+		"--human-approved",
+		"--run-id",
+		"login-empty-listing",
+	])
+
+	expectError(result, 21, {
+		schemaVersion: 1,
+		status: "error",
+		command: "login",
+		resultCode: "CREDENTIAL_MATCH_ABSENT",
+		runId: "login-empty-listing",
+		transactionState: "unchanged",
+		retrySafe: false,
+		nextAction: "Add exactly one Login item whose website is this exact origin, then retry.",
+		message: "No Login item in the Credential Vault declares this exact origin.",
+	})
+	// Independent oracle: the one listing was the whole vault conversation.
+	expect(vaultActions(probe).map((entry) => entry.argumentList)).toEqual([
+		["op", "item", "list", "--vault", "Agent Vault", "--categories", "Login", "--format", "json"],
+	])
 	expect(deliveryActions(probe)).toEqual([])
 })
 
@@ -646,21 +692,10 @@ test("two items declaring the exact origin never picks a winner", async () => {
 	const { probe, snapshot } = await signInProbe()
 	configureCredentialVault(probe, "Agent Vault")
 	writeCredentialPlan(probe, {
-		vaultList: vaultReading([{ id: "item-1" }, { id: "item-2" }]),
-		vaultGet: {
-			"item-1": vaultReading(loginItem({
-				id: "item-1",
-				vault: { id: "vlt-1", name: "Agent Vault" },
-				websites: ["https://fixture.test"],
-				fields: credentialPair,
-			})),
-			"item-2": vaultReading(loginItem({
-				id: "item-2",
-				vault: { id: "vlt-1", name: "Agent Vault" },
-				websites: ["https://fixture.test"],
-				fields: credentialPair,
-			})),
-		},
+		vaultList: vaultReading([
+			vaultListingItem("item-1", ["https://fixture.test"]),
+			vaultListingItem("item-2", ["https://fixture.test"]),
+		]),
 		sentinel,
 	})
 
@@ -686,7 +721,288 @@ test("two items declaring the exact origin never picks a winner", async () => {
 		nextAction: "Leave exactly one Login item declaring this exact origin, then retry.",
 		message: "More than one Login item in the Credential Vault declares this exact origin.",
 	})
+	// The ambiguous listing decides before any candidate id can reach argv.
+	expect(vaultActions(probe)).toHaveLength(1)
 	expect(deliveryActions(probe)).toEqual([])
+})
+
+test("lists metadata before reading only the unique exact-origin item", async () => {
+	const { fixture, probe, snapshot } = await signInProbe()
+	configureCredentialVault(probe, "Agent Vault")
+	// Three candidates in the configured vault: another host, the exact origin,
+	// a sub-domain of it, and one unrelated Login item with no website. Only the
+	// second is a Credential Match; the measured op list schema omits `urls`
+	// entirely for the unrelated no-website Login item.
+	writeCredentialPlan(probe, {
+		vaultList: vaultReading([
+			vaultListingItem("item-1", ["https://other.test"]),
+			vaultListingItem("item-2", ["https://fixture.test"]),
+			vaultListingItem("item-3", ["https://www.fixture.test"]),
+			{ id: "item-4", vault: { id: "vlt-1", name: "Agent Vault" } },
+		]),
+		vaultGet: vaultReading(vaultItem("item-2", ["https://fixture.test"])),
+		sentinel,
+	})
+
+	const result = await runProductionCliAsync(probe, [
+		"login",
+		"--ref",
+		snapshot.elements[2]!.ref,
+		"--field",
+		"password",
+		"--human-approved",
+		"--run-id",
+		"login-two-stage",
+	])
+
+	// Independent oracle: the whole vault conversation, restated by hand. One
+	// listing, then one detail read naming only the already-proved unique
+	// candidate by id. No candidate data enters standard input, and the number
+	// of wrapper calls stays constant as the listing grows.
+	const wrapper = join(probe.home, "code/dotfiles/bin/with-one-password-token")
+	expect(vaultActions(probe)).toEqual([
+		{
+			action: "vault",
+			wrapper,
+			argumentList: [
+				"op",
+				"item",
+				"list",
+				"--vault",
+				"Agent Vault",
+				"--categories",
+				"Login",
+				"--format",
+				"json",
+			],
+		},
+		{
+			action: "vault",
+			wrapper,
+			argumentList: ["op", "item", "get", "item-2", "--vault", "Agent Vault", "--format", "json"],
+		},
+	])
+	expect(result.stderr).toBe("")
+	expect(result.exitCode).toBe(0)
+	expect(JSON.parse(result.stdout).resultCode).toBe("LOGIN_FIELD_DELIVERED")
+	// The one exact-origin item is the one delivered, named by id.
+	expect(deliveryActions(probe).map((delivery) => delivery.reference)).toEqual([
+		"op://vlt-1/item-2/password-field",
+	])
+	// The sentinel reached exactly the referenced field and no other node.
+	expect(fixture.fieldValue(13)).toBe(sentinel)
+	expect(fixture.insertedText()).toEqual([sentinel])
+	for (const node of [11, 12, 14, 15, 16] as const) {
+		expect(fixture.fieldValue(node), String(node)).toBe("")
+	}
+	// Neither the secret nor the matched item's identity reaches the public
+	// stream or any byte of durable private state.
+	const files = filesUnderPrivateState(probe)
+	expect(files.length).toBeGreaterThan(0)
+	for (const text of [result.stdout, ...files.map((file) => file.bytes)]) {
+		expect(text).not.toContain(sentinel)
+		expect(text).not.toContain("item-2")
+	}
+})
+
+test("a detail reply containing more than the selected item proves nothing about the vault", async () => {
+	const { probe, snapshot } = await signInProbe()
+	configureCredentialVault(probe, "Agent Vault")
+	const selected = vaultItem("item-2", ["https://fixture.test"])
+	writeCredentialPlan(probe, {
+		vaultList: vaultReading([vaultListingItem("item-2", ["https://fixture.test"])]),
+		vaultGet: {
+			status: 0,
+			signal: null,
+			failed: false,
+			stdout: `${JSON.stringify(selected)}\n${JSON.stringify(selected)}`,
+		},
+		sentinel,
+	})
+
+	const result = await runProductionCliAsync(probe, [
+		"login",
+		"--ref",
+		snapshot.elements[2]!.ref,
+		"--field",
+		"password",
+		"--human-approved",
+		"--run-id",
+		"login-detail-many",
+	])
+
+	expectRefusal(result, 20, {
+		resultCode: "CREDENTIAL_VAULT_UNVERIFIED",
+		runId: "login-detail-many",
+		transactionState: "unchanged",
+	})
+	expect(deliveryActions(probe)).toEqual([])
+})
+
+test.each([
+	["another item id", vaultItem("item-3", ["https://fixture.test"])],
+	["an incomplete item record", { id: "item-2", vault: {} }],
+] as const)("a detail reply for %s proves nothing about the vault", async (_name, vaultGet) => {
+	const { probe, snapshot } = await signInProbe()
+	configureCredentialVault(probe, "Agent Vault")
+	writeCredentialPlan(probe, {
+		vaultList: vaultReading([vaultListingItem("item-2", ["https://fixture.test"])]),
+		vaultGet: vaultReading(vaultGet),
+		sentinel,
+	})
+
+	const result = await runProductionCliAsync(probe, [
+		"login",
+		"--ref",
+		snapshot.elements[2]!.ref,
+		"--field",
+		"password",
+		"--human-approved",
+		"--run-id",
+		"login-detail-incomplete",
+	])
+
+	expectError(result, 20, {
+		schemaVersion: 1,
+		status: "error",
+		command: "login",
+		resultCode: "CREDENTIAL_VAULT_UNVERIFIED",
+		runId: "login-detail-incomplete",
+		transactionState: "unchanged",
+		retrySafe: false,
+		nextAction: "Inspect the credential wrapper and the configured Credential Vault before retrying.",
+		message: "The Credential Vault reply could not be read, interpreted, or safely used.",
+	})
+	expect(deliveryActions(probe)).toEqual([])
+})
+
+test("a detail reply naming another vault is refused after the listing agreed", async () => {
+	const { probe, snapshot } = await signInProbe()
+	configureCredentialVault(probe, "Agent Vault")
+	// The listing puts this candidate in the configured vault and the detail
+	// reply then puts it somewhere else. The listing is not taken on trust for
+	// the item whose secret is about to be named.
+	writeCredentialPlan(probe, {
+		vaultList: vaultReading([vaultListingItem("item-2", ["https://fixture.test"])]),
+		vaultGet: vaultReading(loginItem({
+			id: "item-2",
+			vault: { id: "vlt-9", name: "Another Vault" },
+			websites: ["https://fixture.test"],
+			fields: credentialPair,
+		})),
+		sentinel,
+	})
+
+	const result = await runProductionCliAsync(probe, [
+		"login",
+		"--ref",
+		snapshot.elements[2]!.ref,
+		"--field",
+		"password",
+		"--human-approved",
+		"--run-id",
+		"login-detail-other-vault",
+	])
+
+	expectError(result, 21, {
+		schemaVersion: 1,
+		status: "error",
+		command: "login",
+		resultCode: "CREDENTIAL_VAULT_MISMATCH",
+		runId: "login-detail-other-vault",
+		transactionState: "unchanged",
+		retrySafe: false,
+		nextAction: "Inspect the configured Credential Vault before retrying.",
+		message: "A resolved Login item does not belong to the configured Credential Vault.",
+	})
+	expect(deliveryActions(probe)).toEqual([])
+})
+
+test("a detail reply that drops the matched origin is refused", async () => {
+	const { probe, snapshot } = await signInProbe()
+	configureCredentialVault(probe, "Agent Vault")
+	// The listing declares the current origin and the detail reply declares a
+	// different one. The origin the whole match rests on is asked again of the
+	// reply that names the field, so a listing that disagrees with it delivers
+	// nothing.
+	writeCredentialPlan(probe, {
+		vaultList: vaultReading([vaultListingItem("item-2", ["https://fixture.test"])]),
+		vaultGet: vaultReading(loginItem({
+			id: "item-2",
+			vault: { id: "vlt-1", name: "Agent Vault" },
+			websites: ["https://elsewhere.test"],
+			fields: credentialPair,
+		})),
+		sentinel,
+	})
+
+	const result = await runProductionCliAsync(probe, [
+		"login",
+		"--ref",
+		snapshot.elements[2]!.ref,
+		"--field",
+		"password",
+		"--human-approved",
+		"--run-id",
+		"login-detail-other-origin",
+	])
+
+	expectError(result, 20, {
+		schemaVersion: 1,
+		status: "error",
+		command: "login",
+		resultCode: "CREDENTIAL_VAULT_UNVERIFIED",
+		runId: "login-detail-other-origin",
+		transactionState: "unchanged",
+		retrySafe: false,
+		nextAction: "Inspect the credential wrapper and the configured Credential Vault before retrying.",
+		message: "The Credential Vault reply could not be read, interpreted, or safely used.",
+	})
+	expect(deliveryActions(probe)).toEqual([])
+})
+
+test.each([
+	[
+		"a candidate missing its vault",
+		[{ id: "item-2", urls: [{ href: "https://fixture.test" }] }],
+	],
+	[
+		"a candidate with non-array URLs",
+		[{ id: "item-2", vault: { id: "vlt-1", name: "Agent Vault" }, urls: {} }],
+	],
+	[
+		"a repeated candidate id",
+		[
+			vaultListingItem("item-2", ["https://other.test"]),
+			vaultListingItem("item-2", ["https://fixture.test"]),
+		],
+	],
+] as const)("a listing with %s proves nothing about the vault", async (_name, listing) => {
+	const { probe, snapshot } = await signInProbe()
+	configureCredentialVault(probe, "Agent Vault")
+	writeCredentialPlan(probe, {
+		vaultList: vaultReading(listing),
+		sentinel,
+	})
+
+	const result = await runProductionCliAsync(probe, [
+		"login",
+		"--ref",
+		snapshot.elements[2]!.ref,
+		"--field",
+		"password",
+		"--human-approved",
+		"--run-id",
+		"login-list-malformed",
+	])
+
+	expectRefusal(result, 20, {
+		resultCode: "CREDENTIAL_VAULT_UNVERIFIED",
+		runId: "login-list-malformed",
+		transactionState: "unchanged",
+	})
+	expect(deliveryActions(probe)).toEqual([])
+	expect(vaultActions(probe)).toHaveLength(1)
 })
 
 // Independent oracle: what exact-origin equality decides for a page at
@@ -729,9 +1045,9 @@ test("a matched item carrying two password fields is ambiguous, not guessed at",
 	const { probe, snapshot } = await signInProbe()
 	configureCredentialVault(probe, "Agent Vault")
 	writeCredentialPlan(probe, {
-		vaultList: vaultReading([{ id: "item-1" }]),
-		vaultGet: {
-			"item-1": vaultReading(loginItem({
+		vaultList: vaultReading([vaultListingItem("item-1", ["https://fixture.test"])]),
+		vaultGet: vaultReading(
+			loginItem({
 				id: "item-1",
 				vault: { id: "vlt-1", name: "Agent Vault" },
 				websites: ["https://fixture.test"],
@@ -739,8 +1055,8 @@ test("a matched item carrying two password fields is ambiguous, not guessed at",
 					{ id: "password-a", purpose: "PASSWORD" },
 					{ id: "password-b", purpose: "PASSWORD" },
 				],
-			})),
-		},
+			}),
+		),
 		sentinel,
 	})
 
@@ -800,11 +1116,83 @@ test.each([
 			transactionState: "unchanged",
 			retrySafe: false,
 			nextAction: "Inspect the credential wrapper and the configured Credential Vault before retrying.",
-			message: "The Credential Vault could not be read or its reply could not be interpreted.",
+			message: "The Credential Vault reply could not be read, interpreted, or safely used.",
 		})
 		expect(deliveryActions(probe)).toEqual([])
 	},
 )
+
+test.each([
+	["a field id carrying a segment separator", "password/field"],
+	["a field id carrying the attribute selector", "password?attribute=otp"],
+	["a field id carrying a per-cent sign", "password%2Ffield"],
+])("%s is refused rather than escaped into a reference", async (_name, fieldId) => {
+	const { fixture, probe, snapshot } = await signInProbe()
+	configureCredentialVault(probe, "Agent Vault")
+	writeCredentialPlan(probe, {
+		vaultList: vaultReading([vaultListingItem("item-1", ["https://fixture.test"])]),
+		vaultGet: vaultReading(loginItem({
+			id: "item-1",
+			vault: { id: "vlt-1", name: "Agent Vault" },
+			websites: ["https://fixture.test"],
+			fields: [{ id: fieldId, purpose: "PASSWORD" }],
+		})),
+		sentinel,
+	})
+
+	const result = await runProductionCliAsync(probe, [
+		"login",
+		"--ref",
+		snapshot.elements[2]!.ref,
+		"--field",
+		"password",
+		"--human-approved",
+		"--run-id",
+		"login-unnameable-field",
+	])
+
+	// A secret reference has no escape syntax, so an id the Module cannot name
+	// exactly is an id it does not name at all: no wrapper delivery is attempted
+	// and the page is left alone.
+	expectError(result, 20, {
+		schemaVersion: 1,
+		status: "error",
+		command: "login",
+		resultCode: "CREDENTIAL_VAULT_UNVERIFIED",
+		runId: "login-unnameable-field",
+		transactionState: "unchanged",
+		retrySafe: false,
+		nextAction: "Inspect the credential wrapper and the configured Credential Vault before retrying.",
+		message: "The Credential Vault reply could not be read, interpreted, or safely used.",
+	})
+	expect(deliveryActions(probe)).toEqual([])
+	expect(fixture.insertedText()).toEqual([])
+})
+
+test("a reference the installed op CLI would not parse delivers nothing", async () => {
+	const { fixture, probe, snapshot } = await signInProbe()
+	configureCredentialVault(probe, "Agent Vault")
+	writeCredentialPlan(probe, oneItemPlan(["https://fixture.test"]))
+
+	const result = await runProductionCliAsync(probe, [
+		"login",
+		"--ref",
+		snapshot.elements[2]!.ref,
+		"--field",
+		"password",
+		"--human-approved",
+		"--run-id",
+		"login-reference-parses",
+	])
+
+	// The reference the Module builds is one the host would resolve. The
+	// credential seam refuses any other the way the wrapper does, so this row
+	// turns red if the Module ever escapes a segment again.
+	expect(result.stderr).toBe("")
+	expect(result.exitCode).toBe(0)
+	expect(JSON.parse(result.stdout).resultCode).toBe("LOGIN_FIELD_DELIVERED")
+	expect(fixture.insertedText()).toEqual([sentinel])
+})
 
 test("the recorded delivery names the wrapper, the exact reference, and a non-secret command", async () => {
 	const { fixture, probe, snapshot } = await signInProbe()
@@ -830,9 +1218,9 @@ test("the recorded delivery names the wrapper, the exact reference, and a non-se
 	// The one wrapper is the probe-local file under the probe's own home, so no
 	// test can ever reach the real one.
 	expect(delivery.wrapper).toBe(join(probe.home, "code/dotfiles/bin/with-one-password-token"))
-	// Independent oracle: the reference restated by hand, every segment encoded,
-	// naming the field by id and never by label.
-	expect(delivery.reference).toBe("op://Agent%20Vault/item-1/password-field")
+	// Independent oracle: the reference restated by hand, three ids and nothing
+	// escaped, naming the vault and the field by id and never by name or label.
+	expect(delivery.reference).toBe("op://vlt-1/item-1/password-field")
 	// The whole child command, restated by hand: the running Bun executable, the
 	// flags that keep the child from reading any configuration or environment
 	// file, the one shipped entry, the private re-entry argument, and only
@@ -999,10 +1387,90 @@ test("login delivers the username the same way, into the identifier field", asyn
 			postcondition: "running",
 		},
 	})
-	expect(deliveryActions(probe)[0]!.reference).toBe("op://Agent%20Vault/item-1/username-field")
+	expect(deliveryActions(probe)[0]!.reference).toBe("op://vlt-1/item-1/username-field")
 	expect(fixture.fieldValue(12)).toBe(sentinel)
 	expect(fixture.insertedText()).toEqual([sentinel])
 	expect(fixture.focusedNodes()).toEqual([12])
+})
+
+test("login proves username delivery when accessibility omits the post-insert value", async () => {
+	const { fixture, probe, snapshot } = await signInProbe({
+		elements: signInPage.map((element) =>
+			element.backendNodeId === 12 ? { ...element, omitValueAfterInsert: true } : element),
+	})
+	configureCredentialVault(probe, "Agent Vault")
+	writeCredentialPlan(probe, oneItemPlan(["https://fixture.test"]))
+
+	const result = await runProductionCliAsync(probe, [
+		"login",
+		"--ref",
+		snapshot.elements[1]!.ref,
+		"--field",
+		"username",
+		"--human-approved",
+		"--run-id",
+		"login-username-ax-omitted",
+	])
+
+	expect(result.stderr).toBe("")
+	expect(result.exitCode).toBe(0)
+	expect(JSON.parse(result.stdout)).toMatchObject({
+		resultCode: "LOGIN_FIELD_DELIVERED",
+		transactionState: "acted",
+		data: { fieldNowHoldsValue: true },
+	})
+	// Independent oracle: the fixture received one value only at the referenced
+	// field even though its accessibility reply intentionally hid that value.
+	expect(fixture.fieldValue(12)).toBe(sentinel)
+	expect(fixture.insertedText()).toEqual([sentinel])
+	// Independent protocol oracle: the child asks the exact resolved node for a
+	// boolean after insertion, instead of asking Accessibility for another value.
+	expect(fixture.latestConversation()).toEqual([
+		"Page.enable",
+		"DOM.enable",
+		"Accessibility.enable",
+		"Page.getFrameTree",
+		"DOM.describeNode",
+		"Accessibility.getPartialAXTree",
+		"DOM.resolveNode",
+		"Runtime.callFunctionOn",
+		"Page.getFrameTree",
+		"DOM.focus",
+		"Accessibility.getPartialAXTree",
+		"Input.insertText",
+		"Page.getFrameTree",
+		"DOM.resolveNode",
+		"Runtime.callFunctionOn",
+	])
+})
+
+test("an unavailable boolean empty check refuses username before insertion", async () => {
+	const { fixture, probe, snapshot } = await signInProbe({
+		failMethods: ["Runtime.callFunctionOn"],
+	})
+	configureCredentialVault(probe, "Agent Vault")
+	writeCredentialPlan(probe, oneItemPlan(["https://fixture.test"]))
+
+	const result = await runProductionCliAsync(probe, [
+		"login",
+		"--ref",
+		snapshot.elements[1]!.ref,
+		"--field",
+		"username",
+		"--human-approved",
+		"--run-id",
+		"login-username-value-unverified",
+	])
+
+	expectRefusal(result, 20, {
+		resultCode: "PRIVATE_DELIVERY_UNVERIFIED",
+		runId: "login-username-value-unverified",
+		transactionState: "acted",
+	})
+	// Independent oracle: a question the child cannot answer does not become an
+	// assumption that the field is empty, so the sentinel never reaches the page.
+	expect(fixture.insertedText()).toEqual([])
+	expect(fixture.fieldValue(12)).toBe("")
 })
 
 test("the sentinel is absent from every public and durable surface", async () => {
@@ -1267,7 +1735,7 @@ test("a wrapper that fails before the child runs proves nothing was inserted", a
 		transactionState: "unchanged",
 		retrySafe: false,
 		nextAction: "Inspect the credential wrapper and the configured Credential Vault before retrying.",
-		message: "The Credential Vault could not be read or its reply could not be interpreted.",
+		message: "The Credential Vault reply could not be read, interpreted, or safely used.",
 	})
 	expect(fixture.insertedText()).toEqual([])
 })

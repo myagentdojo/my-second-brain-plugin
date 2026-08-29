@@ -19,9 +19,8 @@ import {
 	type VaultCommandReading,
 } from "./credential-effects"
 import {
-	type CredentialItemReading,
 	declaresExactOrigin,
-	interpretLoginItem,
+	interpretLoginItemDetail,
 	interpretLoginItemList,
 } from "./credential-match"
 import type { CredentialFieldKind } from "./field-kind"
@@ -55,6 +54,18 @@ const credentialWrapperPath = join(homedir(), "code/dotfiles/bin/with-one-passwo
  * nothing has touched the page.
  */
 const reservedWrapperExits = [2, 3, 4, 5, 70] as const
+
+/**
+ * The one shape a secret-reference segment may take.
+ *
+ * A secret reference is `op://<vault>/<item>/<field>`, and it carries no escape
+ * syntax at all: `/` starts another segment the CLI reads as a section, `?`
+ * starts the attribute selector, and a per-cent sign is read as an invalid
+ * reference rather than as an encoding. An allow-list is used instead of a
+ * list of forbidden characters so a syntax this Module has not met cannot pass
+ * through it. Every id op itself issues is inside this set.
+ */
+const referenceSafeSegment = /^[A-Za-z0-9_.-]{1,128}$/
 
 /** Whether one path is a regular, non-symlink file owned by the current user. */
 function isOwnedRegularFile(path: string): boolean {
@@ -194,8 +205,8 @@ function interpretDelivery(reading: PrivateDeliveryReading): PrivateDeliveryOutc
  * Page, or says exactly why it would not.
  *
  * The order is fixed and each step fails closed before the next: approval,
- * the configured Credential Vault, the wrapper, the candidate listing, the
- * per-item readings, the exact-origin unique match, the one field, the proved
+ * the configured Credential Vault, the wrapper, the metadata listing, the
+ * exact-origin unique match, its one detail read, the one field, the proved
  * entry, and only then the delivery.
  */
 export async function deliverPrivately(input: {
@@ -216,57 +227,64 @@ export async function deliverPrivately(input: {
 	if (configuration.kind === "unsafe") return { kind: "vault_unsafe" }
 	const vault = configuration.vault
 	if (!isOwnedExecutable(credentialWrapperPath)) return { kind: "wrapper_unavailable" }
-	const listing = vaultReplyText(
-		runVaultCommand(credentialWrapperPath, [
-			"op",
-			"item",
-			"list",
-			"--vault",
-			vault,
-			"--categories",
-			"Login",
-			"--format",
-			"json",
-		]),
-	)
+	const listReading = runVaultCommand(credentialWrapperPath, [
+		"op",
+		"item",
+		"list",
+		"--vault",
+		vault,
+		"--categories",
+		"Login",
+		"--format",
+		"json",
+	])
+	const listing = vaultReplyText(listReading)
 	const candidates = listing === undefined ? undefined : interpretLoginItemList(listing)
 	if (candidates === undefined) return { kind: "vault_unverified" }
-	const matches: CredentialItemReading[] = []
 	for (const candidate of candidates) {
-		const replyText = vaultReplyText(
-			runVaultCommand(credentialWrapperPath, [
-				"op",
-				"item",
-				"get",
-				candidate,
-				"--vault",
-				vault,
-				"--format",
-				"json",
-			]),
-		)
-		const item = replyText === undefined ? undefined : interpretLoginItem(replyText)
-		if (item === undefined) return { kind: "vault_unverified" }
-		// An item neither of whose vault names is the configured one answered for
-		// a vault this Module never asked about, and nothing from it is used.
-		if (item.vaultId !== vault && item.vaultName !== vault) return { kind: "vault_mismatch" }
-		if (declaresExactOrigin(item, input.origin)) matches.push(item)
+		if (candidate.vaultId !== vault && candidate.vaultName !== vault) {
+			return { kind: "vault_mismatch" }
+		}
 	}
+	const matches = candidates.filter((candidate) => declaresExactOrigin(candidate, input.origin))
 	if (matches.length === 0) return { kind: "match_absent" }
-	// Two items declaring one exact origin is a question for the vault's owner,
-	// never a choice this Module makes: it does not pick a winner.
 	if (matches.length > 1) return { kind: "match_ambiguous" }
-	const matched = matches[0]!
+	const matchedCandidate = matches[0]!
+	// The complete Login listing proves this exact candidate unique before one
+	// detail read names it, so the wrapper and op calls stay constant however
+	// many Login items the vault holds, and no unmatched item's field values
+	// ever enter this process.
+	const detailReading = runVaultCommand(
+		credentialWrapperPath,
+		["op", "item", "get", matchedCandidate.id, "--vault", vault, "--format", "json"],
+	)
+	const detail = vaultReplyText(detailReading)
+	const matched = detail === undefined ? undefined : interpretLoginItemDetail(detail)
+	if (matched === undefined) return { kind: "vault_unverified" }
+	if (matched.id !== matchedCandidate.id) return { kind: "vault_unverified" }
+	if (matched.vaultId !== vault && matched.vaultName !== vault) return { kind: "vault_mismatch" }
+	if (!declaresExactOrigin(matched, input.origin)) return { kind: "vault_unverified" }
 	const purpose = input.field === "username" ? "USERNAME" : "PASSWORD"
 	const selected = matched.fields.filter((field) => field.purpose === purpose && field.id !== "")
 	if (selected.length !== 1) return { kind: "field_ambiguous" }
-	// The field is named by id, never by label, and every segment is
-	// URL-path-encoded. This is what closes the duplicate-label hazard the op
-	// CLI has: two fields may share a label, and a label may carry reference
-	// syntax, but an encoded id names exactly one field.
-	const reference = `op://${encodeURIComponent(vault)}/${encodeURIComponent(matched.id)}/${
-		encodeURIComponent(selected[0]!.id)
-	}`
+	// The reference names the vault, the item, and the field by id, never by
+	// name or label. That is what closes the duplicate-label hazard the op CLI
+	// has: two fields may share a label, and a label may carry reference
+	// syntax, but an id names exactly one field. The vault id comes from the
+	// detail read this Module already proved to be the configured vault, so the
+	// delivery is pinned to that exact vault rather than to a name two vaults
+	// could share.
+	//
+	// A segment outside the safe set is refused rather than escaped. A secret
+	// reference has no escape syntax: the installed op CLI reads a per-cent
+	// sign as an invalid reference rather than as an encoding, `/` would add a
+	// segment it reads as a section, and `?` would add the attribute selector.
+	// So an id this Module cannot name exactly is an id it does not name at all.
+	const segments = [matched.vaultId, matched.id, selected[0]!.id]
+	if (!segments.every((segment) => referenceSafeSegment.test(segment))) {
+		return { kind: "vault_unverified" }
+	}
+	const reference = `op://${segments.join("/")}`
 	// The child re-enters through the same entry this process was started from,
 	// so one bundle still ships. The entry is proved owned before the wrapper
 	// is asked to hand a secret to it.

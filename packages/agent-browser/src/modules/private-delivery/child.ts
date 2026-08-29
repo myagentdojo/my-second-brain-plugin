@@ -217,7 +217,6 @@ async function describeNode(
  */
 interface FieldAccessibility {
 	readonly name: string
-	readonly holdsValue: boolean
 	readonly focused: boolean
 }
 
@@ -237,7 +236,6 @@ async function readField(
 		// The reply may carry ancestors as well, so the field is selected by
 		// identity rather than by position.
 		if (node === undefined || node.backendDOMNodeId !== backendNodeId) continue
-		const value = record(node.value)?.value
 		const name = record(node.name)?.value
 		const properties = Array.isArray(node.properties) ? node.properties : []
 		const focused = properties.some((property) => {
@@ -246,11 +244,44 @@ async function readField(
 		})
 		return {
 			name: typeof name === "string" ? name : "",
-			holdsValue: typeof value === "string" && value !== "",
 			focused,
 		}
 	}
 	return undefined
+}
+
+/**
+ * Whether the live node holds text, without bringing that text across CDP.
+ *
+ * Accessibility is still the source for the field name and focus, but a
+ * partial AX tree is a reading of the control rather than of the property the
+ * fill wrote, and a Login control that does not publish its value there would
+ * read as an unfilled field. Whether any given control does that is not proved
+ * here. Resolving the exact backend node and asking the page for one boolean
+ * keeps the proof bound to that field and to the property `insertText`
+ * mutated, while leaving the credential value in the page. The object is owned
+ * by this socket and disappears when the child closes it, so it is never
+ * retained beyond this one question.
+ */
+async function fieldHoldsValue(
+	channel: CdpChannel,
+	backendNodeId: number,
+): Promise<boolean | undefined> {
+	const resolved = await channel.call("DOM.resolveNode", { backendNodeId })
+	const objectId = nonEmptyText(record(record(resolved.result)?.object)?.objectId)
+	if (!resolved.ok || objectId === undefined) return undefined
+	const reply = await channel.call("Runtime.callFunctionOn", {
+		objectId,
+		functionDeclaration: `function () {
+			const value = "value" in this ? this.value : this.textContent
+			return typeof value === "string" && value.length > 0
+		}`,
+		returnByValue: true,
+	})
+	const result = record(record(reply.result)?.result)
+	return reply.ok && result?.type === "boolean" && typeof result.value === "boolean"
+		? result.value
+		: undefined
 }
 
 /**
@@ -312,7 +343,9 @@ async function deliverIntoPage(
 	if (credentialFieldKind(description, field.name) !== arguments_.field) {
 		return say("field_mismatch")
 	}
-	if (field.holdsValue) return say("field_not_empty")
+	const initiallyHoldsValue = await fieldHoldsValue(channel, arguments_.backendNodeId)
+	if (initiallyHoldsValue === undefined) return say("unverified")
+	if (initiallyHoldsValue) return say("field_not_empty")
 	// The identity is proved once more after the reads above, so a navigation
 	// that landed during them never receives the value.
 	const second = await readFrame(channel)
@@ -335,7 +368,7 @@ async function deliverIntoPage(
 	const after = await readFrame(channel)
 	if (after === undefined) return say("unverified")
 	if (!isExactDocument(after, arguments_)) return say("superseded")
-	const readBack = await readField(channel, arguments_.backendNodeId)
-	if (readBack === undefined) return say("unverified")
-	return sayDelivered(readBack.holdsValue)
+	const holdsValue = await fieldHoldsValue(channel, arguments_.backendNodeId)
+	if (holdsValue === undefined) return say("unverified")
+	return sayDelivered(holdsValue)
 }

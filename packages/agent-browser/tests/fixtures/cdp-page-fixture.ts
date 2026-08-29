@@ -51,6 +51,8 @@ export interface FixtureElement {
 	readonly focusFails?: boolean
 	/** The value the field already holds. */
 	readonly value?: string
+	/** Accessibility omits this field's value after text enters it. */
+	readonly omitValueAfterInsert?: boolean
 	/**
 	 * The element is described inside this owner's `contentDocument`, the way a
 	 * real frame's document is, rather than among its children.
@@ -439,10 +441,13 @@ export function startCdpPageFixture(options: CdpPageFixtureOptions = {}): CdpPag
 			const live = element.becomesName !== undefined && describedAfterSnapshot
 				? { ...element, name: element.becomesName }
 				: element
+			const value = element.omitValueAfterInsert === true && insertedText.length > 0
+				? undefined
+				: { type: "string", value: fieldValue(element) }
 			return {
 				nodes: [{
 					...accessibilityNode(live, 0),
-					value: { type: "string", value: fieldValue(element) },
+					...(value === undefined ? {} : { value }),
 					properties: [
 						{ name: "focusable", value: { type: "booleanOrUndefined", value: true } },
 						{
@@ -499,6 +504,18 @@ export function startCdpPageFixture(options: CdpPageFixtureOptions = {}): CdpPag
 				? { ...element.attributes, ...element.becomesAttributes }
 				: element.attributes
 			return { node: { ...domNode(element, 0), attributes: attributeList(attributes) } }
+		}
+		if (method === "DOM.resolveNode") {
+			const element = findElement(parameters.backendNodeId)
+			if (element === undefined) throw new Error("no such node")
+			return { object: { objectId: `fixture-node-${element.backendNodeId}` } }
+		}
+		if (method === "Runtime.callFunctionOn") {
+			const objectId = String(parameters.objectId)
+			const match = /^fixture-node-([0-9]+)$/.exec(objectId)
+			const element = match === null ? undefined : findElement(Number(match[1]))
+			if (element === undefined) throw new Error("no such resolved node")
+			return { result: { type: "boolean", value: fieldValue(element) !== "" } }
 		}
 		if (method === "DOM.focus") {
 			const element = findElement(parameters.backendNodeId)

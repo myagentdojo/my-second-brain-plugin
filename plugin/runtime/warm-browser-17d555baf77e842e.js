@@ -816,7 +816,6 @@ async function readField(channel, backendNodeId) {
     const node = record2(entry);
     if (node === undefined || node.backendDOMNodeId !== backendNodeId)
       continue;
-    const value = record2(node.value)?.value;
     const name = record2(node.name)?.value;
     const properties = Array.isArray(node.properties) ? node.properties : [];
     const focused = properties.some((property) => {
@@ -825,11 +824,26 @@ async function readField(channel, backendNodeId) {
     });
     return {
       name: typeof name === "string" ? name : "",
-      holdsValue: typeof value === "string" && value !== "",
       focused
     };
   }
   return;
+}
+async function fieldHoldsValue(channel, backendNodeId) {
+  const resolved = await channel.call("DOM.resolveNode", { backendNodeId });
+  const objectId = nonEmptyText2(record2(record2(resolved.result)?.object)?.objectId);
+  if (!resolved.ok || objectId === undefined)
+    return;
+  const reply = await channel.call("Runtime.callFunctionOn", {
+    objectId,
+    functionDeclaration: `function () {
+			const value = "value" in this ? this.value : this.textContent
+			return typeof value === "string" && value.length > 0
+		}`,
+    returnByValue: true
+  });
+  const result = record2(record2(reply.result)?.result);
+  return reply.ok && result?.type === "boolean" && typeof result.value === "boolean" ? result.value : undefined;
 }
 async function runPrivateDeliveryChild(argumentList) {
   const arguments_ = parseChildArguments(argumentList);
@@ -870,7 +884,10 @@ async function deliverIntoPage(channel, arguments_, deliveredValue) {
   if (credentialFieldKind(description, field.name) !== arguments_.field) {
     return say("field_mismatch");
   }
-  if (field.holdsValue)
+  const initiallyHoldsValue = await fieldHoldsValue(channel, arguments_.backendNodeId);
+  if (initiallyHoldsValue === undefined)
+    return say("unverified");
+  if (initiallyHoldsValue)
     return say("field_not_empty");
   const second = await readFrame(channel);
   if (second === undefined)
@@ -892,10 +909,10 @@ async function deliverIntoPage(channel, arguments_, deliveredValue) {
     return say("unverified");
   if (!isExactDocument(after, arguments_))
     return say("superseded");
-  const readBack = await readField(channel, arguments_.backendNodeId);
-  if (readBack === undefined)
+  const holdsValue = await fieldHoldsValue(channel, arguments_.backendNodeId);
+  if (holdsValue === undefined)
     return say("unverified");
-  return sayDelivered(readBack.holdsValue);
+  return sayDelivered(holdsValue);
 }
 
 // packages/agent-browser/src/modules/warm-browser/contract.ts
@@ -1088,6 +1105,15 @@ function record3(value) {
 function boundedText(value) {
   return typeof value === "string" && value !== "" && value.length <= replyTextLimit ? value : undefined;
 }
+function interpretCandidate(entry) {
+  const item = record3(entry);
+  const id = boundedText(item?.id);
+  const vault = record3(item?.vault);
+  const vaultId = boundedText(vault?.id);
+  const vaultName = boundedText(vault?.name);
+  const origins = declaredOrigins(item?.urls);
+  return id === undefined || vaultId === undefined || vaultName === undefined || origins === undefined ? undefined : { id, vaultId, vaultName, declaredOrigins: origins };
+}
 function interpretLoginItemList(text) {
   let parsed;
   try {
@@ -1097,14 +1123,16 @@ function interpretLoginItemList(text) {
   }
   if (!Array.isArray(parsed) || parsed.length > candidateListLimit)
     return;
-  const ids = [];
+  const candidates = [];
   for (const entry of parsed) {
-    const id = boundedText(record3(entry)?.id);
-    if (id === undefined || ids.includes(id))
+    const candidate = interpretCandidate(entry);
+    if (candidate === undefined)
       return;
-    ids.push(id);
+    if (candidates.some((seen) => seen.id === candidate.id))
+      return;
+    candidates.push(candidate);
   }
-  return ids;
+  return candidates;
 }
 function declaredOrigins(urls) {
   if (urls === undefined)
@@ -1150,26 +1178,19 @@ function itemFields(fields) {
   }
   return readings;
 }
-function interpretLoginItem(text) {
+function interpretLoginItem(parsed) {
+  const candidate = interpretCandidate(parsed);
+  const fields = itemFields(record3(parsed)?.fields);
+  return candidate === undefined || fields === undefined ? undefined : { ...candidate, fields };
+}
+function interpretLoginItemDetail(text) {
   let parsed;
   try {
     parsed = JSON.parse(text);
   } catch {
     return;
   }
-  const item = record3(parsed);
-  if (item === undefined)
-    return;
-  const id = boundedText(item.id);
-  const vault = record3(item.vault);
-  const vaultId = boundedText(vault?.id);
-  const vaultName = boundedText(vault?.name);
-  const origins = declaredOrigins(item.urls);
-  const fields = itemFields(item.fields);
-  if (id === undefined || vaultId === undefined || vaultName === undefined || origins === undefined || fields === undefined) {
-    return;
-  }
-  return { id, vaultId, vaultName, declaredOrigins: origins, fields };
+  return interpretLoginItem(parsed);
 }
 function declaresExactOrigin(item, origin) {
   return item.declaredOrigins.some((declared) => declared === origin);
@@ -1178,6 +1199,7 @@ function declaresExactOrigin(item, origin) {
 // packages/agent-browser/src/modules/private-delivery/private-delivery.ts
 var credentialWrapperPath = join2(homedir(), "code/dotfiles/bin/with-one-password-token");
 var reservedWrapperExits = [2, 3, 4, 5, 70];
+var referenceSafeSegment = /^[A-Za-z0-9_.-]{1,128}$/;
 function isOwnedRegularFile(path) {
   try {
     const metadata = lstatSync2(path);
@@ -1272,7 +1294,7 @@ async function deliverPrivately(input) {
   const vault = configuration.vault;
   if (!isOwnedExecutable(credentialWrapperPath))
     return { kind: "wrapper_unavailable" };
-  const listing = vaultReplyText(runVaultCommand(credentialWrapperPath, [
+  const listReading = runVaultCommand(credentialWrapperPath, [
     "op",
     "item",
     "list",
@@ -1282,40 +1304,42 @@ async function deliverPrivately(input) {
     "Login",
     "--format",
     "json"
-  ]));
+  ]);
+  const listing = vaultReplyText(listReading);
   const candidates = listing === undefined ? undefined : interpretLoginItemList(listing);
   if (candidates === undefined)
     return { kind: "vault_unverified" };
-  const matches = [];
   for (const candidate of candidates) {
-    const replyText = vaultReplyText(runVaultCommand(credentialWrapperPath, [
-      "op",
-      "item",
-      "get",
-      candidate,
-      "--vault",
-      vault,
-      "--format",
-      "json"
-    ]));
-    const item = replyText === undefined ? undefined : interpretLoginItem(replyText);
-    if (item === undefined)
-      return { kind: "vault_unverified" };
-    if (item.vaultId !== vault && item.vaultName !== vault)
+    if (candidate.vaultId !== vault && candidate.vaultName !== vault) {
       return { kind: "vault_mismatch" };
-    if (declaresExactOrigin(item, input.origin))
-      matches.push(item);
+    }
   }
+  const matches = candidates.filter((candidate) => declaresExactOrigin(candidate, input.origin));
   if (matches.length === 0)
     return { kind: "match_absent" };
   if (matches.length > 1)
     return { kind: "match_ambiguous" };
-  const matched = matches[0];
+  const matchedCandidate = matches[0];
+  const detailReading = runVaultCommand(credentialWrapperPath, ["op", "item", "get", matchedCandidate.id, "--vault", vault, "--format", "json"]);
+  const detail = vaultReplyText(detailReading);
+  const matched = detail === undefined ? undefined : interpretLoginItemDetail(detail);
+  if (matched === undefined)
+    return { kind: "vault_unverified" };
+  if (matched.id !== matchedCandidate.id)
+    return { kind: "vault_unverified" };
+  if (matched.vaultId !== vault && matched.vaultName !== vault)
+    return { kind: "vault_mismatch" };
+  if (!declaresExactOrigin(matched, input.origin))
+    return { kind: "vault_unverified" };
   const purpose = input.field === "username" ? "USERNAME" : "PASSWORD";
   const selected = matched.fields.filter((field) => field.purpose === purpose && field.id !== "");
   if (selected.length !== 1)
     return { kind: "field_ambiguous" };
-  const reference = `op://${encodeURIComponent(vault)}/${encodeURIComponent(matched.id)}/${encodeURIComponent(selected[0].id)}`;
+  const segments = [matched.vaultId, matched.id, selected[0].id];
+  if (!segments.every((segment) => referenceSafeSegment.test(segment))) {
+    return { kind: "vault_unverified" };
+  }
+  const reference = `op://${segments.join("/")}`;
   const entry = process.argv[1];
   if (entry === undefined || !isOwnedRegularFile(entry)) {
     return { kind: "unverified", touchedPage: false };
@@ -3073,7 +3097,7 @@ function refuseLoginDelivery(parsed, paths, state, outcome) {
     case "wrapper_unavailable":
       staticFailure("login", runId, "CREDENTIAL_WRAPPER_UNAVAILABLE", 20, "The one credential wrapper Private Delivery invokes is unavailable.", "Restore the with-one-password-token wrapper before retrying.");
     case "vault_unverified":
-      staticFailure("login", runId, "CREDENTIAL_VAULT_UNVERIFIED", 20, "The Credential Vault could not be read or its reply could not be interpreted.", "Inspect the credential wrapper and the configured Credential Vault before retrying.");
+      staticFailure("login", runId, "CREDENTIAL_VAULT_UNVERIFIED", 20, "The Credential Vault reply could not be read, interpreted, or safely used.", "Inspect the credential wrapper and the configured Credential Vault before retrying.");
     case "vault_mismatch":
       staticFailure("login", runId, "CREDENTIAL_VAULT_MISMATCH", 21, "A resolved Login item does not belong to the configured Credential Vault.", "Inspect the configured Credential Vault before retrying.");
     case "match_absent":

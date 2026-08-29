@@ -33,11 +33,13 @@ export interface CredentialItemField {
 	readonly purpose: string
 }
 
-export interface CredentialItemReading {
-	readonly id: string
-	readonly vaultId: string
-	readonly vaultName: string
-	readonly declaredOrigins: readonly string[]
+/**
+ * One whole `op item get` reply as the small record the delivery needs: the
+ * same metadata the listing carried, so the two readings can be compared
+ * rather than merged, plus the fields, which only a detail reply carries. The
+ * values sitting beside those fields in the reply are never read.
+ */
+export interface CredentialItemReading extends CredentialItemCandidateReading {
 	readonly fields: readonly CredentialItemField[]
 }
 
@@ -54,13 +56,48 @@ function boundedText(value: unknown): string | undefined {
 }
 
 /**
- * The candidate ids one listing reply names, in listed order, or `undefined`
- * when the reply is not an array of records each carrying a non-empty string
- * id. A repeated id refuses the whole listing with them: a healthy listing
- * names each item once, and a doubled id would let one item read as two
- * matches.
+ * The non-secret Login metadata every reply must carry about one item: who it
+ * is, which vault holds it, and which origins it declares. The listing decides
+ * the unique exact-origin match from these alone; only the matched item's id
+ * reaches the later detail command.
  */
-export function interpretLoginItemList(text: string): readonly string[] | undefined {
+export interface CredentialItemCandidateReading {
+	readonly id: string
+	readonly vaultId: string
+	readonly vaultName: string
+	readonly declaredOrigins: readonly string[]
+}
+
+/**
+ * That shared metadata read off one reply record, or `undefined` when the
+ * record does not carry all of it. It is read the same way from a listing
+ * entry and from a detail reply, because a candidate that reads one way in the
+ * listing and another in the detail would be two different items wearing one
+ * id.
+ */
+function interpretCandidate(entry: unknown): CredentialItemCandidateReading | undefined {
+	const item = record(entry)
+	const id = boundedText(item?.id)
+	const vault = record(item?.vault)
+	const vaultId = boundedText(vault?.id)
+	const vaultName = boundedText(vault?.name)
+	const origins = declaredOrigins(item?.urls)
+	return id === undefined || vaultId === undefined || vaultName === undefined ||
+			origins === undefined
+		? undefined
+		: { id, vaultId, vaultName, declaredOrigins: origins }
+}
+
+/**
+ * The candidates one listing reply names, in listed order, or `undefined` when
+ * the reply is not a bounded array of records each carrying that whole
+ * metadata. A repeated id refuses the whole listing with them: a healthy
+ * listing names each item once, and a doubled id would let one item read as
+ * two matches.
+ */
+export function interpretLoginItemList(
+	text: string,
+): readonly CredentialItemCandidateReading[] | undefined {
 	let parsed: unknown
 	try {
 		parsed = JSON.parse(text)
@@ -68,13 +105,14 @@ export function interpretLoginItemList(text: string): readonly string[] | undefi
 		return undefined
 	}
 	if (!Array.isArray(parsed) || parsed.length > candidateListLimit) return undefined
-	const ids: string[] = []
+	const candidates: CredentialItemCandidateReading[] = []
 	for (const entry of parsed) {
-		const id = boundedText(record(entry)?.id)
-		if (id === undefined || ids.includes(id)) return undefined
-		ids.push(id)
+		const candidate = interpretCandidate(entry)
+		if (candidate === undefined) return undefined
+		if (candidates.some((seen) => seen.id === candidate.id)) return undefined
+		candidates.push(candidate)
 	}
-	return ids
+	return candidates
 }
 
 /**
@@ -125,35 +163,25 @@ function itemFields(fields: unknown): readonly CredentialItemField[] | undefined
 }
 
 /**
- * One `op item get` reply as the small record the matching needs, or
- * `undefined` when the reply is not interpretable. Nothing is repaired: a
- * reply this reading cannot vouch for whole is not vouched for in part.
+ * One item of an `op item get` reply as the small record the matching needs,
+ * or `undefined` when it is not interpretable. Nothing is repaired: an item
+ * this reading cannot vouch for whole is not vouched for in part.
  */
-export function interpretLoginItem(text: string): CredentialItemReading | undefined {
+function interpretLoginItem(parsed: unknown): CredentialItemReading | undefined {
+	const candidate = interpretCandidate(parsed)
+	const fields = itemFields(record(parsed)?.fields)
+	return candidate === undefined || fields === undefined ? undefined : { ...candidate, fields }
+}
+
+/** One full item detail reply, or `undefined` when it is not one whole item. */
+export function interpretLoginItemDetail(text: string): CredentialItemReading | undefined {
 	let parsed: unknown
 	try {
 		parsed = JSON.parse(text)
 	} catch {
 		return undefined
 	}
-	const item = record(parsed)
-	if (item === undefined) return undefined
-	const id = boundedText(item.id)
-	const vault = record(item.vault)
-	const vaultId = boundedText(vault?.id)
-	const vaultName = boundedText(vault?.name)
-	const origins = declaredOrigins(item.urls)
-	const fields = itemFields(item.fields)
-	if (
-		id === undefined ||
-		vaultId === undefined ||
-		vaultName === undefined ||
-		origins === undefined ||
-		fields === undefined
-	) {
-		return undefined
-	}
-	return { id, vaultId, vaultName, declaredOrigins: origins, fields }
+	return interpretLoginItem(parsed)
 }
 
 /**
@@ -164,6 +192,9 @@ export function interpretLoginItem(text: string): CredentialItemReading | undefi
  * normalised, stripped, or prefix-matched, and hostnames are never compared
  * on their own.
  */
-export function declaresExactOrigin(item: CredentialItemReading, origin: string): boolean {
+export function declaresExactOrigin(
+	item: Pick<CredentialItemReading, "declaredOrigins">,
+	origin: string,
+): boolean {
 	return item.declaredOrigins.some((declared) => declared === origin)
 }

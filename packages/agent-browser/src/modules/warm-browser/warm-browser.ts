@@ -1851,7 +1851,7 @@ function refuseLoginDelivery(
 				runId,
 				"CREDENTIAL_VAULT_UNVERIFIED",
 				20,
-				"The Credential Vault could not be read or its reply could not be interpreted.",
+				"The Credential Vault reply could not be read, interpreted, or safely used.",
 				"Inspect the credential wrapper and the configured Credential Vault before retrying.",
 			)
 		case "vault_mismatch":
