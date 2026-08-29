@@ -1,12 +1,13 @@
+import { credentialWrapperOutputLimit } from "./contract"
+
 /**
- * Exact-origin unique matching over already-read op replies.
+ * Exact-origin unique matching over already-read metadata.
  *
  * Pure interpretation, no effects: the bytes were read elsewhere, and this
- * file only decides what they say. It reads an item's identity, its vault,
- * its declared websites, and its fields' purposes and ids, and nothing else.
- * An `op item get` reply carries field values beside those purposes, and no
- * value is ever copied into a reading this file returns, so the reply's
- * secrets stop existing when the reply is dropped.
+ * file only decides what they say. The full Login listing and `op item get`
+ * reply reach this interpreter only inside their disposable sanitizers. Only
+ * bounded identity, vault, origins, field purposes, and field ids leave those
+ * processes.
  */
 
 /**
@@ -182,6 +183,156 @@ export function interpretLoginItemDetail(text: string): CredentialItemReading | 
 		return undefined
 	}
 	return interpretLoginItem(parsed)
+}
+
+interface SanitizedCredentialDetailReply {
+	readonly schemaVersion: 1
+	readonly status: "sanitized"
+	readonly detail: {
+		readonly id: string
+		readonly vault: { readonly id: string; readonly name: string }
+		readonly urls: readonly { readonly href: string }[]
+		readonly fields: readonly { readonly id: string; readonly purpose: string }[]
+	}
+}
+
+interface SanitizedCredentialListReply {
+	readonly schemaVersion: 1
+	readonly status: "sanitized"
+	readonly candidates: readonly {
+		readonly id: string
+		readonly vault: { readonly id: string; readonly name: string }
+		readonly urls: readonly { readonly href: string }[]
+	}[]
+}
+
+/** The one closed non-secret reply a healthy Login-list sanitizer prints. */
+export function sanitizedCredentialListReply(
+	candidates: readonly CredentialItemCandidateReading[],
+): string {
+	const reply: SanitizedCredentialListReply = {
+		schemaVersion: 1,
+		status: "sanitized",
+		candidates: candidates.map((candidate) => ({
+			id: candidate.id,
+			vault: { id: candidate.vaultId, name: candidate.vaultName },
+			urls: candidate.declaredOrigins.map((href) => ({ href })),
+		})),
+	}
+	return `${JSON.stringify(reply)}\n`
+}
+
+/** The one closed non-secret reply a healthy sanitizer prints. */
+export function sanitizedCredentialDetailReply(detail: CredentialItemReading): string {
+	const reply: SanitizedCredentialDetailReply = {
+		schemaVersion: 1,
+		status: "sanitized",
+		detail: {
+			id: detail.id,
+			vault: { id: detail.vaultId, name: detail.vaultName },
+			urls: detail.declaredOrigins.map((href) => ({ href })),
+			fields: detail.fields
+				.filter(({ purpose }) => purpose === "USERNAME" || purpose === "PASSWORD")
+				.map(({ id, purpose }) => ({ id, purpose })),
+		},
+	}
+	return `${JSON.stringify(reply)}\n`
+}
+
+function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+	const actual = Object.keys(value).sort()
+	const expected = [...keys].sort()
+	return actual.length === expected.length && actual.every((key, index) => key === expected[index])
+}
+
+/** Reads one exact top-level sanitizer envelope and returns its named payload. */
+function sanitizedPayload(raw: string, payloadName: "candidates" | "detail"): unknown {
+	if (raw.length > credentialWrapperOutputLimit) return undefined
+	const text = raw.trim()
+	if (text === "" || text.includes("\n")) return undefined
+	let parsed: unknown
+	try {
+		parsed = JSON.parse(text)
+	} catch {
+		return undefined
+	}
+	const reply = record(parsed)
+	if (
+		reply === undefined ||
+		!hasExactKeys(reply, ["schemaVersion", "status", payloadName]) ||
+		reply.schemaVersion !== 1 ||
+		reply.status !== "sanitized"
+	) {
+		return undefined
+	}
+	return reply[payloadName]
+}
+
+/**
+ * Interprets the Login-list sanitizer's closed reply in its parent. An item
+ * title, subtitle, additional-information value, or unknown property cannot
+ * cross this seam because every record is checked for exact keys first.
+ */
+export function interpretSanitizedCredentialList(
+	raw: string,
+): readonly CredentialItemCandidateReading[] | undefined {
+	const candidates = sanitizedPayload(raw, "candidates")
+	if (!Array.isArray(candidates)) return undefined
+	for (const candidate of candidates) {
+		const item = record(candidate)
+		const vault = record(item?.vault)
+		if (
+			item === undefined ||
+			!hasExactKeys(item, ["id", "vault", "urls"]) ||
+			vault === undefined ||
+			!hasExactKeys(vault, ["id", "name"]) ||
+			!Array.isArray(item.urls)
+		) {
+			return undefined
+		}
+		for (const url of item.urls) {
+			const entry = record(url)
+			if (entry === undefined || !hasExactKeys(entry, ["href"])) return undefined
+		}
+	}
+	return interpretLoginItemList(JSON.stringify(candidates))
+}
+
+/**
+ * Interprets the sanitizer's closed reply in its parent. Exact keys are part
+ * of the interface: an extra title, value, note, or future field is rejected
+ * rather than allowed to carry detail bytes across the process seam.
+ */
+export function interpretSanitizedCredentialDetail(
+	raw: string,
+): CredentialItemReading | undefined {
+	const detail = record(sanitizedPayload(raw, "detail"))
+	const vault = record(detail?.vault)
+	if (
+		detail === undefined ||
+		!hasExactKeys(detail, ["id", "vault", "urls", "fields"]) ||
+		vault === undefined ||
+		!hasExactKeys(vault, ["id", "name"]) ||
+		!Array.isArray(detail.urls) ||
+		!Array.isArray(detail.fields)
+	) {
+		return undefined
+	}
+	for (const url of detail.urls) {
+		const entry = record(url)
+		if (entry === undefined || !hasExactKeys(entry, ["href"])) return undefined
+	}
+	for (const field of detail.fields) {
+		const entry = record(field)
+		if (
+			entry === undefined ||
+			!hasExactKeys(entry, ["id", "purpose"]) ||
+			(entry.purpose !== "USERNAME" && entry.purpose !== "PASSWORD")
+		) {
+			return undefined
+		}
+	}
+	return interpretLoginItemDetail(JSON.stringify(detail))
 }
 
 /**

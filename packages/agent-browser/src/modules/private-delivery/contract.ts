@@ -19,6 +19,15 @@ export const credentialWrapperTimeoutMs = 30_000
 /** The unignorable signal used when one credential-wrapper process exceeds its bound. */
 export const credentialWrapperKillSignal = "SIGKILL" as const
 
+/** Allows the sanitizer to observe and report its inner wrapper timeout first. */
+export const credentialDetailSanitizerTimeoutMs = credentialWrapperTimeoutMs + 5_000
+
+/** The hidden entry selector for the disposable Login-detail sanitizer. */
+export const privateDeliveryDetailSanitizerArgument = "--sanitize-one-login-detail"
+
+/** The hidden entry selector for the disposable Login-list sanitizer. */
+export const privateDeliveryListSanitizerArgument = "--sanitize-login-list"
+
 /**
  * What one private delivery came to.
  *

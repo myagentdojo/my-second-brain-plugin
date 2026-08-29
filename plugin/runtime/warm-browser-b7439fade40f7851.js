@@ -113,7 +113,7 @@ async function openCdpChannel(webSocketUrl) {
 }
 
 // packages/agent-browser/src/modules/warm-browser/controlled-page.ts
-import { Buffer } from "buffer";
+import { Buffer as Buffer2 } from "buffer";
 
 // packages/agent-browser/src/modules/warm-browser/credential-fields.ts
 var credentialInputTypes = ["password"];
@@ -469,7 +469,7 @@ async function captureControlledPage(input) {
       return { kind: "identity_changed" };
     if (data.length % 4 !== 0 || !strictBase64.test(data))
       return { kind: "unverified" };
-    return { kind: "captured", basis: after, png: Buffer.from(data, "base64") };
+    return { kind: "captured", basis: after, png: Buffer2.from(data, "base64") };
   });
 }
 async function readControlledPageField(input) {
@@ -918,6 +918,412 @@ async function deliverIntoPage(channel, arguments_, deliveredValue) {
   return sayDelivered(holdsValue);
 }
 
+// packages/agent-browser/src/modules/private-delivery/contract.ts
+var privateDeliveryChildReplyLimit = 4096;
+var credentialWrapperOutputLimit = 1048576;
+var credentialWrapperTimeoutMs = 30000;
+var credentialWrapperKillSignal = "SIGKILL";
+var credentialDetailSanitizerTimeoutMs = credentialWrapperTimeoutMs + 5000;
+var privateDeliveryDetailSanitizerArgument = "--sanitize-one-login-detail";
+var privateDeliveryListSanitizerArgument = "--sanitize-login-list";
+var privateDeliveryChildOutcomes = [
+  "delivered",
+  "superseded",
+  "identity_changed",
+  "origin_changed",
+  "field_mismatch",
+  "field_not_empty",
+  "element_absent",
+  "unverified",
+  "usage"
+];
+
+// packages/agent-browser/src/modules/private-delivery/credential-match.ts
+var candidateListLimit = 512;
+var declaredUrlLimit = 32;
+var itemFieldLimit = 128;
+var replyTextLimit = 2048;
+function record3(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : undefined;
+}
+function boundedText(value) {
+  return typeof value === "string" && value !== "" && value.length <= replyTextLimit ? value : undefined;
+}
+function interpretCandidate(entry) {
+  const item = record3(entry);
+  const id = boundedText(item?.id);
+  const vault = record3(item?.vault);
+  const vaultId = boundedText(vault?.id);
+  const vaultName = boundedText(vault?.name);
+  const origins = declaredOrigins(item?.urls);
+  return id === undefined || vaultId === undefined || vaultName === undefined || origins === undefined ? undefined : { id, vaultId, vaultName, declaredOrigins: origins };
+}
+function interpretLoginItemList(text) {
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return;
+  }
+  if (!Array.isArray(parsed) || parsed.length > candidateListLimit)
+    return;
+  const candidates = [];
+  for (const entry of parsed) {
+    const candidate = interpretCandidate(entry);
+    if (candidate === undefined)
+      return;
+    if (candidates.some((seen) => seen.id === candidate.id))
+      return;
+    candidates.push(candidate);
+  }
+  return candidates;
+}
+function declaredOrigins(urls) {
+  if (urls === undefined)
+    return [];
+  if (!Array.isArray(urls) || urls.length > declaredUrlLimit)
+    return;
+  const origins = [];
+  for (const entry of urls) {
+    const href = record3(entry)?.href;
+    if (typeof href !== "string" || href.length > replyTextLimit)
+      continue;
+    let parsed;
+    try {
+      parsed = new URL(href);
+    } catch {
+      continue;
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:")
+      continue;
+    origins.push(parsed.origin);
+  }
+  return origins;
+}
+function itemFields(fields) {
+  if (fields === undefined)
+    return [];
+  if (!Array.isArray(fields) || fields.length > itemFieldLimit)
+    return;
+  const readings = [];
+  for (const entry of fields) {
+    const field = record3(entry);
+    if (field === undefined)
+      return;
+    const id = field.id;
+    if (typeof id !== "string" || id.length > replyTextLimit)
+      return;
+    const purpose = field.purpose;
+    if (purpose !== undefined && typeof purpose !== "string")
+      return;
+    if (typeof purpose === "string" && purpose.length > replyTextLimit)
+      return;
+    readings.push({ id, purpose: typeof purpose === "string" ? purpose : "" });
+  }
+  return readings;
+}
+function interpretLoginItem(parsed) {
+  const candidate = interpretCandidate(parsed);
+  const fields = itemFields(record3(parsed)?.fields);
+  return candidate === undefined || fields === undefined ? undefined : { ...candidate, fields };
+}
+function interpretLoginItemDetail(text) {
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return;
+  }
+  return interpretLoginItem(parsed);
+}
+function sanitizedCredentialListReply(candidates) {
+  const reply = {
+    schemaVersion: 1,
+    status: "sanitized",
+    candidates: candidates.map((candidate) => ({
+      id: candidate.id,
+      vault: { id: candidate.vaultId, name: candidate.vaultName },
+      urls: candidate.declaredOrigins.map((href) => ({ href }))
+    }))
+  };
+  return `${JSON.stringify(reply)}
+`;
+}
+function sanitizedCredentialDetailReply(detail) {
+  const reply = {
+    schemaVersion: 1,
+    status: "sanitized",
+    detail: {
+      id: detail.id,
+      vault: { id: detail.vaultId, name: detail.vaultName },
+      urls: detail.declaredOrigins.map((href) => ({ href })),
+      fields: detail.fields.filter(({ purpose }) => purpose === "USERNAME" || purpose === "PASSWORD").map(({ id, purpose }) => ({ id, purpose }))
+    }
+  };
+  return `${JSON.stringify(reply)}
+`;
+}
+function hasExactKeys(value, keys) {
+  const actual = Object.keys(value).sort();
+  const expected = [...keys].sort();
+  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+}
+function sanitizedPayload(raw, payloadName) {
+  if (raw.length > credentialWrapperOutputLimit)
+    return;
+  const text = raw.trim();
+  if (text === "" || text.includes(`
+`))
+    return;
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return;
+  }
+  const reply = record3(parsed);
+  if (reply === undefined || !hasExactKeys(reply, ["schemaVersion", "status", payloadName]) || reply.schemaVersion !== 1 || reply.status !== "sanitized") {
+    return;
+  }
+  return reply[payloadName];
+}
+function interpretSanitizedCredentialList(raw) {
+  const candidates = sanitizedPayload(raw, "candidates");
+  if (!Array.isArray(candidates))
+    return;
+  for (const candidate of candidates) {
+    const item = record3(candidate);
+    const vault = record3(item?.vault);
+    if (item === undefined || !hasExactKeys(item, ["id", "vault", "urls"]) || vault === undefined || !hasExactKeys(vault, ["id", "name"]) || !Array.isArray(item.urls)) {
+      return;
+    }
+    for (const url of item.urls) {
+      const entry = record3(url);
+      if (entry === undefined || !hasExactKeys(entry, ["href"]))
+        return;
+    }
+  }
+  return interpretLoginItemList(JSON.stringify(candidates));
+}
+function interpretSanitizedCredentialDetail(raw) {
+  const detail = record3(sanitizedPayload(raw, "detail"));
+  const vault = record3(detail?.vault);
+  if (detail === undefined || !hasExactKeys(detail, ["id", "vault", "urls", "fields"]) || vault === undefined || !hasExactKeys(vault, ["id", "name"]) || !Array.isArray(detail.urls) || !Array.isArray(detail.fields)) {
+    return;
+  }
+  for (const url of detail.urls) {
+    const entry = record3(url);
+    if (entry === undefined || !hasExactKeys(entry, ["href"]))
+      return;
+  }
+  for (const field of detail.fields) {
+    const entry = record3(field);
+    if (entry === undefined || !hasExactKeys(entry, ["id", "purpose"]) || entry.purpose !== "USERNAME" && entry.purpose !== "PASSWORD") {
+      return;
+    }
+  }
+  return interpretLoginItemDetail(JSON.stringify(detail));
+}
+function declaresExactOrigin(item, origin) {
+  return item.declaredOrigins.some((declared) => declared === origin);
+}
+
+// packages/agent-browser/src/modules/private-delivery/credential-effects.ts
+import { spawn } from "child_process";
+function killOwnedProcessGroup(child, ownership) {
+  const pid = ownership === "child" ? child.pid : process.pid;
+  if (pid === undefined)
+    return false;
+  try {
+    process.kill(-pid, credentialWrapperKillSignal);
+    return true;
+  } catch (error) {
+    if (error.code !== "ESRCH") {
+      try {
+        return child.kill(credentialWrapperKillSignal);
+      } catch {
+        return false;
+      }
+    }
+    return false;
+  }
+}
+function runBoundedProcess(input) {
+  return new Promise((resolveReading) => {
+    const child = spawn(input.command, [...input.argumentList], {
+      detached: input.processGroupOwnership === "child",
+      env: input.environment,
+      stdio: ["ignore", "pipe", "ignore"]
+    });
+    const stdout = [];
+    let stdoutBytes = 0;
+    let failed = false;
+    let settled = false;
+    const stopAsFailure = () => {
+      failed = true;
+      killOwnedProcessGroup(child, input.processGroupOwnership);
+    };
+    const capture = (chunk) => {
+      if (stdoutBytes + chunk.length > credentialWrapperOutputLimit) {
+        stopAsFailure();
+        return;
+      }
+      stdout.push(chunk);
+      stdoutBytes += chunk.length;
+    };
+    child.stdout?.on("data", capture);
+    child.on("error", () => {
+      failed = true;
+    });
+    const timeout = setTimeout(stopAsFailure, input.timeoutMs);
+    child.on("close", (status, signal) => {
+      if (settled)
+        return;
+      settled = true;
+      clearTimeout(timeout);
+      if (input.processGroupOwnership === "child" && killOwnedProcessGroup(child, input.processGroupOwnership)) {
+        failed = true;
+      }
+      resolveReading({
+        status,
+        signal,
+        failed,
+        stdout: Buffer.concat(stdout).toString("utf8")
+      });
+    });
+  });
+}
+async function runVaultCommand(wrapper, argumentList, processGroupOwnership = "child") {
+  const result = await runBoundedProcess({
+    command: wrapper,
+    argumentList,
+    timeoutMs: credentialWrapperTimeoutMs,
+    processGroupOwnership
+  });
+  return {
+    status: result.status,
+    signal: result.signal,
+    failed: result.failed,
+    stdout: typeof result.stdout === "string" ? result.stdout : null
+  };
+}
+var sanitizerEnvironmentNames = ["HOME", "PATH", "LANG", "LC_ALL", "TMPDIR"];
+function sanitizerEnvironment() {
+  const environment = {};
+  for (const name of sanitizerEnvironmentNames) {
+    const value = process.env[name];
+    if (value !== undefined)
+      environment[name] = value;
+  }
+  return environment;
+}
+async function runCredentialSanitizer(entry, argumentList) {
+  const result = await runBoundedProcess({
+    command: process.execPath,
+    argumentList: [
+      "--config=/dev/null",
+      "--no-install",
+      "--env-file=/dev/null",
+      entry,
+      ...argumentList
+    ],
+    environment: sanitizerEnvironment(),
+    timeoutMs: credentialDetailSanitizerTimeoutMs,
+    processGroupOwnership: "child"
+  });
+  return {
+    status: result.status,
+    signal: result.signal,
+    failed: result.failed,
+    stdout: typeof result.stdout === "string" ? result.stdout : null
+  };
+}
+function runSanitizedCredentialDetail(input) {
+  return runCredentialSanitizer(input.entry, [
+    privateDeliveryDetailSanitizerArgument,
+    input.wrapper,
+    input.itemId,
+    input.vault
+  ]);
+}
+function runSanitizedCredentialList(input) {
+  return runCredentialSanitizer(input.entry, [
+    privateDeliveryListSanitizerArgument,
+    input.wrapper,
+    input.vault
+  ]);
+}
+async function runPrivateDelivery(input) {
+  const result = await runBoundedProcess({
+    command: input.wrapper,
+    argumentList: ["inject-stdin", input.reference, "--", ...input.command],
+    environment: sanitizerEnvironment(),
+    timeoutMs: credentialWrapperTimeoutMs,
+    processGroupOwnership: "child"
+  });
+  return {
+    status: result.status,
+    signal: result.signal,
+    failed: result.failed,
+    stdout: typeof result.stdout === "string" ? result.stdout : null
+  };
+}
+
+// packages/agent-browser/src/modules/private-delivery/credential-reading.ts
+function successfulVaultReplyText(reading) {
+  if (reading.failed || reading.signal !== null || reading.status !== 0)
+    return;
+  if (reading.stdout === null || reading.stdout.length > credentialWrapperOutputLimit) {
+    return;
+  }
+  return reading.stdout;
+}
+
+// packages/agent-browser/src/modules/private-delivery/detail-sanitizer.ts
+async function runPrivateDeliveryDetailSanitizer(argumentList) {
+  if (argumentList.length !== 3 || argumentList.some((argument) => argument === ""))
+    return 20;
+  const [wrapper, itemId, vault] = argumentList;
+  const reading = await runVaultCommand(wrapper, [
+    "op",
+    "item",
+    "get",
+    itemId,
+    "--vault",
+    vault,
+    "--format",
+    "json"
+  ], "current");
+  const raw = successfulVaultReplyText(reading);
+  const detail = raw === undefined ? undefined : interpretLoginItemDetail(raw);
+  if (detail === undefined)
+    return 20;
+  process.stdout.write(sanitizedCredentialDetailReply(detail));
+  return 0;
+}
+async function runPrivateDeliveryListSanitizer(argumentList) {
+  if (argumentList.length !== 2 || argumentList.some((argument) => argument === ""))
+    return 20;
+  const [wrapper, vault] = argumentList;
+  const reading = await runVaultCommand(wrapper, [
+    "op",
+    "item",
+    "list",
+    "--vault",
+    vault,
+    "--categories",
+    "Login",
+    "--format",
+    "json"
+  ], "current");
+  const raw = successfulVaultReplyText(reading);
+  const candidates = raw === undefined ? undefined : interpretLoginItemList(raw);
+  if (candidates === undefined)
+    return 20;
+  process.stdout.write(sanitizedCredentialListReply(candidates));
+  return 0;
+}
+
 // packages/agent-browser/src/modules/warm-browser/contract.ts
 var schemaVersion = 1;
 var runIdOption = { flag: "--run-id", value: "ID", required: false };
@@ -1052,159 +1458,6 @@ function readCredentialVaultConfiguration(environment = process.env) {
   return { kind: "configured", vault: configuration.vault };
 }
 
-// packages/agent-browser/src/modules/private-delivery/contract.ts
-var privateDeliveryChildReplyLimit = 4096;
-var credentialWrapperOutputLimit = 1048576;
-var credentialWrapperTimeoutMs = 30000;
-var credentialWrapperKillSignal = "SIGKILL";
-var privateDeliveryChildOutcomes = [
-  "delivered",
-  "superseded",
-  "identity_changed",
-  "origin_changed",
-  "field_mismatch",
-  "field_not_empty",
-  "element_absent",
-  "unverified",
-  "usage"
-];
-
-// packages/agent-browser/src/modules/private-delivery/credential-effects.ts
-import { spawnSync } from "child_process";
-function runVaultCommand(wrapper, argumentList) {
-  const result = spawnSync(wrapper, [...argumentList], {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "ignore"],
-    maxBuffer: credentialWrapperOutputLimit,
-    timeout: credentialWrapperTimeoutMs,
-    killSignal: credentialWrapperKillSignal
-  });
-  return {
-    status: result.status,
-    signal: result.signal,
-    failed: result.error !== undefined,
-    stdout: typeof result.stdout === "string" ? result.stdout : null
-  };
-}
-function runPrivateDelivery(input) {
-  const result = spawnSync(input.wrapper, ["inject-stdin", input.reference, "--", ...input.command], {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-    maxBuffer: credentialWrapperOutputLimit,
-    timeout: credentialWrapperTimeoutMs,
-    killSignal: credentialWrapperKillSignal
-  });
-  return {
-    status: result.status,
-    signal: result.signal,
-    failed: result.error !== undefined,
-    stdout: typeof result.stdout === "string" ? result.stdout : null,
-    stderr: typeof result.stderr === "string" ? result.stderr : null
-  };
-}
-
-// packages/agent-browser/src/modules/private-delivery/credential-match.ts
-var candidateListLimit = 512;
-var declaredUrlLimit = 32;
-var itemFieldLimit = 128;
-var replyTextLimit = 2048;
-function record3(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : undefined;
-}
-function boundedText(value) {
-  return typeof value === "string" && value !== "" && value.length <= replyTextLimit ? value : undefined;
-}
-function interpretCandidate(entry) {
-  const item = record3(entry);
-  const id = boundedText(item?.id);
-  const vault = record3(item?.vault);
-  const vaultId = boundedText(vault?.id);
-  const vaultName = boundedText(vault?.name);
-  const origins = declaredOrigins(item?.urls);
-  return id === undefined || vaultId === undefined || vaultName === undefined || origins === undefined ? undefined : { id, vaultId, vaultName, declaredOrigins: origins };
-}
-function interpretLoginItemList(text) {
-  let parsed;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    return;
-  }
-  if (!Array.isArray(parsed) || parsed.length > candidateListLimit)
-    return;
-  const candidates = [];
-  for (const entry of parsed) {
-    const candidate = interpretCandidate(entry);
-    if (candidate === undefined)
-      return;
-    if (candidates.some((seen) => seen.id === candidate.id))
-      return;
-    candidates.push(candidate);
-  }
-  return candidates;
-}
-function declaredOrigins(urls) {
-  if (urls === undefined)
-    return [];
-  if (!Array.isArray(urls) || urls.length > declaredUrlLimit)
-    return;
-  const origins = [];
-  for (const entry of urls) {
-    const href = record3(entry)?.href;
-    if (typeof href !== "string" || href.length > replyTextLimit)
-      continue;
-    let parsed;
-    try {
-      parsed = new URL(href);
-    } catch {
-      continue;
-    }
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:")
-      continue;
-    origins.push(parsed.origin);
-  }
-  return origins;
-}
-function itemFields(fields) {
-  if (fields === undefined)
-    return [];
-  if (!Array.isArray(fields) || fields.length > itemFieldLimit)
-    return;
-  const readings = [];
-  for (const entry of fields) {
-    const field = record3(entry);
-    if (field === undefined)
-      return;
-    const id = field.id;
-    if (typeof id !== "string" || id.length > replyTextLimit)
-      return;
-    const purpose = field.purpose;
-    if (purpose !== undefined && typeof purpose !== "string")
-      return;
-    if (typeof purpose === "string" && purpose.length > replyTextLimit)
-      return;
-    readings.push({ id, purpose: typeof purpose === "string" ? purpose : "" });
-  }
-  return readings;
-}
-function interpretLoginItem(parsed) {
-  const candidate = interpretCandidate(parsed);
-  const fields = itemFields(record3(parsed)?.fields);
-  return candidate === undefined || fields === undefined ? undefined : { ...candidate, fields };
-}
-function interpretLoginItemDetail(text) {
-  let parsed;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    return;
-  }
-  return interpretLoginItem(parsed);
-}
-function declaresExactOrigin(item, origin) {
-  return item.declaredOrigins.some((declared) => declared === origin);
-}
-
 // packages/agent-browser/src/modules/private-delivery/private-delivery.ts
 var credentialWrapperPath = join2(homedir(), "code/dotfiles/bin/with-one-password-token");
 var reservedWrapperExits = [2, 3, 4, 5, 70];
@@ -1266,14 +1519,6 @@ function verifiedCredentialFile(path, role) {
   } catch {
     return;
   }
-}
-function vaultReplyText(reading) {
-  if (reading.failed || reading.signal !== null || reading.status !== 0)
-    return;
-  if (reading.stdout === null || reading.stdout.length > credentialWrapperOutputLimit) {
-    return;
-  }
-  return reading.stdout;
 }
 function record4(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value : undefined;
@@ -1348,19 +1593,9 @@ async function deliverPrivately(input) {
   const entry = entryArgument === undefined ? undefined : verifiedCredentialFile(entryArgument, "entry");
   if (entry === undefined)
     return { kind: "unverified", touchedPage: false };
-  const listReading = runVaultCommand(wrapper, [
-    "op",
-    "item",
-    "list",
-    "--vault",
-    vault,
-    "--categories",
-    "Login",
-    "--format",
-    "json"
-  ]);
-  const listing = vaultReplyText(listReading);
-  const candidates = listing === undefined ? undefined : interpretLoginItemList(listing);
+  const listReading = await runSanitizedCredentialList({ wrapper, entry, vault });
+  const listing = successfulVaultReplyText(listReading);
+  const candidates = listing === undefined ? undefined : interpretSanitizedCredentialList(listing);
   if (candidates === undefined)
     return { kind: "vault_unverified" };
   for (const candidate of candidates) {
@@ -1374,9 +1609,17 @@ async function deliverPrivately(input) {
   if (matches.length > 1)
     return { kind: "match_ambiguous" };
   const matchedCandidate = matches[0];
-  const detailReading = runVaultCommand(wrapper, ["op", "item", "get", matchedCandidate.id, "--vault", vault, "--format", "json"]);
-  const detail = vaultReplyText(detailReading);
-  const matched = detail === undefined ? undefined : interpretLoginItemDetail(detail);
+  if (matchedCandidate.id.startsWith("-") || !referenceSafeSegment.test(matchedCandidate.id)) {
+    return { kind: "vault_unverified" };
+  }
+  const detailReading = await runSanitizedCredentialDetail({
+    wrapper,
+    entry,
+    itemId: matchedCandidate.id,
+    vault
+  });
+  const detail = successfulVaultReplyText(detailReading);
+  const matched = detail === undefined ? undefined : interpretSanitizedCredentialDetail(detail);
   if (matched === undefined)
     return { kind: "vault_unverified" };
   if (matched.id !== matchedCandidate.id)
@@ -1418,7 +1661,7 @@ async function deliverPrivately(input) {
     "--field",
     input.field
   ];
-  return interpretDelivery(runPrivateDelivery({ wrapper, reference, command }));
+  return interpretDelivery(await runPrivateDelivery({ wrapper, reference, command }));
 }
 
 // packages/agent-browser/src/modules/warm-browser/ownership.ts
@@ -1473,14 +1716,14 @@ import { homedir as homedir2 } from "os";
 import { join as join3 } from "path";
 
 // packages/agent-browser/src/modules/warm-browser/host-effects.ts
-import { spawn, spawnSync as spawnSync2 } from "child_process";
+import { spawn as spawn2, spawnSync } from "child_process";
 import { accessSync as accessSync2, constants as constants2, lstatSync as lstatSync3 } from "fs";
 import { createConnection } from "net";
 function hostPlatform() {
   return process.platform;
 }
 function readProcessTable() {
-  const result = spawnSync2("/bin/ps", ["-axo", "pid=,pgid=,lstart=,command="], {
+  const result = spawnSync("/bin/ps", ["-axo", "pid=,pgid=,lstart=,command="], {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "ignore"],
     env: { ...process.env, LC_ALL: "C" }
@@ -1504,7 +1747,7 @@ function isExecutableFile(path) {
   }
 }
 async function startDetachedProcess(executable, argumentList) {
-  const child = spawn(executable, [...argumentList], { detached: true, stdio: "ignore" });
+  const child = spawn2(executable, [...argumentList], { detached: true, stdio: "ignore" });
   await new Promise((resolve3, reject) => {
     child.once("error", reject);
     child.once("spawn", resolve3);
@@ -1546,7 +1789,7 @@ async function connectLoopbackPort(port) {
   });
 }
 function readLoopbackListener(port) {
-  const result = spawnSync2("/usr/sbin/lsof", ["-nP", "-a", `-iTCP@127.0.0.1:${port}`, "-sTCP:LISTEN", "-Fp"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  const result = spawnSync("/usr/sbin/lsof", ["-nP", "-a", `-iTCP@127.0.0.1:${port}`, "-sTCP:LISTEN", "-Fp"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
   return {
     status: result.status,
     signal: result.signal,
@@ -3348,7 +3591,11 @@ async function runWarmBrowserCli(arguments_) {
 }
 
 // packages/agent-browser/src/main.ts
-if (process.argv[2] === privateDeliveryChildArgument) {
+if (process.argv[2] === privateDeliveryDetailSanitizerArgument) {
+  process.exitCode = await runPrivateDeliveryDetailSanitizer(process.argv.slice(3));
+} else if (process.argv[2] === privateDeliveryListSanitizerArgument) {
+  process.exitCode = await runPrivateDeliveryListSanitizer(process.argv.slice(3));
+} else if (process.argv[2] === privateDeliveryChildArgument) {
   process.exitCode = await runPrivateDeliveryChild(process.argv.slice(3));
 } else {
   const outcome = await runWarmBrowserCli(process.argv.slice(2));

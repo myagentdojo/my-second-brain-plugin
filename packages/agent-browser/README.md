@@ -18,7 +18,9 @@ accepts `--ref REFERENCE`, `fill` accepts `--ref REFERENCE` and
 `--value TEXT`, and `login` accepts `--ref REFERENCE`, `--field KIND`, and
 `--human-approved`. The `--human-approved` switch asserts that a human approved
 this exact credential access immediately before it; the assertion is the
-human's to make and never an agent's own decision.
+human's to make and never an agent's own decision. The host must show each
+literal login command for approval; never add `warm-browser login` to an
+allowlist or automatic approval pattern.
 
 On macOS, production fixes the existing Agent Chrome Profile path to
 `$HOME/Library/Application Support/Agent Chrome/Chrome User Data`, with inner
@@ -246,14 +248,26 @@ item must carry exactly one field of the requested kind or the delivery is
 `CREDENTIAL_FIELD_AMBIGUOUS`, and an item outside the configured vault is
 `CREDENTIAL_VAULT_MISMATCH`.
 
+The complete `op item list` and `op item get` JSON replies never enter the
+long-lived Agent Browser process. Disposable, environment-scrubbed sanitizer
+processes perform those reads and drop every value, title, subtitle,
+additional-information field, note, and unknown property. They emit bounded
+exact-key replies containing only item and vault identity, declared origins,
+and, for the selected detail, field ids and purposes. Their parent rejects an
+extra key rather than permitting an unrecognised property to carry credential
+bytes across the process seam.
+
 The one credential wrapper is
 `$HOME/code/dotfiles/bin/with-one-password-token`. A wrapper that is
 unavailable is its own refusal, `CREDENTIAL_WRAPPER_UNAVAILABLE`, distinct
 from a vault that could not be read, `CREDENTIAL_VAULT_UNVERIFIED`, because
 restoring the wrapper and inspecting the configured vault are different
 repairs. Each wrapper invocation is bounded to 30 seconds and forcibly stopped
-with `SIGKILL` if it exceeds that bound. Before any vault access, the wrapper
-and the shipped Bun entry must be
+with `SIGKILL` if it exceeds that bound. The effect runner owns a fresh process
+group and kills the whole group on timeout, overlong output, or an orphaned
+descendant; a nested sanitizer keeps its wrapper inside the sanitizer's outer
+owned group, so the outer bound cannot leave a credential-bearing `op` process
+behind. Before any vault access, the wrapper and the shipped Bun entry must be
 current-user-owned regular non-symlinks with no group or world write bits, and
 their parent chains must be owned by root or the current user and resist
 replacement by another user. The wrapper alone holds the
@@ -275,6 +289,23 @@ Page, and nothing else: no value, no length, no item title, no item id, no
 vault name, and no username. Every earlier Snapshot Reference is invalidated
 durably on success and on any outcome that reached the page, so nothing acts
 on a page that now holds a credential without re-reading it first.
+
+## Current host trust boundary
+
+The MVP assumes the current macOS user account and the installed plugin host
+are trusted. `--human-approved` is a host-policy assertion that the skill may
+set only after direct approval in the current task; it is not a cryptographic
+or one-time authorization capability. A caller already able to execute the
+private CLI can forge that assertion, so a future native broker may strengthen
+this boundary by minting a short-lived, one-use capability bound to the exact
+origin, Snapshot Reference, field kind, and Browser Session.
+
+Binding Chrome CDP to loopback prevents remote-network access. Chrome's CDP
+socket does not authenticate another local OS user that can reach that port,
+so loopback alone is not a cross-user authorization boundary. Protecting
+against a malicious local account requires OS isolation or an authenticated
+native broker in front of CDP. Those are future hardening layers, not security
+properties claimed by this trusted-host MVP.
 
 ## Deterministic Controlled Page proof
 

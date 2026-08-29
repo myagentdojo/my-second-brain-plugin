@@ -2,8 +2,8 @@
 
 Private Delivery is the second Agent Browser Module, and it is implemented. It
 owns everything credential-shaped about `login`: the human-approval gate, the
-configured Credential Vault, the exact-origin unique Credential Match, the one
-wrapper invocation, the disposable child that revalidates and fills, and the
+configured Credential Vault, the exact-origin unique Credential Match, the
+bounded wrapper invocations, the disposable child that revalidates and fills, and the
 redacted non-secret outcome. Warm Browser proves everything non-secret first
 and then calls one Module entry, `deliverPrivately`, with only non-secret
 inputs; no credential value ever crosses back across that call.
@@ -15,15 +15,16 @@ Credential Vault is resolved second and the wrapper proved third, so the vault
 is never spoken to on an unconfigured or unsafe footing. A wrapper that is
 unavailable is its own answer, distinct from a vault that could not be read,
 because restoring the wrapper and inspecting the configured vault are
-different repairs. The one Login listing carries each candidate's id, vault,
-and declared websites when the Login has a website. The installed op CLI omits
+different repairs. A disposable sanitizer reads the one Login listing, which
+carries each candidate's id, vault, and declared websites when the Login has a website. The installed op CLI omits
 the `urls` key for a Login with no website; that omission declares no origin,
 while a present `urls` value must still be a bounded array of interpretable
-addresses. Private Delivery reads this as one complete non-secret metadata
-answer, proves the configured vault and the unique exact-origin Credential
-Match, then names only that matched item id in one bounded detail read. This
+addresses. The sanitizer emits one bounded exact-key metadata answer, from
+which Private Delivery proves the configured vault and the unique exact-origin
+Credential Match. A second sanitizer then names only that matched item id in
+one bounded detail read and emits only field ids and purposes. This
 keeps the wrapper and op conversation constant however many Login items the
-vault holds, and no unmatched item's field values ever enter this process. An
+vault holds, and no complete list or detail reply enters the parent process. An
 item outside the configured vault refuses the whole delivery, and the
 Credential Match must be exactly one Login item whose
 declared website origin equals the current exact origin as one string, so
@@ -51,7 +52,9 @@ an encoding, a `/` adds a segment it reads as a section, and a `?` adds the
 attribute selector. Each of the three segments must therefore match
 `[A-Za-z0-9_.-]{1,128}`, which every id op itself issues does. An id outside
 that set is refused as an unverified vault reading rather than escaped into a
-reference this Module cannot vouch for.
+reference this Module cannot vouch for. The matched item id is also refused
+when it begins with `-`, before it could occupy the positional item argument of
+the detail command.
 
 The configured Credential Vault is one private file this Module only reads:
 `$XDG_STATE_HOME/my-second-brain/private-delivery/credential-vault.json`,
@@ -75,9 +78,10 @@ reference itself, hands the secret to the child on its standard input, and
 scrubs the child environment down to HOME, PATH, LANG, LC_ALL, and TMPDIR. No
 secret is ever an argument, an environment value, or a variable in this Module.
 
-The disposable child is one private re-entry of the shipped entry, selected by
-an argument the public parser never sees, so one bundle still ships and `help`
-never names it. It reads the value once from its standard input, revalidates
+Three private re-entry modes use the shipped entry: the list sanitizer, the
+detail sanitizer, and the disposable delivery child. Their selector arguments
+never reach the public parser, so one bundle still ships and `help` never names
+them. The delivery child reads the value once from its standard input, revalidates
 the frame, the document load, the url, and the exact origin immediately before
 the fill, re-derives the field kind from the live page, proves the field empty
 and then focused, inserts the value, and reports one closed JSON outcome line

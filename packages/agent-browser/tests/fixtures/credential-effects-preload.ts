@@ -8,6 +8,12 @@ import type {
 	PrivateDeliveryReading,
 	VaultCommandReading,
 } from "../../src/modules/private-delivery/credential-effects"
+import {
+	interpretLoginItemDetail,
+	interpretLoginItemList,
+	sanitizedCredentialDetailReply,
+	sanitizedCredentialListReply,
+} from "../../src/modules/private-delivery/credential-match"
 
 /**
  * The single private test-owned substitute for Private Delivery's
@@ -16,9 +22,10 @@ import type {
  * test sentinel, and the child, its argument list, its environment, its CDP
  * conversation, and the page it types into are all real.
  *
- * `runVaultCommand` never spawns anything: it records the invocation and
- * answers with the reading the plan scripts, so the production interpretation
- * of op replies is exercised against bytes the test states. `runPrivateDelivery`
+ * `runVaultCommand` and `runSanitizedCredentialDetail` never reach a real
+ * vault: they record their invocations and answer with the metadata-only
+ * reading the plan scripts, so production interpretation is exercised against
+ * bytes the test states. `runPrivateDelivery`
  * records the invocation and then does exactly what the real wrapper's
  * `inject-stdin` command does: it spawns the given command as a real process,
  * hands the sentinel over on the child's standard input alone, and scrubs the
@@ -86,14 +93,78 @@ function resolvableReference(reference: string): boolean {
 }
 
 const fake: typeof import("../../src/modules/private-delivery/credential-effects") = {
-	runVaultCommand: (wrapper, argumentList): VaultCommandReading => {
+	runVaultCommand: async (wrapper, argumentList): Promise<VaultCommandReading> => {
 		action({ action: "vault", wrapper, argumentList: [...argumentList] })
 		const current = plan()
 		if (argumentList[2] === "list" && current.vaultList !== undefined) return current.vaultList
-		if (argumentList[2] === "get" && current.vaultGet !== undefined) return current.vaultGet
 		throw new Error("the private credential fake serves no reading for this vault command")
 	},
-	runPrivateDelivery: (input): PrivateDeliveryReading => {
+	runSanitizedCredentialList: async (input): Promise<VaultCommandReading> => {
+		action({
+			action: "vault",
+			wrapper: input.wrapper,
+			argumentList: [
+				"op",
+				"item",
+				"list",
+				"--vault",
+				input.vault,
+				"--categories",
+				"Login",
+				"--format",
+				"json",
+			],
+		})
+		const reading = plan().vaultList
+		if (reading === undefined) {
+			throw new Error("the private credential fake serves no list reading")
+		}
+		const raw = reading.status === 0 && reading.signal === null && !reading.failed
+			? reading.stdout
+			: null
+		const candidates = raw === null ? undefined : interpretLoginItemList(raw)
+		return candidates === undefined
+			? { status: 20, signal: null, failed: false, stdout: "" }
+			: {
+				status: 0,
+				signal: null,
+				failed: false,
+				stdout: sanitizedCredentialListReply(candidates),
+			}
+	},
+	runSanitizedCredentialDetail: async (input): Promise<VaultCommandReading> => {
+		action({
+			action: "vault",
+			wrapper: input.wrapper,
+			argumentList: [
+				"op",
+				"item",
+				"get",
+				input.itemId,
+				"--vault",
+				input.vault,
+				"--format",
+				"json",
+			],
+		})
+		const reading = plan().vaultGet
+		if (reading === undefined) {
+			throw new Error("the private credential fake serves no detail reading")
+		}
+		const raw = reading.status === 0 && reading.signal === null && !reading.failed
+			? reading.stdout
+			: null
+		const detail = raw === null ? undefined : interpretLoginItemDetail(raw)
+		return detail === undefined
+			? { status: 20, signal: null, failed: false, stdout: "" }
+			: {
+				status: 0,
+				signal: null,
+				failed: false,
+				stdout: sanitizedCredentialDetailReply(detail),
+			}
+	},
+	runPrivateDelivery: async (input): Promise<PrivateDeliveryReading> => {
 		const environment = scrubbedEnvironment()
 		action({
 			action: "deliver",
@@ -110,7 +181,6 @@ const fake: typeof import("../../src/modules/private-delivery/credential-effects
 				signal: null,
 				failed: false,
 				stdout: "",
-				stderr: "",
 			}
 		}
 		// The installed op CLI resolves a reference before the target command
@@ -120,7 +190,7 @@ const fake: typeof import("../../src/modules/private-delivery/credential-effects
 		// reference read as a healthy one here, so the fake refuses it the same
 		// way the host does.
 		if (!resolvableReference(input.reference)) {
-			return { status: 1, signal: null, failed: false, stdout: "", stderr: "" }
+			return { status: 1, signal: null, failed: false, stdout: "" }
 		}
 		const sentinel = current.sentinel
 		if (sentinel === undefined) {
@@ -137,7 +207,6 @@ const fake: typeof import("../../src/modules/private-delivery/credential-effects
 			signal: result.signal,
 			failed: result.error !== undefined,
 			stdout: typeof result.stdout === "string" ? result.stdout : null,
-			stderr: typeof result.stderr === "string" ? result.stderr : null,
 		}
 	},
 }

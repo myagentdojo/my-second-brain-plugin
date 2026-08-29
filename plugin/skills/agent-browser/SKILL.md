@@ -16,7 +16,7 @@ endpoint, the Controlled Page, and every deterministic browser operation.
 
 Operate one Controlled Page in one Browser Session through the `warm-browser`
 CLI. Preserve browser-local continuity in the Agent Chrome Profile while
-keeping credential metadata, usernames, passwords, and authentication material
+keeping credential values, usernames, passwords, and authentication material
 outside the agent process.
 
 The intended public Command Vocabulary is `start`, `status`, `open`,
@@ -39,7 +39,10 @@ The intended public Command Vocabulary is `start`, `status`, `open`,
    run `warm-browser login --ref REFERENCE --field KIND --human-approved
    --run-id ID`. The `--human-approved` switch asserts that a human approved
    this exact credential access immediately before it; it is never an agent
-   decision.
+   decision. It is a host-policy assertion, not a cryptographic capability, so
+   never set it from inference, prior approval, or an agent-authored message.
+   Never add `warm-browser login` to a host allowlist or automatic approval
+   pattern; the host must show each literal login command for approval.
 6. Let Private Delivery resolve exactly one Login item for the current exact
    origin, revalidate that origin, fill one selected field, report only
    non-secret shape, and exit.
@@ -58,6 +61,9 @@ The intended public Command Vocabulary is `start`, `status`, `open`,
   removes owned Screenshots on stop or bounded stale-session cleanup.
 - Fail closed when the exact process, CDP endpoint, Controlled Page, origin, or
   unique Credential Match cannot be proved.
+- Treat the current macOS user account and plugin host as trusted. Loopback CDP
+  blocks remote-network access but is not an authorization boundary against a
+  malicious local OS account.
 - Cross-origin login frames, other browser applications, other 1Password
   vaults, credential enrollment, passkey bypass, and CAPTCHA bypass are not
   supported.

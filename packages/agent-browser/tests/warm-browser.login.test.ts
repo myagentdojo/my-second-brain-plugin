@@ -1382,6 +1382,40 @@ test.each([
 	expect(fixture.insertedText()).toEqual([])
 })
 
+test("an item id carrying option syntax is refused before the detail read", async () => {
+	const { probe, snapshot } = await signInProbe()
+	configureCredentialVault(probe, "Agent Vault")
+	writeCredentialPlan(probe, {
+		vaultList: vaultReading([vaultListingItem("--format", ["https://fixture.test"])]),
+		sentinel,
+	})
+
+	const result = await runProductionCliAsync(probe, [
+		"login",
+		"--ref",
+		snapshot.elements[2]!.ref,
+		"--field",
+		"password",
+		"--human-approved",
+		"--run-id",
+		"login-unnameable-item",
+	])
+
+	expectError(result, 20, {
+		schemaVersion: 1,
+		status: "error",
+		command: "login",
+		resultCode: "CREDENTIAL_VAULT_UNVERIFIED",
+		runId: "login-unnameable-item",
+		transactionState: "unchanged",
+		retrySafe: false,
+		nextAction: "Inspect the credential wrapper and the configured Credential Vault before retrying.",
+		message: "The Credential Vault reply could not be read, interpreted, or safely used.",
+	})
+	expect(vaultActions(probe)).toHaveLength(1)
+	expect(deliveryActions(probe)).toEqual([])
+})
+
 test("a reference the installed op CLI would not parse delivers nothing", async () => {
 	const { fixture, probe, snapshot } = await signInProbe()
 	configureCredentialVault(probe, "Agent Vault")

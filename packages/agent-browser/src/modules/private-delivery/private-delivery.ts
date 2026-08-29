@@ -6,7 +6,6 @@ import type { ControlledPageBasis } from "../warm-browser/contract"
 import { privateDeliveryChildArgument } from "./child"
 import { readCredentialVaultConfiguration } from "./configuration"
 import {
-	credentialWrapperOutputLimit,
 	type PrivateDeliveryChildOutcome,
 	privateDeliveryChildOutcomes,
 	privateDeliveryChildReplyLimit,
@@ -15,14 +14,15 @@ import {
 import {
 	type PrivateDeliveryReading,
 	runPrivateDelivery,
-	runVaultCommand,
-	type VaultCommandReading,
+	runSanitizedCredentialDetail,
+	runSanitizedCredentialList,
 } from "./credential-effects"
 import {
 	declaresExactOrigin,
-	interpretLoginItemDetail,
-	interpretLoginItemList,
+	interpretSanitizedCredentialDetail,
+	interpretSanitizedCredentialList,
 } from "./credential-match"
+import { successfulVaultReplyText } from "./credential-reading"
 import type { CredentialFieldKind } from "./field-kind"
 
 export type { PrivateDeliveryOutcome } from "./contract"
@@ -153,19 +153,6 @@ function verifiedCredentialFile(
 	}
 }
 
-/**
- * One vault reading reduced to the text it may be interpreted from. A
- * non-zero status, a signal, a failed spawn, a missing stream, and output
- * over the bound are all the same answer: a reply that proves nothing.
- */
-function vaultReplyText(reading: VaultCommandReading): string | undefined {
-	if (reading.failed || reading.signal !== null || reading.status !== 0) return undefined
-	if (reading.stdout === null || reading.stdout.length > credentialWrapperOutputLimit) {
-		return undefined
-	}
-	return reading.stdout
-}
-
 function record(value: unknown): Record<string, unknown> | undefined {
 	return typeof value === "object" && value !== null && !Array.isArray(value)
 		? (value as Record<string, unknown>)
@@ -293,19 +280,9 @@ export async function deliverPrivately(input: {
 	const entry =
 		entryArgument === undefined ? undefined : verifiedCredentialFile(entryArgument, "entry")
 	if (entry === undefined) return { kind: "unverified", touchedPage: false }
-	const listReading = runVaultCommand(wrapper, [
-		"op",
-		"item",
-		"list",
-		"--vault",
-		vault,
-		"--categories",
-		"Login",
-		"--format",
-		"json",
-	])
-	const listing = vaultReplyText(listReading)
-	const candidates = listing === undefined ? undefined : interpretLoginItemList(listing)
+	const listReading = await runSanitizedCredentialList({ wrapper, entry, vault })
+	const listing = successfulVaultReplyText(listReading)
+	const candidates = listing === undefined ? undefined : interpretSanitizedCredentialList(listing)
 	if (candidates === undefined) return { kind: "vault_unverified" }
 	for (const candidate of candidates) {
 		if (candidate.vaultId !== vault && candidate.vaultName !== vault) {
@@ -316,16 +293,24 @@ export async function deliverPrivately(input: {
 	if (matches.length === 0) return { kind: "match_absent" }
 	if (matches.length > 1) return { kind: "match_ambiguous" }
 	const matchedCandidate = matches[0]!
+	if (
+		matchedCandidate.id.startsWith("-") ||
+		!referenceSafeSegment.test(matchedCandidate.id)
+	) {
+		return { kind: "vault_unverified" }
+	}
 	// The complete Login listing proves this exact candidate unique before one
-	// detail read names it, so the wrapper and op calls stay constant however
-	// many Login items the vault holds, and no unmatched item's field values
-	// ever enter this process.
-	const detailReading = runVaultCommand(
+	// disposable sanitizer names it, so the wrapper and op calls stay constant
+	// however many Login items the vault holds. No item's field values enter
+	// this process, matched or unmatched.
+	const detailReading = await runSanitizedCredentialDetail({
 		wrapper,
-		["op", "item", "get", matchedCandidate.id, "--vault", vault, "--format", "json"],
-	)
-	const detail = vaultReplyText(detailReading)
-	const matched = detail === undefined ? undefined : interpretLoginItemDetail(detail)
+		entry,
+		itemId: matchedCandidate.id,
+		vault,
+	})
+	const detail = successfulVaultReplyText(detailReading)
+	const matched = detail === undefined ? undefined : interpretSanitizedCredentialDetail(detail)
 	if (matched === undefined) return { kind: "vault_unverified" }
 	if (matched.id !== matchedCandidate.id) return { kind: "vault_unverified" }
 	if (matched.vaultId !== vault && matched.vaultName !== vault) return { kind: "vault_mismatch" }
@@ -381,6 +366,6 @@ export async function deliverPrivately(input: {
 		input.field,
 	]
 	return interpretDelivery(
-		runPrivateDelivery({ wrapper, reference, command }),
+		await runPrivateDelivery({ wrapper, reference, command }),
 	)
 }
