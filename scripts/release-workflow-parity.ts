@@ -229,6 +229,12 @@ export const RELEASE_WORKFLOW_PARITY_LEDGER = [
 		comparison: "contains",
 	},
 	{
+		literal: "bun install --frozen-lockfile",
+		tier: "step-run",
+		owner: "jobs.package step Install locked workspace dependencies run",
+		comparison: "contains",
+	},
+	{
 		literal: "git diff --exit-code -- plugin/",
 		tier: "step-run",
 		owner: "jobs.package step Reject generated release-surface drift run",
@@ -681,6 +687,10 @@ const RELEASE_WORKFLOW_OWNED_STEPS: Record<string, readonly [jobName: string, st
 		"jobs.package step Validate and prove release payload run": [
 			"package",
 			"Validate and prove release payload",
+		],
+		"jobs.package step Install locked workspace dependencies run": [
+			"package",
+			"Install locked workspace dependencies",
 		],
 		"jobs.package step Reject generated release-surface drift run": [
 			"package",

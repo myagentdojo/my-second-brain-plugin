@@ -66,9 +66,9 @@ function validateWithArguments(cwd: string, arguments_: string[]): Bun.ReadableS
 }
 
 test("release workflow parity ledger accounts for every current assertion literal", () => {
-	// Current release-validate.ts provenance: 1 action-pin + 67 whole-file + 4 negative/top-level
-	// + 4 job-boundary + 8 maintain-required + 1 maintain-forbidden + 3 release-job = 88.
-	const enumeratedLiteralCount = 88
+	// Current release-validate.ts provenance: 1 action-pin + 68 whole-file + 4 negative/top-level
+	// + 4 job-boundary + 8 maintain-required + 1 maintain-forbidden + 3 release-job = 89.
+	const enumeratedLiteralCount = 89
 
 	expect(RELEASE_WORKFLOW_PARITY_LEDGER).toHaveLength(enumeratedLiteralCount)
 	for (const entry of RELEASE_WORKFLOW_PARITY_LEDGER) {
@@ -183,7 +183,7 @@ test("release validation rejects a second checkout step that skips the pinned re
 	}
 })
 
-test("release validation scopes required run fragments to their owning step", () => {
+test("release validation scopes required package run fragments to their owning steps", () => {
 	const temporaryRoot = copyRepository()
 	try {
 		const workflowPath = join(temporaryRoot, ".github", "workflows", "release.yml")
@@ -204,6 +204,23 @@ test("release validation scopes required run fragments to their owning step", ()
 
 		expect(result.exitCode).toBe(1)
 		expect(result.stderr.toString()).toContain("release workflow is missing bun run prove:all")
+
+		const frozenInstallRemoved = original.replace(
+			"      - name: Install locked workspace dependencies\n        run: bun install --frozen-lockfile\n",
+			"",
+		)
+		expect(
+			frozenInstallRemoved !== original,
+			"frozen install removal mutation anchor must match",
+		).toBe(true)
+		writeFileSync(workflowPath, frozenInstallRemoved)
+
+		const frozenInstallResult = validate(temporaryRoot)
+
+		expect(frozenInstallResult.exitCode).toBe(1)
+		expect(frozenInstallResult.stderr.toString()).toContain(
+			"release workflow is missing bun install --frozen-lockfile",
+		)
 	} finally {
 		rmSync(temporaryRoot, { recursive: true, force: true })
 	}

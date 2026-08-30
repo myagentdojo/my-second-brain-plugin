@@ -714,6 +714,8 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
           bun-version: 1.4.0
+      - name: Install locked workspace dependencies
+        run: bun install --frozen-lockfile
       - name: Install pinned native marketplace CLIs
         run: bun add --global "@anthropic-ai/claude-code@2.1.229" "@openai/codex@0.146.1"
       - name: Download the platform-proven release candidate
