@@ -69,7 +69,7 @@ fi
 function run(
 	workspace: string | undefined,
 	options: { bin: string; commandLog: string; environment?: Record<string, string> },
-): ReturnType<typeof Bun.spawnSync> {
+): Bun.ReadableSyncSubprocess {
 	return Bun.spawnSync({
 		cmd: ["bash", launcher, ...(workspace === undefined ? [] : [workspace])],
 		env: {

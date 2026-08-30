@@ -393,11 +393,17 @@ test("dependency admission returns the pure-JavaScript permissive-license closur
 		"camelcase@8.0.0",
 		"kleur@4.1.5",
 		"ms@2.1.3",
+		"playwright-core@1.62.1",
 	])
 	for (const dependency of dependencies) {
-		expect(["MIT", "ISC"]).toContain(dependency.license)
-		expect(dependency.licenseText).toContain("Permission")
+		expect(["MIT", "ISC", "Apache-2.0"]).toContain(dependency.license)
+		expect(dependency.licenseText).toContain(
+			dependency.name === "playwright-core" ? "Apache License" : "Permission",
+		)
 	}
+	expect(
+		dependencies.find((dependency) => dependency.name === "playwright-core")?.noticeText,
+	).toContain("Puppeteer project")
 })
 
 function admissionFixture(options: {
@@ -1017,7 +1023,8 @@ test("dependency admission selects license files in code-unit order", () => {
 		packageJson: { name: "sorted-license", version: "1.0.0", license: "MIT" },
 		files: { LICENCE: "Deterministic licence text.\n" },
 	})
-	expect(admitDependencyClosure(fixtureRoot)[0].licenseText).toBe("Deterministic licence text.\n")
+	const [admittedDependency] = admitDependencyClosure(fixtureRoot)
+	expect(admittedDependency?.licenseText).toBe("Deterministic licence text.\n")
 })
 
 test("third-party notices carry package name, version, license, and text", () => {
@@ -1027,6 +1034,33 @@ test("third-party notices carry package name, version, license, and text", () =>
 	expect(notices).toContain("## ms@2.1.3 (MIT)")
 	expect(notices).toContain("MIT text")
 	expect(notices).toContain("Generated from bun.lock")
+})
+
+test("third-party notices normalize CRLF license text to repository LF", () => {
+	const notices = renderThirdPartyNotices([
+		{
+			name: "playwright-core",
+			version: "1.62.1",
+			license: "Apache-2.0",
+			licenseText: "First license line\r\nSecond license line\r\n",
+		},
+	])
+	expect(notices).not.toContain("\r")
+	expect(notices).toContain("First license line\nSecond license line\n")
+})
+
+test("third-party notices carry and normalize upstream attribution notices", () => {
+	const notices = renderThirdPartyNotices([
+		{
+			name: "playwright-core",
+			version: "1.62.1",
+			license: "Apache-2.0",
+			licenseText: "Apache License\n",
+			noticeText: "Playwright\r\nDerived from Puppeteer.\r\n",
+		},
+	])
+	expect(notices).toContain("### Upstream NOTICE\n\nPlaywright\nDerived from Puppeteer.\n")
+	expect(notices).not.toContain("\r")
 })
 
 test("a phantom bare import fails with a precise unresolved-import error", async () => {
@@ -1451,7 +1485,7 @@ function runRepositoryBuild(): {
 	if (build.exitCode !== 0) throw new Error(build.stderr.toString())
 	const outputLines = build.stdout.toString().trim().split("\n")
 	expect(outputLines).toHaveLength(1)
-	const report = JSON.parse(outputLines[0])
+	const report = JSON.parse(outputLines[0] ?? "")
 	expect(report.helloWorldRuntime).toBe(join(root, "plugin", "runtime", "hello-world.js"))
 	const inventory = JSON.parse(
 		readFileSync(join(root, "plugin", "runtime", "bundle-inventory.json"), "utf8"),
@@ -1463,6 +1497,7 @@ function runRepositoryBuild(): {
 test("workspace bundles build, relocate, and execute without hooks, workspaces, or node_modules", () => {
 	const result = runRepositoryBuild()
 	expect(Object.keys(result.bundles)).toEqual([
+		"agent-browser",
 		"frontier-runner",
 		"hello-world",
 		"skill-a",
@@ -1477,10 +1512,37 @@ test("workspace bundles build, relocate, and execute without hooks, workspaces, 
 		"capability tour",
 	)
 	const environment = { PATH: "/usr/bin:/bin", HOME: installedRoot }
+	const agentBrowserBundle = result.bundles["agent-browser"]
+	if (agentBrowserBundle === undefined) throw new Error("missing agent-browser bundle")
+	expect(agentBrowserBundle.path).toMatch(/^runtime\/warm-browser-[a-f0-9]{16}\.js$/)
+	const agentBrowser = Bun.spawnSync({
+		cmd: [
+			process.execPath,
+			join(installedRoot, agentBrowserBundle.path),
+			"help",
+			"--run-id",
+			"relocated-help",
+		],
+		cwd: installedRoot,
+		env: environment,
+		stdout: "pipe",
+		stderr: "pipe",
+	})
+	expect(agentBrowser.stderr.toString()).toBe("")
+	expect(agentBrowser.exitCode).toBe(0)
+	expect(JSON.parse(agentBrowser.stdout.toString())).toMatchObject({
+		schemaVersion: 1,
+		status: "ok",
+		command: "help",
+		resultCode: "HELP",
+		runId: "relocated-help",
+	})
+	const helloWorldBundle = result.bundles["hello-world"]
+	if (helloWorldBundle === undefined) throw new Error("missing hello-world bundle")
 	const helloWorld = Bun.spawnSync({
 		cmd: [
 			process.execPath,
-			join(installedRoot, result.bundles["hello-world"].path),
+			join(installedRoot, helloWorldBundle.path),
 			"hello",
 			"--json",
 		],
@@ -1499,8 +1561,10 @@ test("workspace bundles build, relocate, and execute without hooks, workspaces, 
 		runId: "relocated-offline-proof",
 	})
 
+	const skillABundle = result.bundles["skill-a"]
+	if (skillABundle === undefined) throw new Error("missing skill-a bundle")
 	const skillA = Bun.spawnSync({
-		cmd: [process.execPath, join(installedRoot, result.bundles["skill-a"].path)],
+		cmd: [process.execPath, join(installedRoot, skillABundle.path)],
 		cwd: installedRoot,
 		env: environment,
 		stdout: "pipe",
@@ -1516,8 +1580,10 @@ test("workspace bundles build, relocate, and execute without hooks, workspaces, 
 		sideEffects: "none",
 	})
 
+	const skillBBundle = result.bundles["skill-b"]
+	if (skillBBundle === undefined) throw new Error("missing skill-b bundle")
 	const skillB = Bun.spawnSync({
-		cmd: [process.execPath, join(installedRoot, result.bundles["skill-b"].path)],
+		cmd: [process.execPath, join(installedRoot, skillBBundle.path)],
 		cwd: installedRoot,
 		env: environment,
 		stdout: "pipe",
@@ -1666,7 +1732,9 @@ test("repeated builds produce identical bundle, inventory, and notices bytes", (
 	)
 	expect(readFileSync(join(root, "plugin", "THIRD-PARTY-NOTICES.md"))).toEqual(firstNotices)
 	for (const [skillId, bundle] of Object.entries(second.bundles)) {
-		expect(readFileSync(join(root, "plugin", bundle.path))).toEqual(firstBundles[skillId])
+		const firstBundle = firstBundles[skillId]
+		if (firstBundle === undefined) throw new Error(`missing first bundle ${skillId}`)
+		expect(readFileSync(join(root, "plugin", bundle.path))).toEqual(firstBundle)
 	}
 })
 
@@ -1849,7 +1917,10 @@ test("packaging admission fails on a stale copied bundle before any archive is p
 	const inventoryPath = join(fixtureRoot, "plugin", "runtime", "bundle-inventory.json")
 	const inventory = JSON.parse(readFileSync(inventoryPath, "utf8"))
 	const [skillId] = Object.keys(inventory.bundles)
-	const bundlePath = join(fixtureRoot, "plugin", inventory.bundles[skillId].path)
+	if (skillId === undefined) throw new Error("fixture bundle inventory is empty")
+	const bundle = inventory.bundles[skillId]
+	if (bundle === undefined) throw new Error(`fixture bundle ${skillId} is missing`)
+	const bundlePath = join(fixtureRoot, "plugin", bundle.path)
 	writeFileSync(bundlePath, "console.log('tampered');\n")
 	const packaged = Bun.spawnSync({
 		cmd: [process.execPath, "run", "scripts/package.ts"],

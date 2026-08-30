@@ -27,12 +27,13 @@ interface FakeState {
 
 const statePath = process.env.FAKE_CLAUDE_STATE
 if (!statePath) throw new Error("FAKE_CLAUDE_STATE is required")
-const state = (await Bun.file(statePath).json()) as FakeState
+const requiredStatePath = statePath
+const state = (await Bun.file(requiredStatePath).json()) as FakeState
 const arguments_ = process.argv.slice(2)
 state.commands.push(arguments_)
 
 async function persist(): Promise<void> {
-	await Bun.write(statePath, `${JSON.stringify(state, null, 2)}\n`)
+	await Bun.write(requiredStatePath, `${JSON.stringify(state, null, 2)}\n`)
 }
 
 const commandText = arguments_.join(" ")
@@ -62,7 +63,9 @@ function pluginSource(marketplace: FakeMarketplace, pluginName: string): string 
 	if (typeof plugin.source === "string") return resolve(marketplace.path, plugin.source)
 	const match = /printf '%s\\n' '([^']+)'/.exec(plugin.source.command)
 	if (!match || plugin.source.mode !== "link") throw new Error("fake command source invalid")
-	return match[1]
+	const source = match[1]
+	if (source === undefined) throw new Error("fake command source path is missing")
+	return source
 }
 
 function installPlugin(pluginId: string, scope: string): void {
@@ -118,7 +121,9 @@ if (arguments_[0] === "--version") {
 	arguments_[1] === "marketplace" &&
 	arguments_[2] === "add"
 ) {
-	const source = resolve(arguments_[3])
+	const sourceArgument = arguments_[3]
+	if (sourceArgument === undefined) throw new Error("fake marketplace source is required")
+	const source = resolve(sourceArgument)
 	const manifest = marketplaceManifest(source)
 	state.marketplaces = state.marketplaces.filter((entry) => entry.name !== manifest.name)
 	state.marketplaces.push({
@@ -133,12 +138,16 @@ if (arguments_[0] === "--version") {
 	arguments_[2] === "remove"
 ) {
 	const name = arguments_[3]
+	if (name === undefined) throw new Error("fake marketplace name is required")
 	state.marketplaces = state.marketplaces.filter((entry) => entry.name !== name)
 	state.plugins = state.plugins.filter((entry) => !entry.id.endsWith(`@${name}`))
 } else if (arguments_[0] === "plugin" && arguments_[1] === "install") {
-	installPlugin(arguments_[2], optionValue("--scope") ?? "user")
+	const pluginId = arguments_[2]
+	if (pluginId === undefined) throw new Error("fake plugin id is required")
+	installPlugin(pluginId, optionValue("--scope") ?? "user")
 } else if (arguments_[0] === "plugin" && arguments_[1] === "uninstall") {
 	const id = arguments_[2]
+	if (id === undefined) throw new Error("fake plugin id is required")
 	const scope = optionValue("--scope") ?? "user"
 	state.plugins = state.plugins.filter((entry) => !(entry.id === id && entry.scope === scope))
 } else if (

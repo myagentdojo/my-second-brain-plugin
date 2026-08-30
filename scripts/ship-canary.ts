@@ -443,6 +443,7 @@ function parseOptions(arguments_: string[]): Options | null {
 		: ["--dry-run", "--execute", "--json"]
 	for (let index = 0; index < arguments_.length; index += 1) {
 		const argument = arguments_[index]
+		if (argument === undefined) continue
 		if (valueOptions.includes(argument)) {
 			index += 1
 			continue
@@ -1313,10 +1314,10 @@ function trustedCanaryTargets(
 	const repository = environment.GITHUB_REPOSITORY ?? ""
 	const [owner, name, extra] = repository.split("/")
 	const expected = {
-		owner,
+		owner: owner ?? "",
 		actor: identity,
-		publicRepository: `${name}-public-canary`,
-		privateRepository: `${name}-private-canary`,
+		publicRepository: `${name ?? ""}-public-canary`,
+		privateRepository: `${name ?? ""}-private-canary`,
 	}
 	const protectedBootstrap =
 		trustedConfig.template === true &&

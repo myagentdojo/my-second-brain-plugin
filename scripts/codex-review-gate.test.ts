@@ -27,6 +27,7 @@ async function runApproval(options: ApprovalOptions = {}): Promise<string> {
 		jobs: Record<string, WorkflowJob>
 	}
 	const job = workflow.jobs.approve
+	if (job === undefined) throw new Error("approve job is missing")
 	const script = job.steps.find(
 		(step) => step.name === "Mark the attested PR commit successful",
 	)?.run

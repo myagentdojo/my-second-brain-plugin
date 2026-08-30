@@ -2,6 +2,10 @@
 # Generated from runtime/skill-catalog.json. Edit the source, then run bun run generate.
 runtime_catalog_select_skill() {
 	case "$1" in
+	agent-browser)
+		RUNTIME_SKILL_ENTRY='runtime/warm-browser.js'
+		RUNTIME_SKILL_PROFILE='bun'
+		;;
 	frontier-runner)
 		RUNTIME_SKILL_ENTRY='runtime/frontier-runner.js'
 		RUNTIME_SKILL_PROFILE='bun'

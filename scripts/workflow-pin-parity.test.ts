@@ -21,12 +21,16 @@ function extractPinLine(workflow: string): string {
 	if (matches.length !== 1) {
 		throw new Error(`expected one native CLI pin line, found ${matches.length}`)
 	}
-	return matches[0]
+	const [pinLine] = matches
+	if (pinLine === undefined) throw new Error("native CLI pin line is missing")
+	return pinLine
 }
 
 function expectWorkflowPinParity(workflows: string[]): void {
 	const pinLines = workflows.map(extractPinLine)
-	expect(pinLines).toEqual(Array.from({ length: pinLines.length }, () => pinLines[0]))
+	const [firstPinLine] = pinLines
+	if (firstPinLine === undefined) throw new Error("native CLI pin line is missing")
+	expect(pinLines).toEqual(Array.from({ length: pinLines.length }, () => firstPinLine))
 }
 
 function bumpPinnedVersions(workflow: string): string {
@@ -48,7 +52,9 @@ test("native CLI workflow pin lines are byte-identical", () => {
 test("workflow pin parity rejects one differing line and accepts a coordinated bump", () => {
 	const workflows = workflowSources()
 	const oneDiffering = [...workflows]
-	oneDiffering[0] = bumpPinnedVersions(oneDiffering[0])
+	const firstWorkflow = oneDiffering[0]
+	if (firstWorkflow === undefined) throw new Error("workflow source is missing")
+	oneDiffering[0] = bumpPinnedVersions(firstWorkflow)
 
 	expect(() => expectWorkflowPinParity(oneDiffering)).toThrow()
 	expectWorkflowPinParity(workflows.map(bumpPinnedVersions))

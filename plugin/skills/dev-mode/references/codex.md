@@ -6,21 +6,32 @@ cannot reload changed plugin bytes.
 
 ## Inspect first
 
-Run `bun run dev -- codex --dry-run --json` from the selected checkout. Verify
-that `source` names that checkout and retain the planned plugin and Marketplace
-identity.
-
-Use `bun run dev -- codex --check` when the request authorizes repository build
-and staging only. It does not change Codex profile state.
+Run `bun run dev -- codex check --json --no-input` from the selected checkout.
+Verify that the candidate source path belongs to that checkout and retain the
+planned Plugin and Marketplace identity. The check may build and stage the
+candidate; it does not change Codex profile state.
 
 ## Install or refresh
 
-Installation mutates Codex profile state. Show the dry-run plan and get explicit
-approval before dispatch.
+Preview the exact transition without changing Codex profile state:
 
-After approval, run `bun run dev -- codex --no-launch`. Do not launch a nested
-Codex TUI from an agent-managed terminal. Nested launch introduces a separate
-hook-trust decision and does not reload the task that invoked this skill.
+```sh
+bun run dev -- codex install --json --no-input --no-launch
+```
+
+Show the candidate identity, candidate hash, operation plan, and exact apply
+command. Get explicit approval bound to that candidate hash. A changed candidate
+invalidates the approval and requires another preview.
+
+After approval, substitute the previewed hash and run the exact bound command:
+
+```sh
+bun run dev -- codex install --apply --candidate-hash <sha256> --json --no-input --no-launch
+```
+
+Do not launch a nested Codex TUI from an agent-managed terminal. Nested launch
+introduces a separate hook-trust decision and does not reload the task that
+invoked this skill.
 
 Treat a failure after `codex plugin add` as ambiguous. Inspect
 `codex plugin list --marketplace <marketplace> --json` for the planned plugin

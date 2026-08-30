@@ -1,6 +1,12 @@
 {
   "schemaVersion": 1,
   "skills": {
+    "agent-browser": {
+      "entry": "runtime/warm-browser.js",
+      "runtimeProfile": "bun",
+      "workspace": "packages/agent-browser",
+      "launcher": "warm-browser"
+    },
     "frontier-runner": {
       "entry": "runtime/frontier-runner.js",
       "runtimeProfile": "bun",

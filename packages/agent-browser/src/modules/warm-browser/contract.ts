@@ -1,0 +1,350 @@
+export const schemaVersion = 1 as const
+
+/**
+ * One option a command accepts. Options are declared beside the command that
+ * accepts them, so the parser, the usage line, and the help result all read the
+ * same table and no command's argument rules are restated anywhere else.
+ */
+export interface CommandOption {
+	readonly flag: string
+	/** The placeholder a value-bearing option names in usage; a switch has none. */
+	readonly value: string | null
+	readonly required: boolean
+}
+
+/** Accepted by every command, so it is declared once instead of per command. */
+export const runIdOption: CommandOption = { flag: "--run-id", value: "ID", required: false }
+
+/**
+ * Public selectors are outside this interface. A caller that names one is told
+ * exactly that, rather than being told its argument was unrecognised, because
+ * the answer is to take a snapshot and act through its Snapshot References.
+ */
+export const refusedSelectorFlags = ["--selector", "--css", "--xpath", "--text"] as const
+
+/**
+ * Output destinations are outside this interface as well. Warm Browser has no output
+ * destination at any command, because a Screenshot is written to a path the
+ * Browser Session owns, so a caller that names one is told exactly that rather
+ * than being told its argument was unrecognised.
+ */
+export const refusedDestinationFlags = [
+	"--path",
+	"--out",
+	"--output",
+	"--file",
+	"--dir",
+	"--directory",
+] as const
+
+export const commandVocabulary = [
+	{ name: "help", sideEffects: "none", options: [] },
+	{
+		name: "start",
+		sideEffects:
+			"may stop a proved stale owned browser process group and invalidate every earlier Snapshot Reference, then starts one owned browser process group",
+		options: [{ flag: "--port", value: "NUMBER", required: false }],
+	},
+	{
+		name: "status",
+		sideEffects:
+			"may stop a proved stale owned browser process group, remove its private state, and invalidate every earlier Snapshot Reference",
+		options: [],
+	},
+	{
+		name: "open",
+		sideEffects:
+			"navigates the one Controlled Page and invalidates every earlier Snapshot Reference",
+		options: [
+			{ flag: "--url", value: "URL", required: true },
+			{ flag: "--adopt-page", value: null, required: false },
+		],
+	},
+	{
+		name: "snapshot",
+		sideEffects: "reads the Controlled Page and replaces every earlier Snapshot Reference",
+		options: [],
+	},
+	{
+		name: "screenshot",
+		sideEffects:
+			"captures the Controlled Page to one private Browser Session-owned PNG, replacing the Screenshot that session owned, and may invalidate every earlier Snapshot Reference",
+		options: [],
+	},
+	{
+		name: "click",
+		sideEffects:
+			"dispatches one click on one referenced element of the Controlled Page and may invalidate every earlier Snapshot Reference",
+		options: [{ flag: "--ref", value: "REFERENCE", required: true }],
+	},
+	{
+		name: "fill",
+		sideEffects:
+			"types one non-secret value into one referenced empty field of the Controlled Page and may invalidate every earlier Snapshot Reference",
+		options: [
+			{ flag: "--ref", value: "REFERENCE", required: true },
+			{ flag: "--value", value: "TEXT", required: true },
+		],
+	},
+	{
+		name: "login",
+		sideEffects:
+			"delivers one Credential Match field into one referenced credential field of the Controlled Page and invalidates every earlier Snapshot Reference",
+		options: [
+			{ flag: "--ref", value: "REFERENCE", required: true },
+			{ flag: "--field", value: "KIND", required: true },
+			// The switch asserts that a human approved this exact credential access
+			// immediately before it. The assertion is the human's to make and never
+			// an agent's own decision; without it, login refuses before anything is
+			// read.
+			{ flag: "--human-approved", value: null, required: false },
+		],
+	},
+	{
+		name: "stop",
+		sideEffects:
+			"stops one verified owned browser process group and removes its private state, including every Snapshot Reference",
+		options: [],
+	},
+] as const
+
+export type CliCommand = (typeof commandVocabulary)[number]["name"]
+export type SliceCommand = Exclude<CliCommand, "help">
+/** A command that acts on the Controlled Page of an already running session. */
+export type PageCommand = Extract<
+	CliCommand,
+	"open" | "snapshot" | "screenshot" | "click" | "fill" | "login"
+>
+export type TransactionState =
+	| "unchanged"
+	| "started"
+	| "stopped"
+	| "recovered"
+	| "rolled_back"
+	| "acted"
+	/**
+	 * The Browser Session is intact and nothing reached the Controlled Page, but
+	 * the Snapshot References it held are gone. It is distinct from `unchanged`,
+	 * which would deny that durable state moved, and from `acted`, which would
+	 * claim the page was touched.
+	 */
+	| "invalidated"
+
+export type ResultCode =
+	| "HELP"
+	| "SESSION_STARTED"
+	| "SESSION_RUNNING"
+	| "SESSION_ABSENT"
+	| "SESSION_STOPPED"
+	| "STALE_SESSION_RECOVERED"
+	| "USAGE_ERROR"
+	| "PLATFORM_UNSUPPORTED"
+	| "STATE_UNSAFE"
+	| "CHROME_UNAVAILABLE"
+	| "PROFILE_UNSAFE"
+	| "PROFILE_PROCESS_AMBIGUOUS"
+	| "PROFILE_IN_USE"
+	| "PROCESS_INSPECTION_UNVERIFIED"
+	| "PROCESS_IDENTITY_UNVERIFIED"
+	| "LAUNCH_PROCESS_AMBIGUOUS"
+	| "CDP_IDENTITY_UNVERIFIED"
+	| "CONTROLLED_PAGE_UNAVAILABLE"
+	| "CONTROLLED_PAGE_AMBIGUOUS"
+	| "CONTROLLED_PAGE_REPLACED"
+	| "SESSION_ALREADY_RUNNING"
+	| "PORT_OCCUPIED"
+	| "PORT_UNVERIFIABLE"
+	| "START_IN_PROGRESS"
+	| "PAGE_OPENED"
+	| "SNAPSHOT_TAKEN"
+	| "SCREENSHOT_CAPTURED"
+	| "ELEMENT_CLICKED"
+	| "FIELD_FILLED"
+	| "SNAPSHOT_ABSENT"
+	| "ELEMENT_NOT_ACTIONABLE"
+	| "SNAPSHOT_REFERENCE_INVALID"
+	| "SNAPSHOT_REFERENCE_STALE"
+	| "PAGE_IDENTITY_CHANGED"
+	| "SELECTOR_UNSUPPORTED"
+	| "SCREENSHOT_PATH_UNSUPPORTED"
+	| "CREDENTIAL_FIELD_REFUSED"
+	| "NAVIGATION_TARGET_REFUSED"
+	| "NAVIGATION_FAILED"
+	| "PAGE_CONTROL_UNVERIFIED"
+	| "LOGIN_FIELD_DELIVERED"
+	| "APPROVAL_REQUIRED"
+	| "LOGIN_FIELD_MISMATCH"
+	| "LOGIN_FRAME_UNSUPPORTED"
+	| "ORIGIN_UNSUPPORTED"
+	| "ORIGIN_CHANGED"
+	| "CREDENTIAL_VAULT_UNCONFIGURED"
+	| "CREDENTIAL_WRAPPER_UNAVAILABLE"
+	| "CREDENTIAL_VAULT_MISMATCH"
+	| "CREDENTIAL_VAULT_UNVERIFIED"
+	| "CREDENTIAL_MATCH_ABSENT"
+	| "CREDENTIAL_MATCH_AMBIGUOUS"
+	| "CREDENTIAL_FIELD_AMBIGUOUS"
+	| "PRIVATE_DELIVERY_UNVERIFIED"
+	| "UNEXPECTED_FAILURE"
+
+export interface SuccessEnvelope {
+	readonly schemaVersion: typeof schemaVersion
+	readonly status: "ok"
+	readonly command: CliCommand
+	readonly resultCode: ResultCode
+	readonly runId: string
+	readonly transactionState: TransactionState
+	readonly retrySafe: boolean
+	readonly nextAction: string
+	readonly data: Record<string, unknown>
+}
+
+export interface ErrorEnvelope {
+	readonly schemaVersion: typeof schemaVersion
+	readonly status: "error"
+	readonly command: CliCommand | "unknown"
+	readonly resultCode: ResultCode
+	readonly runId: string
+	readonly transactionState: TransactionState
+	readonly retrySafe: boolean
+	readonly nextAction: string
+	readonly message: string
+}
+
+export interface CliOutcome {
+	readonly exitCode: 0 | 1 | 2 | 20 | 21 | 22
+	readonly stdout: string
+	readonly stderr: string
+}
+
+export class SpawnCleanupUnverifiedError extends Error {
+	constructor() {
+		super("spawned Chrome process-group cleanup could not be verified")
+		this.name = "SpawnCleanupUnverifiedError"
+	}
+}
+
+export interface BrowserProcessIdentity {
+	readonly pid: number
+	readonly processGroupId: number
+	readonly startedAtToken: string
+	readonly executable: string
+	readonly commandLine: string
+}
+
+export type ProcessInspection =
+	| { readonly kind: "found"; readonly process: BrowserProcessIdentity }
+	| { readonly kind: "absent" }
+	| { readonly kind: "unverifiable" }
+
+export type ProcessListInspection =
+	| { readonly kind: "verified"; readonly processes: readonly BrowserProcessIdentity[] }
+	| { readonly kind: "unverifiable" }
+
+export interface VerifiedEndpoint {
+	readonly browserVersion: string
+	readonly controlledPageTargetId: string
+}
+
+export type EndpointVerification =
+	| { readonly kind: "verified"; readonly endpoint: VerifiedEndpoint }
+	| { readonly kind: "process_unverifiable" }
+	| { readonly kind: "browser_unverified" }
+	| { readonly kind: "listener_unverified" }
+	| { readonly kind: "controlled_page_unavailable" }
+	| { readonly kind: "controlled_page_ambiguous" }
+
+/**
+ * What the Controlled Page is at one instant: which target it is, which frame
+ * and document load it is showing, and where it is. A Snapshot Reference is
+ * only ever usable while this whole identity is unchanged, so it is compared
+ * as a whole and never field by field at a call site.
+ */
+export interface ControlledPageBasis {
+	readonly targetId: string
+	readonly frameId: string
+	readonly loaderId: string
+	readonly url: string
+}
+
+/** One element the Controlled Page exposes to a semantic snapshot. */
+export interface ControlledPageElement {
+	readonly backendNodeId: number
+	readonly role: string
+	readonly name: string
+	readonly credentialField: boolean
+}
+
+export type PageNavigation =
+	| { readonly kind: "navigated"; readonly basis: ControlledPageBasis }
+	/** The browser answered the navigation with its own error. */
+	| { readonly kind: "refused" }
+	/** Another document reached the Controlled Page instead of this one. */
+	| { readonly kind: "superseded" }
+	| { readonly kind: "unverified" }
+
+export type PageSnapshotReading =
+	| {
+		readonly kind: "observed"
+		readonly basis: ControlledPageBasis
+		readonly elements: readonly ControlledPageElement[]
+		readonly truncated: boolean
+	}
+	/** The page moved while it was being read, so no reference may be issued. */
+	| { readonly kind: "identity_changed" }
+	| { readonly kind: "unverified" }
+
+export type PageCapture =
+	| { readonly kind: "captured"; readonly basis: ControlledPageBasis; readonly png: Uint8Array }
+	/** The page moved while it was being captured, so the image describes a page that is gone. */
+	| { readonly kind: "identity_changed" }
+	| { readonly kind: "unverified" }
+
+/**
+ * Why an act could never be delivered to the element the caller referenced.
+ *
+ * Each one is something the live page did that stops Warm Browser proving the
+ * act would land where the reference points: a point that resolves to another
+ * element, a field that will not take or hold focus, a field that already holds
+ * text a fill would append to, and a field the page will not describe. None of
+ * them is a failure of the act, because the act never happened.
+ */
+export type UndeliverableAct =
+	| "click_target_unproved"
+	| "field_unreadable"
+	| "field_not_empty"
+	| "field_not_focusable"
+	| "field_focus_moved"
+
+/**
+ * What one act on one element of the Controlled Page came to.
+ *
+ * An outcome that dispatched nothing still says whether the attempt had already
+ * asked the page to do something, because `touchedPage` is what a caller needs
+ * to report the page truthfully. A click brings its element into view and a fill
+ * asks for focus, and both are the page changing: the first scrolls it, the
+ * second moves focus and runs the page's own focus handlers. Neither is the act,
+ * and an answer that did not come back is never proof of anything about the
+ * page, so an act that got as far as asking may no longer report that it left
+ * the page alone.
+ */
+export type PageActionOutcome =
+	| { readonly kind: "acted"; readonly basis: ControlledPageBasis }
+	/** The page was not the one the reference was issued against. */
+	| { readonly kind: "identity_changed" }
+	/** Nothing was dispatched, because delivery to the element was not provable. */
+	| {
+		readonly kind: "undeliverable"
+		readonly reason: UndeliverableAct
+		readonly touchedPage: boolean
+	}
+	/**
+	 * The act reached the page, and the page then moved to a document the act
+	 * could not have asked for. Success is never claimed about that document.
+	 */
+	| { readonly kind: "superseded" }
+	/** The referenced element is no longer a thing this page can be acted on. */
+	| { readonly kind: "element_absent"; readonly touchedPage: boolean }
+	/** The live element is a credential field, whatever the snapshot recorded. */
+	| { readonly kind: "credential_field" }
+	| { readonly kind: "unverified" }

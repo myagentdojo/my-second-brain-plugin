@@ -35,7 +35,7 @@ function copyRepository(): string {
 	return temporaryRoot
 }
 
-function validate(cwd: string): ReturnType<typeof Bun.spawnSync> {
+function validate(cwd: string): Bun.ReadableSyncSubprocess {
 	return Bun.spawnSync({
 		cmd: [process.execPath, "run", "scripts/release-validate.ts", "--json"],
 		cwd,
@@ -44,7 +44,7 @@ function validate(cwd: string): ReturnType<typeof Bun.spawnSync> {
 	})
 }
 
-function validateWithArguments(cwd: string, arguments_: string[]): ReturnType<typeof Bun.spawnSync> {
+function validateWithArguments(cwd: string, arguments_: string[]): Bun.ReadableSyncSubprocess {
 	const {
 		PUBLICATION_CANDIDATE_PATH: _candidatePath,
 		REPAIR_TAG: _repairTag,
@@ -696,7 +696,7 @@ test("release workflow is pinned and publishes proven assets after validation", 
 		finalReleaseJob.indexOf("      - name: Create or verify immutable tag\n"),
 	)
 	const actionReferences = [...workflow.matchAll(/uses: [^@\s]+@([^\s]+)/g)].map(
-		(match) => match[1],
+		(match) => match[1] ?? "",
 	)
 
 	expect(actionReferences.length).toBeGreaterThan(0)
@@ -814,13 +814,19 @@ test("release workflow is pinned and publishes proven assets after validation", 
 	)
 	expect(candidateJob).toContain("    permissions:\n      actions: read\n      contents: read\n")
 	expect(candidateJob).toContain("persist-credentials: false")
-	expect(normalizePredicate(parsedWorkflow.jobs.compatibility.if)).toBe(
+	const compatibilityJob = parsedWorkflow.jobs.compatibility
+	const packageJob = parsedWorkflow.jobs.package
+	const releaseWorkflowJob = parsedWorkflow.jobs.release
+	if (compatibilityJob === undefined || packageJob === undefined || releaseWorkflowJob === undefined) {
+		throw new Error("release workflow jobs are missing")
+	}
+	expect(normalizePredicate(compatibilityJob.if)).toBe(
 		"needs.resolve.outputs.mode == 'publish' || needs.resolve.outputs.mode == 'resume'",
 	)
-	expect(normalizePredicate(parsedWorkflow.jobs.package.if)).toBe(
+	expect(normalizePredicate(packageJob.if)).toBe(
 		"always() && needs.resolve.result == 'success' && needs.candidate.result == 'success' && (needs.resolve.outputs.mode == 'publish' || needs.resolve.outputs.mode == 'resume' || needs.resolve.outputs.mode == 'repair') && (needs.compatibility.result == 'success' || (needs.resolve.outputs.mode == 'repair' && needs.compatibility.result == 'skipped'))",
 	)
-	expect(normalizePredicate(parsedWorkflow.jobs.release.if)).toBe(
+	expect(normalizePredicate(releaseWorkflowJob.if)).toBe(
 		"always() && needs.resolve.result == 'success' && needs.package.result == 'success' && (needs.resolve.outputs.mode == 'publish' || needs.resolve.outputs.mode == 'resume' || needs.resolve.outputs.mode == 'repair')",
 	)
 	expect(workflow.match(/--dir "\$RUNNER_TEMP\/platform-candidate"/g)).toHaveLength(2)
@@ -905,16 +911,21 @@ test("release workflow resumes a proven merged candidate stranded before its tag
 	expect(resumeBranch).toContain("already exists; use manual incomplete-publication repair")
 
 	// Resume reaches publication through the same proof and protected environment.
-	expect(normalizePredicate(parsedWorkflow.jobs.candidate.if)).toContain(
+	const candidateWorkflowJob = parsedWorkflow.jobs.candidate
+	const resumeCompatibilityJob = parsedWorkflow.jobs.compatibility
+	const resumePackageJob = parsedWorkflow.jobs.package
+	const resumeReleaseJob = parsedWorkflow.jobs.release
+	if (candidateWorkflowJob === undefined || resumeCompatibilityJob === undefined || resumePackageJob === undefined || resumeReleaseJob === undefined) throw new Error("resume workflow jobs are missing")
+	expect(normalizePredicate(candidateWorkflowJob.if)).toContain(
 		"needs.resolve.outputs.mode == 'resume'",
 	)
-	expect(normalizePredicate(parsedWorkflow.jobs.compatibility.if)).toContain(
+	expect(normalizePredicate(resumeCompatibilityJob.if)).toContain(
 		"needs.resolve.outputs.mode == 'resume'",
 	)
-	expect(normalizePredicate(parsedWorkflow.jobs.package.if)).toContain(
+	expect(normalizePredicate(resumePackageJob.if)).toContain(
 		"needs.resolve.outputs.mode == 'resume'",
 	)
-	expect(normalizePredicate(parsedWorkflow.jobs.release.if)).toContain(
+	expect(normalizePredicate(resumeReleaseJob.if)).toContain(
 		"needs.resolve.outputs.mode == 'resume'",
 	)
 
@@ -1116,7 +1127,7 @@ test("successful publication closes the provenance-bound Release Please lineage"
 	expect(lineageStep?.run).toContain("persisted-candidate.json")
 	expect(lineageStep?.run).toContain("autorelease: tagged")
 	expect(lineageStep?.run).toContain("autorelease%3A%20pending")
-	expect(lineageStep?.run.match(/gh api --paginate "\$labels_endpoint"/g)).toHaveLength(2)
+	expect(lineageStep?.run?.match(/gh api --paginate "\$labels_endpoint"/g)).toHaveLength(2)
 	expect(lineageStep?.run).toContain("Release Please lineage did not converge")
 	expect(lineageStep?.run).toBeString()
 

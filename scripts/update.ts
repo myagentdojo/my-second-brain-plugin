@@ -112,6 +112,7 @@ function parseInvocation(arguments_: string[]): UpdateInvocation {
 	const seen = new Set<string>()
 	for (let index = 0; index < arguments_.length; index += 1) {
 		const argument = arguments_[index]
+		if (argument === undefined) continue
 		if (seen.has(argument)) throw new UsageError(`${argument} may be provided once`)
 		switch (argument) {
 			case "--harness":

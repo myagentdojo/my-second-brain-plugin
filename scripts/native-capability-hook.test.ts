@@ -34,7 +34,7 @@ function lifecycleCaseArms(hook: string): string[] {
 
 	return Array.from(
 		lifecycleCase.groups.body.matchAll(/^\s*((?:SessionStart|Stop):[^\n)]+)\)/gm),
-		(match) => match[1],
+		(match) => match[1] ?? "",
 	)
 		.flatMap((pattern) => pattern.split("|"))
 		.map((arm) => arm.trim())
@@ -142,7 +142,7 @@ function treeSnapshot(directory: string): string[] {
 	return entries
 }
 
-function runGenerateCheck(repositoryRoot = root): ReturnType<typeof Bun.spawnSync> {
+function runGenerateCheck(repositoryRoot = root): Bun.ReadableSyncSubprocess {
 	return Bun.spawnSync({
 		cmd: [
 			process.execPath,

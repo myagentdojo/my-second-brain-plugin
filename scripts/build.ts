@@ -94,6 +94,7 @@ export interface AdmittedDependency {
 	version: string
 	license: string
 	licenseText?: string
+	noticeText?: string
 }
 
 /** One materialized bundle identity owned by the generated inventory. */
@@ -140,12 +141,13 @@ const bundleTranspiler = new Bun.Transpiler({ loader: "js" })
 function executableCodeMask(code: string): string {
 	const masked = Array<string>(code.length).fill(" ")
 	for (let index = 0; index < code.length; index++) {
-		if (/\s/.test(code[index])) masked[index] = code[index]
+		const character = code[index] ?? ""
+		if (/\s/.test(character)) masked[index] = character
 	}
 	let index = 0
 
 	const copy = (start: number, end: number): void => {
-		for (let cursor = start; cursor < end; cursor++) masked[cursor] = code[cursor]
+		for (let cursor = start; cursor < end; cursor++) masked[cursor] = code[cursor] ?? ""
 	}
 	const identifierStart = (character: string): boolean => /[A-Za-z_$]/.test(character)
 	const identifierPart = (character: string): boolean => /[A-Za-z0-9_$]/.test(character)
@@ -238,7 +240,7 @@ function executableCodeMask(code: string): string {
 		const functionParameterParens: boolean[] = []
 		const statementBlockBraces: boolean[] = []
 		while (index < code.length) {
-			const character = code[index]
+			const character = code[index] ?? ""
 			if (/\s/.test(character)) {
 				index++
 				continue
@@ -279,7 +281,7 @@ function executableCodeMask(code: string): string {
 				copy(start, index)
 				const identifier = code.slice(start, index)
 				let before = start - 1
-				while (before >= 0 && /\s/.test(masked[before])) before--
+				while (before >= 0 && /\s/.test(masked[before] ?? "")) before--
 				const isMemberIdentifier = masked[before] === "." || masked[before] === "#"
 				if (!(pendingControlCondition && identifier === "await")) {
 					pendingControlCondition =
@@ -312,27 +314,27 @@ function executableCodeMask(code: string): string {
 			}
 			if (character === "{") {
 				let before = index - 1
-				while (before >= 0 && /\s/.test(masked[before])) before--
+				while (before >= 0 && /\s/.test(masked[before] ?? "")) before--
 				let isLabeledBlock = false
 				if (
 					masked[before] === ":" &&
 					(statementBlockBraces.length === 0 || statementBlockBraces.at(-1) === true)
 				) {
 					let labelEnd = before - 1
-					while (labelEnd >= 0 && /\s/.test(masked[labelEnd])) labelEnd--
+					while (labelEnd >= 0 && /\s/.test(masked[labelEnd] ?? "")) labelEnd--
 					let labelStart = labelEnd
-					while (labelStart >= 0 && identifierPart(masked[labelStart])) labelStart--
+					while (labelStart >= 0 && identifierPart(masked[labelStart] ?? "")) labelStart--
 					let boundary = labelStart
-					while (boundary >= 0 && /\s/.test(masked[boundary])) boundary--
+					while (boundary >= 0 && /\s/.test(masked[boundary] ?? "")) boundary--
 					isLabeledBlock =
-						labelStart < labelEnd && (boundary < 0 || /[;{}]/.test(masked[boundary]))
+						labelStart < labelEnd && (boundary < 0 || /[;{}]/.test(masked[boundary] ?? ""))
 				}
 				masked[index++] = character
 				braceDepth++
 				const isDeclarationBlock =
 					declarationBodyReady ||
 					pendingClassDeclarationDepth === controlConditionParens.length
-				const isStandaloneBlock = before < 0 || /[;{}]/.test(masked[before])
+				const isStandaloneBlock = before < 0 || /[;{}]/.test(masked[before] ?? "")
 				statementBlockBraces.push(
 					pendingControlBlock ||
 					pendingDirectStatementBlock ||
@@ -397,7 +399,7 @@ function executableCodeMask(code: string): string {
 
 function isPropertyLabel(code: string, start: number, length: number): boolean {
 	let after = start + length
-	while (after < code.length && /\s/.test(code[after])) after++
+	while (after < code.length && /\s/.test(code[after] ?? "")) after++
 	return code[after] === ":"
 }
 
@@ -438,7 +440,7 @@ export function collectModuleSpecifiers(code: string): string[] {
 		const raw = /^__require\(\s*(["'])((?:(?!\1)[^\\]|\\.)*)\1\s*\)/.exec(
 			code.slice(match.index),
 		)
-		if (raw) specifiers.add(raw[2])
+		if (raw && raw[2] !== undefined) specifiers.add(raw[2])
 	}
 	return [...specifiers].sort(compareCodeUnits)
 }
@@ -535,7 +537,7 @@ export function validateBundleText(skillId: string, code: string): void {
 	for (const match of executable.matchAll(/\b(?:__require|require)\b/g)) {
 		if (isPropertyLabel(executable, match.index, match[0].length)) continue
 		let before = match.index - 1
-		while (before >= 0 && /\s/.test(executable[before])) before--
+		while (before >= 0 && /\s/.test(executable[before] ?? "")) before--
 		if (executable[before] === ".") {
 			const owner = executable.slice(0, before)
 			if (/\b(?:globalThis|import\s*\.\s*meta)\s*(?:\?\s*)?$/.test(owner)) {
@@ -601,7 +603,7 @@ function isOwnedHelloWorldAdapter(skillId: string, skill: CatalogRuntimeSkill): 
 }
 
 function barePackageName(specifier: string): string {
-	if (!specifier.startsWith("@")) return specifier.split("/", 1)[0]
+	if (!specifier.startsWith("@")) return specifier.split("/", 1)[0] ?? ""
 	return specifier.split("/", 2).join("/")
 }
 
@@ -770,6 +772,7 @@ export async function bundleWorkspaceSkill(
 	skillId: string,
 	workspace: string,
 	stagingDirectory: string,
+	artifactName = skillId,
 ): Promise<BundleArtifact> {
 	const realRoot = realpathSync(repositoryRoot)
 	const workspaceRoot = join(realRoot, workspace)
@@ -829,7 +832,7 @@ export async function bundleWorkspaceSkill(
 		result = await Bun.build({
 			entrypoints: [entryPoint],
 			outdir: outputDirectory,
-			naming: `${skillId}.js`,
+			naming: `${artifactName}.js`,
 			target: "bun",
 			format: "esm",
 			splitting: false,
@@ -862,7 +865,7 @@ export async function bundleWorkspaceSkill(
 			`bundle emitted native addon artifacts: ${nativeOutputs.join(", ")}`,
 		)
 	}
-	if (outputs.length !== 1 || outputs[0] !== `${skillId}.js`) {
+	if (outputs.length !== 1 || outputs[0] !== `${artifactName}.js`) {
 		throw new BundleValidationError(
 			skillId,
 			"unexpected-output",
@@ -870,12 +873,12 @@ export async function bundleWorkspaceSkill(
 		)
 	}
 
-	const contents = new Uint8Array(readFileSync(join(outputDirectory, `${skillId}.js`)))
+	const contents = new Uint8Array(readFileSync(join(outputDirectory, `${artifactName}.js`)))
 	validateBundleText(skillId, new TextDecoder().decode(contents))
 	const sha256 = sha256Hex(contents)
 	return {
 		skillId,
-		fileName: `${skillId}-${sha256.slice(0, 16)}.js`,
+		fileName: `${artifactName}-${sha256.slice(0, 16)}.js`,
 		bytes: contents.byteLength,
 		sha256,
 		contents,
@@ -991,10 +994,11 @@ function resolveLockDependency(
 		)
 	}
 	if (boundEntry) {
+		const boundEntryKey = boundEntry.key
 		if (satisfies(boundEntry)) return boundEntry
 		throw new DependencyAdmissionError(
 			"lock-invalid",
-			`bun.lock selection ${boundEntry.key} does not satisfy ${name}@${requested}`,
+			`bun.lock selection ${boundEntryKey} does not satisfy ${name}@${requested}`,
 		)
 	}
 	if (parent) {
@@ -1019,9 +1023,11 @@ function resolveLockDependency(
 	}
 	const candidates = [...packages.values()].filter((entry) => entry.name === expectedName)
 	const exact = candidates.filter((entry) => entry.reference === expectedRange)
-	if (exact.length === 1) return exact[0]
+	const [exactEntry] = exact
+	if (exactEntry !== undefined && exact.length === 1) return exactEntry
 	const satisfying = candidates.filter(satisfies)
-	if (satisfying.length === 1) return satisfying[0]
+	const [satisfyingEntry] = satisfying
+	if (satisfyingEntry !== undefined && satisfying.length === 1) return satisfyingEntry
 	throw new DependencyAdmissionError(
 		"lock-invalid",
 		`bun.lock cannot resolve ${name}@${requested} to one package entry`,
@@ -1212,6 +1218,15 @@ function readLicenseText(directory: string): string | undefined {
 	return undefined
 }
 
+function readNoticeText(directory: string): string | undefined {
+	for (const entry of readdirSync(directory).sort(compareCodeUnits)) {
+		if (/^notice(\.(md|txt))?$/i.test(entry)) {
+			return readFileSync(join(directory, entry), "utf8")
+		}
+	}
+	return undefined
+}
+
 /**
  * Admit only pure-JavaScript, lifecycle-free, permissively licensed dependencies from the frozen lock.
  *
@@ -1348,6 +1363,7 @@ export function admitDependencyClosure(root: string): AdmittedDependency[] {
 			version,
 			license: manifest.license,
 			licenseText: readLicenseText(packageDirectory),
+			noticeText: readNoticeText(packageDirectory),
 		})
 	}
 	}
@@ -1368,10 +1384,12 @@ export function admitDependencyClosure(root: string): AdmittedDependency[] {
 export function renderThirdPartyNotices(dependencies: AdmittedDependency[]): string {
 	const sections = dependencies.map((dependency) => {
 		const heading = `## ${dependency.name}@${dependency.version} (${dependency.license})`
-		const text = dependency.licenseText?.trimEnd()
-		return text
+		const text = dependency.licenseText?.replace(/\r\n?/g, "\n").trimEnd()
+		const licenseSection = text
 			? `${heading}\n\n${text}\n`
 			: `${heading}\n\nLicense text not distributed by the package.\n`
+		const notice = dependency.noticeText?.replace(/\r\n?/g, "\n").trimEnd()
+		return notice ? `${licenseSection}\n### Upstream NOTICE\n\n${notice}\n` : licenseSection
 	})
 	return `# Third-Party Notices\n\nGenerated from bun.lock. Edit workspace dependencies, run bun install, then bun run build.\n\n${sections.join("\n")}`
 }
@@ -1396,6 +1414,7 @@ export function renderBundleInventoryProjection(bundles: Record<string, BundleRe
 		.sort(compareCodeUnits)
 		.map((skillId) => {
 			const record = bundles[skillId]
+			if (record === undefined) throw new Error(`missing bundle record for ${skillId}`)
 			return `	${shellQuote(skillId)})
 		RUNTIME_BUNDLE_PATH=${shellQuote(record.path)}
 		RUNTIME_BUNDLE_BYTES=${shellQuote(String(record.bytes))}
@@ -1462,8 +1481,15 @@ export async function buildWorkspaceBundles(root: string): Promise<BundleClosure
 			artifacts.push(await buildHelloWorldRuntime(root, stagingDirectory))
 		}
 		for (const [skillId, skill] of workspaceSkills) {
+			const artifactName = skill.entry.slice("runtime/".length, -".js".length)
 			artifacts.push(
-				await bundleWorkspaceSkill(root, skillId, skill.workspace as string, stagingDirectory),
+				await bundleWorkspaceSkill(
+					root,
+					skillId,
+					skill.workspace as string,
+					stagingDirectory,
+					artifactName,
+				),
 			)
 		}
 	} finally {
@@ -1574,7 +1600,7 @@ export function validateBundleClosure(root: string): void {
 		const expectedPath =
 			skill.workspace === undefined
 				? skill.entry
-				: `runtime/${skillId}-${record.sha256.slice(0, 16)}.js`
+				: `${skill.entry.slice(0, -".js".length)}-${record.sha256.slice(0, 16)}.js`
 		if (record.path !== expectedPath) {
 			throw new Error(
 				`bundle closure: invalid bundle path ${record.path} for ${skillId}; run bun run build`,
@@ -1643,6 +1669,9 @@ const capabilityAssetFiles = [
 	"assets/vault.svg",
 ].sort(compareCodeUnits)
 const nonBundledSkillPayloadFiles = [
+	"skills/agent-browser/AGENTS.md",
+	"skills/agent-browser/CODING_STANDARDS.md",
+	"skills/agent-browser/CONTEXT.md",
 	"skills/capability-tour/SKILL.md",
 	"skills/capability-tour/references/capability-reviewer.md",
 	"skills/decision-view/AGENTS.md",
@@ -1700,7 +1729,7 @@ export function validateBunOnlyPayload(root: string): void {
 	const inventory = pluginPayloadInventory(root)
 	const inventorySet = new Set(inventory)
 	for (const path of inventory) {
-		const surface = path.split("/", 1)[0]
+		const surface = path.split("/", 1)[0] ?? ""
 		if (!allowedPayloadSurfaces.has(surface)) {
 			throw new Error(`Bun payload closure: unsupported payload surface ${surface}/`)
 		}
@@ -1723,7 +1752,7 @@ export function validateBunOnlyPayload(root: string): void {
 		readFileSync(join(root, "plugin", "runtime", "bundle-inventory.json"), "utf8"),
 	) as { bundles: Record<string, BundleRecord> }
 	for (const [skillId, skill] of Object.entries(catalog.skills)) {
-		required.push(`bin/${skillId}`, `skills/${skillId}/SKILL.md`)
+		required.push(`bin/${skill.launcher ?? skillId}`, `skills/${skillId}/SKILL.md`)
 		required.push(
 			skill.workspace === undefined
 				? skill.entry
@@ -1765,7 +1794,9 @@ export function validateBunOnlyPayload(root: string): void {
 	const launchers = inventory
 		.filter((path) => path.startsWith("bin/"))
 		.map((path) => path.slice("bin/".length))
-	const expectedLaunchers = Object.keys(catalog.skills).sort(compareCodeUnits)
+	const expectedLaunchers = Object.entries(catalog.skills)
+		.map(([skillId, skill]) => skill.launcher ?? skillId)
+		.sort(compareCodeUnits)
 	if (launchers.join("\0") !== expectedLaunchers.join("\0")) {
 		throw new Error("Bun payload closure: launcher inventory does not match the skill catalog")
 	}

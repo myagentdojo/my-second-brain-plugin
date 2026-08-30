@@ -1296,15 +1296,37 @@ export function proveInstalledCapabilityEvidence(
 		join(pluginRoot, "runtime", "skill-catalog.sh"),
 		"utf8",
 	)
-	if (JSON.stringify(launchers) !== JSON.stringify(executableSkills)) {
+	if (launchers.length !== executableSkills.length) {
 		throw new Error(`${client} installed launcher inventory differs`)
 	}
+	const claimedLaunchers = new Set<string>()
 	for (const skillId of executableSkills) {
 		if (!catalogProjection.includes(`\n\t${skillId})`)) {
 			throw new Error(`${client} installed runtime catalog omits ${skillId}`)
 		}
-		const launcher = readFileSync(join(pluginRoot, "bin", skillId), "utf8")
-		if (!launcher.includes(`runtime/runtime-exec\" run ${skillId} --`) || launcher.includes("hooks/")) {
+		const matches = launchers.filter((launcherName) => {
+			const contents = readFileSync(join(pluginRoot, "bin", launcherName), "utf8")
+			// Deliberate independent oracle: exact bytes prove the runtime command is
+			// the launcher's executed command, rather than text hidden in a comment or
+			// another non-executing shell construct.
+			return contents === `#!/bin/sh
+# Generated from runtime/skill-catalog.json. Edit the source, then run bun run generate.
+set -eu
+case "$0" in
+*/*) launcher_dir=\${0%/*} ;;
+*) launcher_dir=. ;;
+esac
+plugin_root=$(CDPATH='' cd -- "$launcher_dir/.." && pwd -P)
+exec "$plugin_root/runtime/runtime-exec" run ${skillId} -- "$@"
+`
+		})
+		if (matches.length !== 1 || claimedLaunchers.has(matches[0]!)) {
+			throw new Error(`${client} installed launcher inventory differs`)
+		}
+		const launcherName = matches[0]!
+		claimedLaunchers.add(launcherName)
+		const launcher = readFileSync(join(pluginRoot, "bin", launcherName), "utf8")
+		if (launcher.includes("hooks/")) {
 			throw new Error(`${client} installed ${skillId} launcher is not hook-independent`)
 		}
 	}
@@ -1407,7 +1429,7 @@ function runInstalledRuntime(
 	pluginRoot: string,
 	cacheRoot: string,
 	commandArguments: string[],
-): ReturnType<typeof Bun.spawnSync> {
+): Bun.ReadableSyncSubprocess {
 	return Bun.spawnSync({
 		cmd: commandArguments,
 		cwd: pluginRoot,

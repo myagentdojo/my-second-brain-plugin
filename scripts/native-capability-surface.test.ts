@@ -153,7 +153,9 @@ test("capability tour is one model-only skill with one cross-client reviewer pro
 	const skill = readFileSync(join(skillRoot, "SKILL.md"), "utf8")
 	const references = readdirSync(join(skillRoot, "references")).sort()
 	expect(references).toEqual(["capability-reviewer.md"])
-	const reviewer = readFileSync(join(skillRoot, "references", references[0]), "utf8")
+	const reviewerReference = references[0]
+	if (reviewerReference === undefined) throw new Error("capability reviewer reference is missing")
+	const reviewer = readFileSync(join(skillRoot, "references", reviewerReference), "utf8")
 	const combined = `${skill}\n${reviewer}`
 
 	for (const label of [

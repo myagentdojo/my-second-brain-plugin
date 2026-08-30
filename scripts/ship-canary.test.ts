@@ -662,6 +662,33 @@ test("candidate config cannot redirect trusted canary targets", () => {
 	)
 })
 
+test("malformed trusted repository identity preserves the canary target mismatch envelope", () => {
+	const fixture = recordingCanaryFixture()
+	const runner = new RecordingCommandRunner()
+	const dependencies = createQualificationDependencies(
+		runner,
+		recordingCanaryEnvironment({ GITHUB_REPOSITORY: "malformed" }),
+		root,
+	)
+
+	try {
+		preflight(recordingPublishOptions(fixture.temporaryRoot), dependencies)
+		throw new Error("malformed trusted repository identity should fail preflight")
+	} catch (error) {
+		if (!(error instanceof CanaryError)) throw error
+		expect(error).toMatchObject({
+			category: "canary_target_mismatch",
+			message: "candidate canary targets differ from the trusted driver checkout",
+			nextAction:
+				"restore the trusted targets, or initialize the exact same-repository template through its protected hosted-canary workflow",
+			retrySafe: false,
+		})
+	}
+	expect(runner.commands.map((record) => record.command)).toEqual([
+		["gh", "api", "user", "--jq", ".login"],
+	])
+})
+
 test("trusted initialized base admits its exact configured canary targets", () => {
 	const candidate = recordingCanaryFixture()
 	writeFileSync(
@@ -1161,7 +1188,9 @@ test("public and private candidates pass hosted proof then native cache comparis
 	const sourceSha = "1".repeat(40)
 	const calls: string[] = []
 	const result = await qualifyTargets(targets(sourceSha), sourceSha, testQualificationDependencies({
-		publish: (target) => calls.push(`publish:${target.visibility}`),
+		publish: (target) => {
+			calls.push(`publish:${target.visibility}`)
+		},
 		hostedProof: async (target) => {
 			calls.push(`hosted:${target.visibility}`)
 			return {
@@ -1271,7 +1300,7 @@ test("qualification binds candidate lineage and rejects unbound install evidence
 
 test("repository, visibility, hosted CI, and install failures carry non-rewriting repairs", async () => {
 	const missing = runRecordingPreflight(recordingCanaryFixture(), { missingRepository: true })
-	expect(missing.evidence.targets[0].repairAction).toContain("create")
+	expect(missing.evidence.targets[0]?.repairAction).toContain("create")
 
 	expect(() =>
 		runRecordingPreflight(recordingCanaryFixture(), { wrongVisibility: true }),
@@ -1320,6 +1349,7 @@ test("repository, visibility, hosted CI, and install failures carry non-rewritin
 test("private qualification rejects candidate-controlled workflow receipts", () => {
 	const sourceSha = "1".repeat(40)
 	const privateTarget = targets(sourceSha)[1]
+	if (privateTarget === undefined) throw new Error("private canary target is missing")
 	const environment = {
 		GITHUB_ACTIONS: "true",
 		GITHUB_REPOSITORY: "myagentdojo/agent-plugin-template",

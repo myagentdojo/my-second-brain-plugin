@@ -525,8 +525,11 @@ function parseVersion(value: string): [number, number, number] {
 
 function versionAtLeast(value: [number, number, number], minimum: readonly number[]): boolean {
 	for (let index = 0; index < minimum.length; index += 1) {
-		if (value[index] > minimum[index]) return true
-		if (value[index] < minimum[index]) return false
+		const candidate = value[index]
+		const required = minimum[index]
+		if (candidate === undefined || required === undefined) break
+		if (candidate > required) return true
+		if (candidate < required) return false
 	}
 	return true
 }
@@ -1234,6 +1237,7 @@ function inspectStateForRecovery(
 				productionMarketplace: marketplaces.find((entry) => entry.name === pluginName),
 				developmentMarketplace: marketplaces.find((entry) => entry.name === `${pluginName}-dev`),
 				linkedToCanonicalPayload: false,
+				supersededCacheVersions: [],
 			}
 		}
 		throw error

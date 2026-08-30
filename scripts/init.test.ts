@@ -49,7 +49,7 @@ function writeJson(path: string, value: unknown): void {
 }
 
 function commitPackageCheckout(repositoryRoot: string): string {
-	function git(...arguments_: string[]): ReturnType<typeof Bun.spawnSync> {
+	function git(...arguments_: string[]): Bun.ReadableSyncSubprocess {
 		return Bun.spawnSync({
 			cmd: ["git", ...arguments_],
 			cwd: repositoryRoot,
@@ -84,7 +84,7 @@ function packageWithSource(
 	repositoryRoot: string,
 	sourceVariable: "SOURCE_COMMIT" | "GITHUB_SHA",
 	value: string,
-): ReturnType<typeof Bun.spawnSync> {
+): Bun.ReadableSyncSubprocess {
 	return Bun.spawnSync({
 		cmd: [process.execPath, "run", "scripts/package.ts"],
 		cwd: repositoryRoot,
@@ -146,7 +146,7 @@ function readResetTargets(temporaryRoot: string): Map<string, string> {
 	)
 }
 
-function initializeTemplate(temporaryRoot: string, options: string[] = []): ReturnType<typeof Bun.spawnSync> {
+function initializeTemplate(temporaryRoot: string, options: string[] = []): Bun.ReadableSyncSubprocess {
 	return Bun.spawnSync({
 		cmd: [
 			process.execPath,

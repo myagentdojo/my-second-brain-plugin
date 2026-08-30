@@ -474,7 +474,7 @@ function decisionArguments(testFixture: Fixture, runId: string): string[] {
 	return ["decide", "--run-id", runId, "--decision-file", testFixture.decisionFile]
 }
 
-function envelope(result: ReturnType<typeof Bun.spawnSync>): Record<string, unknown> {
+function envelope(result: Bun.ReadableSyncSubprocess): Record<string, unknown> {
 	return JSON.parse(result.stdout.toString()) as Record<string, unknown>
 }
 

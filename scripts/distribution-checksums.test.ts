@@ -34,5 +34,5 @@ test.each([
 })
 
 test("distribution proof accepts an exact checksum identity", () => {
-	expect(() => assertDistributionChecksumIdentity(structuredClone(expected), expected)).not.toThrow()
+	expect(() => assertDistributionChecksumIdentity({ ...expected }, expected)).not.toThrow()
 })

@@ -143,8 +143,8 @@ test("projection CLI executes the same policy against Git refs", () => {
 	const run = (arguments_: string[]) =>
 		Bun.spawnSync({ cmd: arguments_, cwd: repository, stdout: "pipe", stderr: "pipe" })
 	const unreviewedPath = "unreviewed-☃\nfile.txt"
-	let result: ReturnType<typeof Bun.spawnSync> | undefined
-	let unsupportedPathResult: ReturnType<typeof Bun.spawnSync> | undefined
+	let result: Bun.ReadableSyncSubprocess | undefined
+	let unsupportedPathResult: Bun.ReadableSyncSubprocess | undefined
 	try {
 		for (const command of [
 			["git", "init", "--quiet"],

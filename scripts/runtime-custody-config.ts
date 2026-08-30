@@ -32,6 +32,8 @@ export interface SkillCatalogEntry {
 	runtimeProfile: string
 	/** Repository-relative workspace package that authors this skill's bundle. */
 	workspace?: string
+	/** Optional payload launcher basename when the public command differs from the skill id. */
+	launcher?: string
 }
 
 /** The one logical skill catalog owning every runtime-custody skill registration. */
@@ -110,26 +112,56 @@ function validateRuntimeLock(lock: RuntimeLock): void {
 	}
 }
 
+/**
+ * Claims one generated name for a single logical skill. A name may be claimed
+ * once, so the second claimant is named alongside the first and the catalog is
+ * rejected before any launcher or bundle is rendered.
+ */
+function claimGeneratedName(
+	owners: Map<string, string>,
+	kind: "launcher" | "entry",
+	name: string,
+	skillId: string,
+): void {
+	const owner = owners.get(name)
+	if (owner !== undefined) {
+		throw new Error(`skill catalog ${kind} ${name} collides between ${owner} and ${skillId}`)
+	}
+	owners.set(name, skillId)
+}
+
+/** Every rule one catalog entry satisfies on its own, before any cross-entry rule. */
+function validateSkillEntry(skillId: string, skill: SkillCatalogEntry, lock: RuntimeLock): void {
+	if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(skillId)) {
+		throw new Error(`skill catalog id is invalid: ${skillId}`)
+	}
+	if (!/^runtime\/[a-z0-9]+(?:-[a-z0-9]+)*\.js$/.test(skill.entry)) {
+		throw new Error(`skill catalog entry is invalid for ${skillId}`)
+	}
+	if (!Object.hasOwn(lock.profiles, skill.runtimeProfile)) {
+		throw new Error(`skill catalog profile is unknown for ${skillId}`)
+	}
+	if (
+		skill.workspace !== undefined &&
+		!/^packages\/[a-z0-9]+(?:-[a-z0-9]+)*$/.test(skill.workspace)
+	) {
+		throw new Error(`skill catalog workspace is invalid for ${skillId}`)
+	}
+	if (skill.launcher !== undefined && !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(skill.launcher)) {
+		throw new Error(`skill catalog launcher is invalid for ${skillId}`)
+	}
+}
+
 function validateSkillCatalog(catalog: SkillCatalog, lock: RuntimeLock): void {
 	if (catalog.schemaVersion !== 1) throw new Error("skill catalog schemaVersion must be 1")
 	if (!isRecord(catalog.skills)) throw new Error("skill catalog skills must be an object")
 	if (Object.keys(catalog.skills).length === 0) throw new Error("skill catalog must not be empty")
+	const launcherOwners = new Map<string, string>()
+	const entryOwners = new Map<string, string>()
 	for (const [skillId, skill] of Object.entries(catalog.skills)) {
-		if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(skillId)) {
-			throw new Error(`skill catalog id is invalid: ${skillId}`)
-		}
-		if (!/^runtime\/[a-z0-9]+(?:-[a-z0-9]+)*\.js$/.test(skill.entry)) {
-			throw new Error(`skill catalog entry is invalid for ${skillId}`)
-		}
-		if (!Object.hasOwn(lock.profiles, skill.runtimeProfile)) {
-			throw new Error(`skill catalog profile is unknown for ${skillId}`)
-		}
-		if (
-			skill.workspace !== undefined &&
-			!/^packages\/[a-z0-9]+(?:-[a-z0-9]+)*$/.test(skill.workspace)
-		) {
-			throw new Error(`skill catalog workspace is invalid for ${skillId}`)
-		}
+		validateSkillEntry(skillId, skill, lock)
+		claimGeneratedName(launcherOwners, "launcher", skill.launcher ?? skillId, skillId)
+		claimGeneratedName(entryOwners, "entry", skill.entry, skillId)
 	}
 }
 
@@ -162,8 +194,10 @@ function loadRuntimeCustodyConfig(root: string): {
 
 function renderLockProjection(lock: RuntimeLock): string {
 	const profile = lock.profiles.bun
+	if (profile === undefined) throw new Error("runtime lock Bun profile is missing")
 	const cases = SUPPORTED_RUNTIME_PLATFORMS.map((platform) => {
 		const asset = profile.assets[platform]
+		if (asset === undefined) throw new Error(`runtime lock asset is missing for ${platform}`)
 		return `	${platform})
 		RUNTIME_ASSET_ARCHIVE_NAME=${shellQuote(asset.archiveName)}
 		RUNTIME_ASSET_URL=${shellQuote(asset.url)}
@@ -247,10 +281,35 @@ export function renderRuntimeCustodyFiles(root: string): GeneratedFile[] {
 		...Object.keys(catalog.skills)
 			.sort(compareCodeUnits)
 			.map((skillId) => ({
-				path: `plugin/bin/${skillId}`,
+				path: `plugin/bin/${catalog.skills[skillId]?.launcher ?? skillId}`,
 				contents: renderLauncher(skillId),
 			})),
 	]
+}
+
+/**
+ * Name every launcher the payload is expected to carry, in packaged order.
+ *
+ * The launcher closure follows the skill catalog: one launcher per registered
+ * skill, under its projected name. Naming it here rather than freezing a list
+ * at some past version means a packaging proof stays a proof that the payload
+ * matches the catalog, instead of a proof that the catalog never changed.
+ *
+ * @param root - Plugin Repository root owning the skill catalog
+ * @returns Launcher basenames sorted as they appear under `plugin/bin/`
+ *
+ * @example
+ * ```ts
+ * const launchers = packagedLauncherNames(process.cwd())
+ * ```
+ */
+export function packagedLauncherNames(root: string): string[] {
+	const prefix = "plugin/bin/"
+	return renderRuntimeCustodyFiles(root)
+		.map((file) => file.path)
+		.filter((path) => path.startsWith(prefix))
+		.map((path) => path.slice(prefix.length))
+		.sort(compareCodeUnits)
 }
 
 /**

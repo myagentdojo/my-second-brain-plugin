@@ -10,6 +10,7 @@ import { basename, join, resolve } from "node:path"
 import { assertDistributionChecksumIdentity } from "./distribution-checksums"
 import { QUALIFICATION_CLIENT_HARNESSES } from "./harness-identity"
 import {
+	compareCodeUnits,
 	directoryArchiveEntries,
 	payloadInventorySha256,
 	PLUGIN_DIRECTORY,
@@ -24,6 +25,7 @@ import {
 	proveInstalledCapabilityEvidence,
 	resolveCandidatePayloadCommit,
 } from "./prove-harness-install"
+import { packagedLauncherNames } from "./runtime-custody-config"
 
 const root = resolve(import.meta.dir, "..")
 const pluginConfig = loadPluginConfig(root)
@@ -190,11 +192,17 @@ if (JSON.stringify(packagedSkills) !== JSON.stringify(packagedSkillInventory.map
 const packagedLaunchers = entries
 	.filter((entry) => entry.startsWith(`${packageName}/bin/`) && !entry.endsWith("/"))
 	.map((entry) => entry.slice(`${packageName}/bin/`.length))
-if (
-	JSON.stringify(packagedLaunchers) !==
-	JSON.stringify(["frontier-runner", "hello-world", "skill-a", "skill-b"])
-) {
-	throw new Error("package launcher inventory does not preserve the v0.2.0 closure")
+	.sort(compareCodeUnits)
+// The launcher closure follows the skill catalog. Freezing a list from a past
+// version proved only that the catalog had not changed, so registering a skill
+// broke packaging rather than being carried by it.
+const expectedLaunchers = packagedLauncherNames(root)
+if (JSON.stringify(packagedLaunchers) !== JSON.stringify(expectedLaunchers)) {
+	throw new Error(
+		`package launcher inventory does not match the skill catalog closure: expected ${
+			JSON.stringify(expectedLaunchers)
+		}, actual ${JSON.stringify(packagedLaunchers)}`,
+	)
 }
 const catalog = JSON.parse(readFileSync(join(root, "runtime", "skill-catalog.json"), "utf8"))
 const bundles = JSON.parse(

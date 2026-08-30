@@ -15,6 +15,7 @@ const root = resolve(import.meta.dir, "..")
 const temporaryRoots: string[] = []
 
 const expectedSkills = [
+	["agent-browser", "bun-backed", "hook-independent"],
 	["capability-tour", "model-only", "hook-independent"],
 	["decision-view", "model-only", "hook-independent"],
 	["dev-mode", "model-only", "hook-independent"],
@@ -80,7 +81,10 @@ test("Plugin Payload Skill Inventory rejects a malformed candidate identity and 
 	const catalogDrift = fixture()
 	const catalogPath = join(catalogDrift, "runtime", "skill-catalog.json")
 	const catalog = JSON.parse(readFileSync(catalogPath, "utf8"))
-	catalog.skills["absent-skill"] = catalog.skills["hello-world"]
+	catalog.skills["absent-skill"] = {
+		...catalog.skills["hello-world"],
+		entry: "runtime/absent-skill.js",
+	}
 	writeFileSync(catalogPath, `${JSON.stringify(catalog, null, "\t")}\n`)
 	expect(() => loadPluginPayloadSkills(catalogDrift)).toThrow("missing catalog skill identities: absent-skill")
 })

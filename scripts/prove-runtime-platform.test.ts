@@ -109,6 +109,25 @@ test.each([
 	}
 })
 
+test("deterministic package installs frozen dependencies before testing", () => {
+	const workflow = Bun.YAML.parse(
+		readFileSync(resolve(root, ".github/workflows/plugin-ci.yml"), "utf8"),
+	) as {
+		jobs: { package: { steps: Array<{ run?: string }> } }
+	}
+	const commands = workflow.jobs.package.steps.flatMap((step) =>
+		step.run === undefined ? [] : [step.run],
+	)
+	const installIndexes = commands.flatMap((command, index) =>
+		command === "bun install --frozen-lockfile" ? [index] : [],
+	)
+	const testIndex = commands.indexOf("bun test")
+
+	expect(installIndexes).toHaveLength(1)
+	expect(testIndex).toBeGreaterThan(-1)
+	expect(installIndexes[0]!).toBeLessThan(testIndex)
+})
+
 test("platform proof isolates HOME from the cache whose cold-run emptiness it asserts", () => {
 	const source = readFileSync(resolve(root, "scripts/prove-runtime-platform.ts"), "utf8")
 	expect(source).toContain('const homeRoot = join(isolationRoot, "home")')

@@ -36,7 +36,7 @@ function hasValidPayload(
 /** Read one runtime control envelope while preserving proof-specific step context. */
 export function requireProofControlEnvelope(
 	step: string,
-	result: ReturnType<typeof Bun.spawnSync>,
+	result: Bun.ReadableSyncSubprocess,
 	expectedExit: number,
 	expectedCode: string,
 ): ProofControlEnvelope {
@@ -47,7 +47,7 @@ export function requireProofControlEnvelope(
 	if (lines.length !== 1) throw new Error(`${step}: expected one JSON control object`)
 	let parsed: unknown
 	try {
-		parsed = JSON.parse(lines[0])
+		parsed = JSON.parse(lines[0] ?? "")
 	} catch {
 		throw new Error(`${step}: expected one JSON control object`)
 	}

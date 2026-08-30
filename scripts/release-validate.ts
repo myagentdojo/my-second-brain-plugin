@@ -336,6 +336,7 @@ function admitCandidate(
 		)
 	}
 	const candidate = input.candidates[0]
+	if (candidate === undefined) throw new Error("publication candidate is missing")
 	if (candidate.baseBranch !== input.expectedBaseBranch) {
 		throw new Error(
 			`publication candidate base branch ${candidate.baseBranch} does not match ${input.expectedBaseBranch}`,
@@ -643,7 +644,7 @@ function validateRepository(repositoryRoot: string) {
 		"plugin/.claude-plugin/plugin.json::$.version",
 		"plugin/.codex-plugin/plugin.json::$.version",
 	])
-	const configuredExtraFiles = new Set(
+	const configuredExtraFiles = new Set<string>(
 		(packageRelease?.["extra-files"] ?? []).map((entry: Record<string, string>) =>
 			entry.type === "generic"
 				? `${entry.path}::generic`
@@ -702,6 +703,7 @@ function parseArguments(arguments_: string[]): ParsedArguments {
 	const parsed: ParsedArguments = { json: false, repair: false, help: false }
 	for (let index = 0; index < arguments_.length; index += 1) {
 		const argument = arguments_[index]
+		if (argument === undefined) continue
 		if (argument === "--json") parsed.json = true
 		else if (argument === "--repair") parsed.repair = true
 		else if (argument === "--help" || argument === "-h") parsed.help = true

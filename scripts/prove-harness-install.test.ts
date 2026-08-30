@@ -41,7 +41,7 @@ let proof: ReturnType<typeof proveHarnessInstall>
 const claudeNativeTest = Bun.which("claude") ? test : test.skip
 const codexNativeTest = Bun.which("codex") ? test : test.skip
 
-function nativeQualificationSummary(client: "claude" | "codex") {
+function nativeQualificationSummary(client: "claude" | "codex"): import("./prove-harness-install").NativeQualificationEvidence {
 	const hash = (value: string) => value.repeat(64)
 	return {
 		schema: "native-capability-qualification-v1",
@@ -107,7 +107,7 @@ test("fresh-native qualification promotion accepts only candidate-bound bounded 
 
 test("a bounded failed qualification records evidence without promoting native claims", () => {
 	const summary = nativeQualificationSummary("codex")
-	const failed = {
+	const failed: typeof summary = {
 		...summary,
 		conclusions: { ...summary.conclusions, sessionStart: "failed" },
 	}
@@ -366,6 +366,7 @@ test("automated install evidence binds bytes without claiming native activation"
 			nativeDelegation: "not-proved",
 			nativeQualification: { status: "not-proved", receipt: null },
 			portableSkillsWithoutHooks: [
+				"agent-browser",
 				"capability-tour",
 				"decision-view",
 				"dev-mode",
@@ -492,6 +493,32 @@ test("installed capability evidence rejects a bundled model-only tour", () => {
 				runtimeClosureEvidence(pluginRoot).payloadHash,
 			),
 		).toThrow("installed bundle inventory differs")
+	} finally {
+		rmSync(temporaryRoot, { recursive: true, force: true })
+	}
+})
+
+test("installed capability evidence rejects a launcher token present only in a comment", () => {
+	const temporaryRoot = mkdtempSync(join(tmpdir(), "installed-capability-launcher-comment-"))
+	const pluginRoot = join(temporaryRoot, "plugin")
+	try {
+		cpSync(join(root, "plugin"), pluginRoot, { recursive: true })
+		const launcherPath = join(pluginRoot, "bin", "hello-world")
+		const executableCommand =
+			'exec "$plugin_root/runtime/runtime-exec" run hello-world -- "$@"'
+		const launcher = readFileSync(launcherPath, "utf8")
+		expect(launcher).toContain(executableCommand)
+		writeFileSync(launcherPath, launcher.replace(executableCommand, `# ${executableCommand}`))
+		const candidatePayloadHash = runtimeClosureEvidence(pluginRoot).payloadHash
+
+		expect(() =>
+			proveInstalledCapabilityEvidence(
+				pluginRoot,
+				"claude",
+				"a".repeat(40),
+				candidatePayloadHash,
+			),
+		).toThrow("installed launcher inventory differs")
 	} finally {
 		rmSync(temporaryRoot, { recursive: true, force: true })
 	}
@@ -900,6 +927,7 @@ test("AE10: a versioned release changes exact payload evidence without changing 
 })
 
 test.each([
+	"bin/warm-browser",
 	"bin/hello-world",
 	"bin/skill-a",
 	"bin/skill-b",

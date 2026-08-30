@@ -56,7 +56,13 @@ const crcTable = (() => {
 
 function crc32(data: Uint8Array): number {
 	let c = 0xffffffff
-	for (let i = 0; i < data.length; i++) c = (crcTable[(c ^ data[i]) & 0xff] ^ (c >>> 8)) >>> 0
+	for (let i = 0; i < data.length; i++) {
+		const byte = data[i]
+		if (byte === undefined) continue
+		const tableEntry = crcTable[(c ^ byte) & 0xff]
+		if (tableEntry === undefined) continue
+		c = (tableEntry ^ (c >>> 8)) >>> 0
+	}
 	return (c ^ 0xffffffff) >>> 0
 }
 
@@ -214,7 +220,7 @@ function renderFixtureLock(lock: FixtureLock): string {
 		RUNTIME_ASSET_EXECUTABLE_PATH='${lock.executablePath}'
 		RUNTIME_ASSET_EXECUTABLE_BYTES='${lock.executableBytes}'
 		RUNTIME_ASSET_EXECUTABLE_SHA256='${lock.executableSha256}'
-		;;`,
+		;;`
 		)
 		.join("\n")
 	return `#!/bin/sh
@@ -236,7 +242,7 @@ function renderFixtureCatalog(skillIds: string[]): string {
 			(skillId) => `	${skillId})
 		RUNTIME_SKILL_ENTRY='runtime/${skillId}.js'
 		RUNTIME_SKILL_PROFILE='bun'
-		;;`,
+		;;`
 		)
 		.join("\n")
 	return `#!/bin/sh
@@ -254,13 +260,15 @@ function renderFixtureInventory(
 ): string {
 	const cases = Object.keys(bundles)
 		.sort()
-		.map(
-			(skillId) => `	${skillId})
-		RUNTIME_BUNDLE_PATH='${bundles[skillId].path}'
-		RUNTIME_BUNDLE_BYTES='${bundles[skillId].bytes}'
-		RUNTIME_BUNDLE_SHA256='${bundles[skillId].sha256}'
-		;;`,
-		)
+		.map((skillId): string => {
+			const bundle = bundles[skillId]
+			if (bundle === undefined) throw new Error(`fixture bundle ${skillId} is missing`)
+			return `	${skillId})
+		RUNTIME_BUNDLE_PATH='${bundle.path}'
+		RUNTIME_BUNDLE_BYTES='${bundle.bytes}'
+		RUNTIME_BUNDLE_SHA256='${bundle.sha256}'
+			;;`
+		})
 		.join("\n")
 	return `#!/bin/sh
 runtime_inventory_select_bundle() {
@@ -364,7 +372,7 @@ function runEngine(
 	fixture: Fixture,
 	args: string[],
 	options: { env?: Record<string, string>; cwd?: string } = {},
-): ReturnType<typeof Bun.spawnSync> {
+): Bun.ReadableSyncSubprocess {
 	return Bun.spawnSync({
 		cmd: [fixture.engine, ...args],
 		cwd: options.cwd ?? fixture.root,
@@ -374,7 +382,7 @@ function runEngine(
 	})
 }
 
-function readEnvelope(result: ReturnType<typeof Bun.spawnSync>): Record<string, unknown> {
+function readEnvelope(result: Bun.ReadableSyncSubprocess): Record<string, unknown> {
 	const stdout = result.stdout.toString().trim()
 	expect(stdout.split("\n")).toHaveLength(1)
 	const envelope = JSON.parse(stdout) as Record<string, unknown>
@@ -415,6 +423,7 @@ function makeToolDir(overrides: Record<string, string | null> = {}): string {
 		if (name in overrides) {
 			const body = overrides[name]
 			if (body === null) continue
+			if (body === undefined) continue
 			writeFileSync(join(toolDir, name), body)
 		} else {
 			const real = Bun.which(name)
@@ -528,7 +537,7 @@ function applyRepair(fixture: Fixture): Record<string, unknown> {
 	return readEnvelope(result)
 }
 
-function bundleReport(result: ReturnType<typeof Bun.spawnSync>): Record<string, string> {
+function bundleReport(result: Bun.ReadableSyncSubprocess): Record<string, string> {
 	const report: Record<string, string> = {}
 	for (const line of result.stdout.toString().trim().split("\n")) {
 		const separator = line.indexOf("=")
@@ -1430,7 +1439,9 @@ test("AE12: unknown skills, unmapped bundles, and tampered bundles fail closed w
 	expect(readEnvelope(unmapped).code).toBe("BUNDLE_UNMAPPED")
 
 	// tampered bundle bytes never execute
-	const bundleFile = join(fixture.pluginRoot, fixture.bundles["skill-a"].path)
+	const skillABundle = fixture.bundles["skill-a"]
+	if (skillABundle === undefined) throw new Error("skill-a bundle is missing")
+	const bundleFile = join(fixture.pluginRoot, skillABundle.path)
 	writeFileSync(bundleFile, `${readFileSync(bundleFile, "utf8")}\n# tampered\n`)
 	const tampered = runEngine(fixture, ["run", "skill-a"])
 	expect(tampered.exitCode).toBe(23)
@@ -1683,7 +1694,7 @@ test("a credential-bearing URL is rejected and never echoed, exit 23", () => {
 
 test("the real runtime lock projection pins only official https release URLs", () => {
 	const text = readFileSync(join(root, "plugin", "runtime", "runtime-lock.sh"), "utf8")
-	const urls = [...text.matchAll(/RUNTIME_ASSET_URL='([^']+)'/g)].map((match) => match[1])
+	const urls = [...text.matchAll(/RUNTIME_ASSET_URL='([^']+)'/g)].map((match) => match[1] ?? "")
 	expect(urls).toHaveLength(4)
 	for (const url of urls) {
 		expect(url.startsWith("https://github.com/oven-sh/bun/releases/download/")).toBe(true)

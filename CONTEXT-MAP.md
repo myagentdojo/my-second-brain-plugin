@@ -12,6 +12,7 @@ Consumer rules for these files: `docs/agents/domain.md`.
 | **New Skill Formation** | [`plugin/skills/new-skill/CONTEXT.md`](./plugin/skills/new-skill/CONTEXT.md) | None. | `plugin/skills/new-skill/**`: Formation Run, Formation Packet, Mandatory Skill Scaffold, Complexity Gate, Architecture Shell, approval checkpoints, maturity, and the implementation frontier. |
 | **Decision View** | [`plugin/skills/decision-view/CONTEXT.md`](./plugin/skills/decision-view/CONTEXT.md) | None. | `plugin/skills/decision-view/**`: Decision View, Decision Input, Decision Result, Response Map, and Wait What Disclosure. |
 | **Frontier Runner** | [`plugin/skills/frontier-runner/CONTEXT.md`](./plugin/skills/frontier-runner/CONTEXT.md) | None. | `plugin/skills/frontier-runner/**` and `packages/frontier-runner/**`: Frontier Runner V0, Bounded run, and their shared vocabulary. |
+| **Agent Browser** | [`plugin/skills/agent-browser/CONTEXT.md`](./plugin/skills/agent-browser/CONTEXT.md) | None. | `plugin/skills/agent-browser/**` and `packages/agent-browser/**`: Agent Browser, Warm Browser, Agent Chrome Profile, Browser Session, Controlled Page, Snapshot Reference, Screenshot, Credential Vault, Credential Match, Private Delivery, and Profile Cutover. |
 
 ## Which glossary governs
 
