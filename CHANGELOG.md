@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/myagentdojo/my-second-brain-plugin/compare/v0.4.0...v0.5.0) (2026-08-30)
+
+
+### Features
+
+* **agent-browser:** implement the Warm Browser MVP ([#44](https://github.com/myagentdojo/my-second-brain-plugin/issues/44)) ([b6f4dd3](https://github.com/myagentdojo/my-second-brain-plugin/commit/b6f4dd3047502d6bdb884c04291143a80b93ea94))
+
 ## [0.4.0](https://github.com/myagentdojo/my-second-brain-plugin/compare/v0.3.0...v0.4.0) (2026-08-26)
 
 
