@@ -1,100 +1,60 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
-import { join, resolve } from "node:path"
+import { basename, resolve } from "node:path"
 
-import { validateBunOnlyPayload } from "./build"
-import {
-	deterministicPluginArchive,
-	payloadInventorySha256,
-	pluginPayloadInventory,
-} from "./plugin-files"
-import { loadPluginConfig } from "./plugin-config"
+import { readCommittedKitPin, runPackageCommand } from "./package-adapter"
 
 const root = resolve(import.meta.dir, "..")
-const pluginConfig = loadPluginConfig(root)
-const version = pluginConfig.version
-const outputRoot = join(root, "dist")
-const packageName = `${pluginConfig.name}-${version}`
 
-function resolveSourceCommit(): string {
-	const sourceCommit = process.env.SOURCE_COMMIT
-	const githubSha = process.env.GITHUB_SHA
-	const configuredSource =
-		sourceCommit !== undefined
-			? { name: "SOURCE_COMMIT", value: sourceCommit }
-			: githubSha !== undefined
-				? { name: "GITHUB_SHA", value: githubSha }
-				: undefined
-	const configuredCommit = configuredSource
-		? validateSourceCommit(configuredSource.value, configuredSource.name)
-		: undefined
-	const git = Bun.spawnSync({
-		cmd: ["git", "rev-parse", "HEAD"],
-		cwd: root,
-		stdout: "pipe",
-		stderr: "pipe",
-	})
-	if (git.exitCode === 0) {
-		const gitHead = validateSourceCommit(git.stdout.toString().trim(), "git HEAD")
-		if (configuredCommit && configuredCommit !== gitHead) {
-			throw new Error(`${configuredSource?.name} does not match git HEAD`)
-		}
-		return gitHead
-	}
-	if (configuredCommit) return configuredCommit
-	throw new Error("Unable to resolve the package source commit from git or an explicit input")
+// Bundle admission, source observation, and preparation refuse before any Kit process runs.
+const outcome = runPackageCommand(root, process.env)
+
+if (outcome.kind === "packaged") {
+	const pin = readCommittedKitPin(root, process.env)
+	console.log(
+		JSON.stringify({
+			archive: outcome.artifacts.archive.path,
+			checksums: outcome.artifacts.checksums.path,
+			archiveBytes: outcome.artifacts.archive.bytes,
+			archiveDigest: outcome.artifacts.archive.sha256,
+			checksumsSha256: outcome.artifacts.checksums.sha256,
+			sourceCommit: outcome.sourceIdentity.commit,
+			bindingSha256: outcome.bindingSha256,
+			kit: pin,
+		}),
+	)
+} else if (outcome.kind === "process-guard") {
+	console.error(
+		JSON.stringify({
+			packaging: outcome.kind,
+			exitCode: outcome.exitCode,
+			signal: outcome.signal,
+			repair: "The Kit package process exceeded the consumer guard; inspect the host compressor and rerun.",
+		}),
+	)
+	process.exit(1)
+} else {
+	const archive = outcome.artifacts.archive?.path
+	const repair =
+		outcome.kind === "not-admitted"
+			? "Commit the agent-plugin-kit pin in package.json and link a clean physical Kit checkout at that commit."
+			: outcome.kind === "refused"
+				? `Inspect dist/ for a stale same-name candidate (${archive ? basename(archive) : "archive and checksums"}); remove a stale local candidate before packaging again.`
+				: outcome.kind === "partial"
+					? "The archive was published without checksums; inspect dist/ and complete or remove the candidate."
+					: outcome.kind === "retry"
+						? "A transient pre-publication failure occurred; rerun packaging."
+						: "Inspect dist/ and the Kit diagnostics before packaging again."
+	console.error(
+		JSON.stringify({
+			packaging: outcome.kind,
+			exitCode: outcome.exitCode,
+			resultCode: outcome.resultCode,
+			stationId: outcome.stationId,
+			transactionState: outcome.transactionState,
+			message: outcome.message,
+			nextAction: outcome.nextAction,
+			artifacts: outcome.artifacts,
+			repair,
+		}),
+	)
+	process.exit(outcome.exitCode === 0 ? 1 : outcome.exitCode)
 }
-
-function validateSourceCommit(value: string, source: string): string {
-	if (!/^[0-9a-f]{40}$/.test(value)) {
-		throw new Error(`${source} must be exactly 40 lowercase hexadecimal characters`)
-	}
-	return value
-}
-
-function sha256(bytes: Uint8Array | string): string {
-	return new Bun.CryptoHasher("sha256").update(bytes).digest("hex")
-}
-
-function payloadInventoryDigest(): string {
-	return payloadInventorySha256(join(root, "plugin"), pluginPayloadInventory(root))
-}
-
-// Missing, stale, or orphaned bundle mappings fail before packaging.
-validateBunOnlyPayload(root)
-const sourceCommit = resolveSourceCommit()
-const runtimeLockSha256 = sha256(readFileSync(join(root, "runtime", "runtime.lock.json")))
-const bundleInventorySha256 = sha256(
-	readFileSync(join(root, "plugin", "runtime", "bundle-inventory.json")),
-)
-const payloadInventoryDigestValue = payloadInventoryDigest()
-mkdirSync(outputRoot, { recursive: true })
-
-const archiveArtifact = deterministicPluginArchive(root, packageName)
-const archive = join(outputRoot, `${packageName}.tar.gz`)
-writeFileSync(archive, archiveArtifact.bytes)
-const archiveBytes = archiveArtifact.bytes.length
-const archiveDigest = archiveArtifact.sha256
-const checksums = join(outputRoot, `${packageName}.checksums.json`)
-writeFileSync(
-	checksums,
-	`${JSON.stringify(
-		{
-			repository: pluginConfig.repository,
-			sourceCommit,
-			tag: `v${version}`,
-			plugin: pluginConfig.name,
-			version,
-			archive: `${packageName}.tar.gz`,
-			archiveBytes,
-			archiveSha256: archiveDigest,
-			runtimeLockSha256,
-			bundleInventorySha256,
-			payloadInventorySha256: payloadInventoryDigestValue,
-			evidence:
-				"Checksum metadata is integrity evidence for these archive bytes, not independent publisher or builder authenticity.",
-		},
-		null,
-		2,
-	)}\n`,
-)
-console.log(JSON.stringify({ archive, checksums, archiveBytes, archiveDigest }))

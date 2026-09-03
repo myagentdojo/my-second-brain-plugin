@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto"
 import * as fileSystem from "node:fs"
 import { createServer } from "node:net"
 import { tmpdir } from "node:os"
@@ -6,12 +7,13 @@ import { join } from "node:path"
 import { afterEach, expect, test } from "bun:test"
 
 import {
+	PAYLOAD_PROJECTIONS,
 	compareCodeUnits,
 	copyPluginPayload,
-	deterministicPluginArchive,
 	directoryArchiveEntries,
 	payloadInventorySha256,
 	pluginPayloadInventory,
+	preparePluginPayload,
 } from "./plugin-files"
 
 const temporaryRoots: string[] = []
@@ -223,48 +225,128 @@ test("archive order keeps each directory beside its descendants", () => {
 	])
 })
 
-test("in-process USTAR bytes are platform canonical", () => {
-	const { sourceRoot } = pluginFixture()
-	const first = deterministicPluginArchive(sourceRoot, "plugin-0.1.0")
-	const second = deterministicPluginArchive(sourceRoot, "plugin-0.1.0")
-	const uncompressed = Bun.gunzipSync(Uint8Array.from(first.bytes))
-	const header = Buffer.from(Uint8Array.from(uncompressed)).subarray(0, 512)
-	const headerText = (offset: number) =>
-		header.subarray(offset, offset + 32).toString("utf8").replace(/\0.*$/, "")
+const preparationIdentity = {
+	sourceIdentity: {
+		repository: { origin: "https://github.com/example/plugin" },
+		commit: "a".repeat(40),
+	},
+	release: { name: "plugin", version: "0.1.0", tag: "v0.1.0" },
+}
 
-	expect(first.bytes).toEqual(second.bytes)
-	expect(first.sha256).toBe(
-		"116a569020e91b24e5994dae842f0a4fe3bfd90bb0ee7f20c4c66f3e38b805ae",
+/** Test-owned consumer layout: every projection input beside the payload. */
+function preparationFixture(): ReturnType<typeof pluginFixture> {
+	const fixture = pluginFixture()
+	for (const projection of PAYLOAD_PROJECTIONS) {
+		const path = join(fixture.sourceRoot, projection.path)
+		fileSystem.mkdirSync(join(path, ".."), { recursive: true })
+		fileSystem.writeFileSync(path, `${JSON.stringify({ role: projection.role })}\n`)
+	}
+	return fixture
+}
+
+/** Test-owned oracles: hashing, framing, and the binding tuple from the accepted contract. */
+const hex = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex")
+const prefixed = (bytes: Uint8Array | string): `sha256:${string}` => `sha256:${hex(bytes)}`
+const frame = (length: number) => {
+	const buffer = Buffer.alloc(8)
+	buffer.writeBigUInt64BE(BigInt(length))
+	return buffer
+}
+function framedDigest(files: { path: string; bytes: Buffer }[]): string {
+	const hash = createHash("sha256")
+	for (const file of files) {
+		const path = Buffer.from(file.path, "utf8")
+		hash.update(frame(path.byteLength)).update(path).update(frame(file.bytes.byteLength)).update(file.bytes)
+	}
+	return hash.digest("hex")
+}
+
+test("prepared payload declaration is repeat-stable and binds files, projections, and framed digest", () => {
+	const { sourceRoot, pluginRoot } = preparationFixture()
+	fileSystem.mkdirSync(join(pluginRoot, "runtime"), { recursive: true })
+	fileSystem.writeFileSync(join(pluginRoot, "runtime", "b.js"), "console.log(1)\n")
+
+	const first = preparePluginPayload(sourceRoot, preparationIdentity)
+	fileSystem.utimesSync(join(pluginRoot, "a-safe.txt"), new Date(0), new Date(0))
+	const second = preparePluginPayload(sourceRoot, preparationIdentity)
+
+	const expectedFiles = [
+		".claude-plugin/plugin.json",
+		".codex-plugin/plugin.json",
+		"a-safe.txt",
+		"runtime/b.js",
+		"runtime/bundle-inventory.json",
+	].map((path) => {
+		const bytes = fileSystem.readFileSync(join(pluginRoot, path))
+		return { path, bytes: bytes.byteLength, sha256: prefixed(bytes), executable: false }
+	})
+	const expectedProjections = [...PAYLOAD_PROJECTIONS]
+		.sort((left, right) => compareCodeUnits(left.role, right.role) || compareCodeUnits(left.path, right.path))
+		.map((projection) => {
+			const bytes = fileSystem.readFileSync(join(sourceRoot, projection.path))
+			return { role: projection.role, path: projection.path, bytes: bytes.byteLength, sha256: prefixed(bytes) }
+		})
+	const expectedPayload: `sha256:${string}` = `sha256:${framedDigest(
+		expectedFiles.map((file) => ({ path: file.path, bytes: fileSystem.readFileSync(join(pluginRoot, file.path)) })),
+	)}`
+	const expectedBinding = prefixed(
+		JSON.stringify([
+			1,
+			preparationIdentity.sourceIdentity.repository.origin,
+			preparationIdentity.sourceIdentity.commit,
+			"plugin",
+			"0.1.0",
+			"v0.1.0",
+			expectedFiles.map((file) => [file.path, file.bytes, file.sha256, file.executable]),
+			expectedProjections.map((projection) => [projection.role, projection.path, projection.bytes, projection.sha256]),
+			expectedPayload,
+		]),
 	)
-	expect(headerText(265)).toBe("root")
-	expect(headerText(297)).toBe("root")
+
+	expect(second).toEqual(first)
+	expect(first.files).toEqual(expectedFiles)
+	expect(first.projections).toEqual(expectedProjections)
+	expect(first.projections.filter((projection) => projection.role === "runtime-lock")).toHaveLength(1)
+	expect(first.projections.filter((projection) => projection.role === "bundle-inventory")).toHaveLength(1)
+	expect(first.payloadSha256).toBe(expectedPayload)
+	expect(first.bindingSha256).toBe(expectedBinding)
 })
 
-test("USTAR prefix fields preserve representable long paths", () => {
-	const { sourceRoot, pluginRoot } = pluginFixture()
+test("prepared payload declaration preserves long and newline paths and executable modes", () => {
+	const { sourceRoot, pluginRoot } = preparationFixture()
 	const directory = `nested-${"p".repeat(80)}`
 	const file = `${"f".repeat(30)}.txt`
 	fileSystem.mkdirSync(join(pluginRoot, directory))
 	fileSystem.writeFileSync(join(pluginRoot, directory, file), "long path\n")
+	fileSystem.writeFileSync(join(pluginRoot, "line\nbreak.txt"), "newline name\n")
+	fileSystem.writeFileSync(join(pluginRoot, "runner"), "#!/bin/sh\n")
+	fileSystem.chmodSync(join(pluginRoot, "runner"), 0o755)
 
-	const archive = deterministicPluginArchive(sourceRoot, "plugin-0.1.0")
-	const listing = Bun.spawnSync({
-		cmd: ["tar", "-tzf", "-"],
-		stdin: archive.bytes,
-		stdout: "pipe",
-		stderr: "pipe",
-	})
+	const prepared = preparePluginPayload(sourceRoot, preparationIdentity)
 
-	expect(listing.exitCode, listing.stderr.toString()).toBe(0)
-	expect(listing.stdout.toString()).toContain(`plugin-0.1.0/${directory}/${file}\n`)
+	expect(prepared.files.map((entry) => entry.path)).toEqual([
+		".claude-plugin/plugin.json",
+		".codex-plugin/plugin.json",
+		"a-safe.txt",
+		"line\nbreak.txt",
+		`${directory}/${file}`,
+		"runner",
+		"runtime/bundle-inventory.json",
+	])
+	expect(prepared.files.filter((entry) => entry.executable).map((entry) => entry.path)).toEqual(["runner"])
 })
 
-test("USTAR packaging rejects an unrepresentable path component", () => {
-	const { sourceRoot, pluginRoot } = pluginFixture()
-	const file = "x".repeat(101)
-	fileSystem.writeFileSync(join(pluginRoot, file), "too long\n")
+test("prepared payload declaration refuses a missing or non-regular projection before any archive input exists", () => {
+	const missing = preparationFixture()
+	fileSystem.rmSync(join(missing.sourceRoot, "runtime", "runtime.lock.json"))
+	expect(() => preparePluginPayload(missing.sourceRoot, preparationIdentity)).toThrow(
+		"missing runtime-lock projection: runtime/runtime.lock.json",
+	)
 
-	expect(() => deterministicPluginArchive(sourceRoot, "plugin-0.1.0")).toThrow(
-		"USTAR path cannot be represented",
+	const directory = preparationFixture()
+	fileSystem.rmSync(join(directory.sourceRoot, "plugin.config.json"))
+	fileSystem.mkdirSync(join(directory.sourceRoot, "plugin.config.json"))
+	expect(() => preparePluginPayload(directory.sourceRoot, preparationIdentity)).toThrow(
+		"missing config projection: plugin.config.json",
 	)
 })

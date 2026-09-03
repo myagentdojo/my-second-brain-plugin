@@ -4,19 +4,73 @@ import {
 	copyFileSync,
 	lstatSync,
 	mkdirSync,
-	mkdtempSync,
 	readFileSync,
 	readdirSync,
 	realpathSync,
-	rmSync,
-	statSync,
-	utimesSync,
 } from "node:fs"
-import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 
 /** Canonical directory copied by development staging and release packaging. */
 export const PLUGIN_DIRECTORY = "plugin"
+
+/** Hex SHA-256 digest carrying the Kit Interface prefix. */
+export type Sha256Digest = `sha256:${string}`
+
+/** Explicit plugin source identity the consumer observes and binds into preparation. */
+export interface SourceIdentity {
+	repository: { origin: string }
+	commit: string
+}
+
+/** Release values projected into the package name, archive root, and checksum document. */
+export interface PayloadRelease {
+	name: string
+	version: string
+	tag: string
+}
+
+/** One regular file under `plugin/` with its bytes, digest, and executable mode. */
+export interface PreparedFileDeclaration {
+	path: string
+	bytes: number
+	sha256: Sha256Digest
+	executable: boolean
+}
+
+/** Semantic input roles the consumer binds beside the payload closure. */
+export type PreparedProjectionRole =
+	| "config"
+	| "runtime-lock"
+	| "bundle-inventory"
+	| "skill-inventory"
+	| "native-manifest"
+
+/** One repository-relative input file whose bytes the package binds. */
+export interface PreparedProjectionDeclaration {
+	role: PreparedProjectionRole
+	path: string
+	bytes: number
+	sha256: Sha256Digest
+}
+
+/** The sealed preparation declaration handed to the Kit package process. */
+export interface PreparedPayloadDeclaration {
+	sourceIdentity: SourceIdentity
+	files: readonly PreparedFileDeclaration[]
+	projections: readonly PreparedProjectionDeclaration[]
+	payloadSha256: Sha256Digest
+	bindingSha256: Sha256Digest
+}
+
+/** Repository-relative projection inputs the consumer binds into every package. */
+export const PAYLOAD_PROJECTIONS: readonly { role: PreparedProjectionRole; path: string }[] = [
+	{ role: "bundle-inventory", path: "plugin/runtime/bundle-inventory.json" },
+	{ role: "config", path: "plugin.config.json" },
+	{ role: "native-manifest", path: "plugin/.claude-plugin/plugin.json" },
+	{ role: "native-manifest", path: "plugin/.codex-plugin/plugin.json" },
+	{ role: "runtime-lock", path: "runtime/runtime.lock.json" },
+	{ role: "skill-inventory", path: "runtime/skill-catalog.json" },
+]
 
 /**
  * Order paths by JavaScript code units so inventories never depend on process locale.
@@ -38,83 +92,6 @@ function framedLength(length: number): Buffer {
 	const frame = Buffer.allocUnsafe(8)
 	frame.writeBigUInt64BE(BigInt(length))
 	return frame
-}
-
-const USTAR_BLOCK_BYTES = 512
-
-function writeUstarText(header: Buffer, offset: number, width: number, value: string): void {
-	const bytes = Buffer.from(value, "utf8")
-	if (bytes.length > width) throw new Error(`USTAR field exceeds ${width} bytes: ${value}`)
-	bytes.copy(header, offset)
-}
-
-function writeUstarOctal(header: Buffer, offset: number, width: number, value: number): void {
-	const octal = value.toString(8)
-	if (octal.length > width - 1) throw new Error(`USTAR numeric field exceeds ${width} bytes`)
-	writeUstarText(header, offset, width, `${octal.padStart(width - 1, "0")}\0`)
-}
-
-function splitUstarPath(relativePath: string): { name: string; prefix: string } {
-	if (Buffer.byteLength(relativePath, "utf8") <= 100) return { name: relativePath, prefix: "" }
-	for (
-		let slash = relativePath.lastIndexOf("/");
-		slash > 0;
-		slash = relativePath.lastIndexOf("/", slash - 1)
-	) {
-		const prefix = relativePath.slice(0, slash)
-		const name = relativePath.slice(slash + 1)
-		if (
-			name.length > 0 &&
-			Buffer.byteLength(name, "utf8") <= 100 &&
-			Buffer.byteLength(prefix, "utf8") <= 155
-		) {
-			return { name, prefix }
-		}
-	}
-	throw new Error(`USTAR path cannot be represented: ${relativePath}`)
-}
-
-function ustarHeader(
-	relativePath: string,
-	status: { isDirectory(): boolean; mode: number; size: number },
-): Buffer {
-	const header = Buffer.alloc(USTAR_BLOCK_BYTES)
-	const { name, prefix } = splitUstarPath(relativePath)
-	writeUstarText(header, 0, 100, name)
-	writeUstarOctal(header, 100, 8, status.mode & 0o777)
-	writeUstarOctal(header, 108, 8, 0)
-	writeUstarOctal(header, 116, 8, 0)
-	writeUstarOctal(header, 124, 12, status.isDirectory() ? 0 : status.size)
-	writeUstarOctal(header, 136, 12, 0)
-	header.fill(0x20, 148, 156)
-	header[156] = status.isDirectory() ? 0x35 : 0x30
-	writeUstarText(header, 257, 6, "ustar\0")
-	writeUstarText(header, 263, 2, "00")
-	writeUstarText(header, 265, 32, "root")
-	writeUstarText(header, 297, 32, "root")
-	writeUstarOctal(header, 329, 8, 0)
-	writeUstarOctal(header, 337, 8, 0)
-	writeUstarText(header, 345, 155, prefix)
-	let checksum = 0
-	for (const byte of header) checksum += byte
-	writeUstarText(header, 148, 8, `${checksum.toString(8).padStart(6, "0")}\0 `)
-	return header
-}
-
-function deterministicUstar(stagingRoot: string, entries: readonly string[]): Buffer {
-	const chunks: Buffer[] = []
-	for (const relativePath of entries) {
-		const absolutePath = join(stagingRoot, relativePath)
-		const status = statSync(absolutePath)
-		chunks.push(ustarHeader(relativePath, status))
-		if (status.isDirectory()) continue
-		const contents = readFileSync(absolutePath)
-		chunks.push(contents)
-		const padding = (USTAR_BLOCK_BYTES - (contents.length % USTAR_BLOCK_BYTES)) % USTAR_BLOCK_BYTES
-		if (padding > 0) chunks.push(Buffer.alloc(padding))
-	}
-	chunks.push(Buffer.alloc(USTAR_BLOCK_BYTES * 2))
-	return Buffer.concat(chunks)
 }
 
 /** Hash an ordered payload inventory with collision-free path/body framing. */
@@ -214,59 +191,6 @@ export function pluginPayloadInventory(sourceRoot: string): string[] {
 }
 
 /**
- * Build the deterministic release archive bytes for one plugin payload.
- *
- * Release packaging and canary qualification share this builder, so the archive
- * SHA-256 bound into candidate lineage is byte-identical to the released
- * `*.tar.gz` whenever the payload bytes and package name match.
- *
- * @param sourceRoot - Repository or candidate root containing the canonical `plugin/` directory
- * @param packageName - Archive root entry name, `<plugin-name>-<version>`
- * @returns Gzipped deterministic tar bytes and their SHA-256 digest
- * @throws {Error} When the payload is unsafe or tar/gzip fails
- *
- * @example
- * ```ts
- * const { sha256 } = deterministicPluginArchive(process.cwd(), "hello-0.1.0")
- * ```
- */
-export function deterministicPluginArchive(
-	sourceRoot: string,
-	packageName: string,
-): { bytes: Buffer; sha256: string } {
-	const stagingRoot = mkdtempSync(join(tmpdir(), "plugin-package-"))
-	try {
-		const packageRoot = join(stagingRoot, packageName)
-		copyPluginPayload(sourceRoot, packageRoot)
-		const entries = directoryArchiveEntries(packageRoot, packageName)
-		const epoch = new Date(0)
-		for (const relativePath of entries) {
-			const absolutePath = join(stagingRoot, relativePath)
-			const status = statSync(absolutePath)
-			chmodSync(absolutePath, status.isDirectory() ? 0o755 : status.mode & 0o111 ? 0o755 : 0o644)
-			utimesSync(absolutePath, epoch, epoch)
-		}
-		const uncompressedArchive = deterministicUstar(stagingRoot, entries)
-		const gzip = Bun.spawnSync({
-			cmd: ["gzip", "-n", "-9", "-c"],
-			stdin: uncompressedArchive,
-			stdout: "pipe",
-			stderr: "pipe",
-		})
-		if (gzip.exitCode !== 0) {
-			const diagnostics = gzip.stderr.toString().trim()
-			throw new Error(
-				`deterministic archive gzip failed with exit code ${gzip.exitCode}${diagnostics ? `: ${diagnostics}` : ""}`,
-			)
-		}
-		const bytes = Buffer.from(gzip.stdout)
-		return { bytes, sha256: createHash("sha256").update(bytes).digest("hex") }
-	} finally {
-		rmSync(stagingRoot, { recursive: true, force: true })
-	}
-}
-
-/**
  * Copy the exact canonical plugin payload without repository tooling or source.
  *
  * @param sourceRoot - Repository root containing the canonical `plugin/` directory
@@ -293,4 +217,118 @@ export function copyPluginPayload(sourceRoot: string, targetRoot: string): strin
 		chmodSync(targetPath, sourceStatus.mode & 0o7777)
 	}
 	return inventory
+}
+
+function sha256Digest(bytes: Uint8Array | string): Sha256Digest {
+	return `sha256:${createHash("sha256").update(bytes).digest("hex")}`
+}
+
+/**
+ * Bind a preparation to its source identity, release, file tuples, projection tuples, and payload digest.
+ *
+ * The digest hashes the UTF-8 JSON array
+ * `[1, origin, commit, name, version, tag, files, projections, payloadSha256]` without whitespace.
+ *
+ * @param input - Prepared values in their declared order
+ * @returns The prefixed binding digest
+ *
+ * @example
+ * ```ts
+ * preparationBindingSha256({ sourceIdentity, release, files, projections, payloadSha256 })
+ * ```
+ */
+export function preparationBindingSha256(input: {
+	sourceIdentity: SourceIdentity
+	release: PayloadRelease
+	files: readonly PreparedFileDeclaration[]
+	projections: readonly PreparedProjectionDeclaration[]
+	payloadSha256: Sha256Digest
+}): Sha256Digest {
+	const tuple = [
+		1,
+		input.sourceIdentity.repository.origin,
+		input.sourceIdentity.commit,
+		input.release.name,
+		input.release.version,
+		input.release.tag,
+		input.files.map((file) => [file.path, file.bytes, file.sha256, file.executable]),
+		input.projections.map((projection) => [
+			projection.role,
+			projection.path,
+			projection.bytes,
+			projection.sha256,
+		]),
+		input.payloadSha256,
+	]
+	return sha256Digest(JSON.stringify(tuple))
+}
+
+/**
+ * Prepare the exact plugin payload the Kit may package: the regular-file closure with
+ * bytes, digests, and executable modes, the bound projection inputs, the framed payload
+ * digest, and the preparation binding. This never invokes the Kit.
+ *
+ * @param sourceRoot - Repository root containing the canonical `plugin/` directory
+ * @param identity - Observed source identity and release values to bind
+ * @returns The sealed preparation declaration
+ * @throws {Error} When the payload is unsafe or a projection input is missing or not a regular file
+ *
+ * @example
+ * ```ts
+ * const prepared = preparePluginPayload(process.cwd(), { sourceIdentity, release })
+ * ```
+ */
+export function preparePluginPayload(
+	sourceRoot: string,
+	identity: { sourceIdentity: SourceIdentity; release: PayloadRelease },
+): PreparedPayloadDeclaration {
+	const pluginRoot = resolve(sourceRoot, PLUGIN_DIRECTORY)
+	const inventory = pluginPayloadInventory(sourceRoot)
+	const files = inventory.map((relativePath) => {
+		const absolutePath = join(pluginRoot, relativePath)
+		const status = lstatSync(absolutePath)
+		if (!status.isFile()) throw unsafeEntry(relativePath, "changed after inventory (expected file)")
+		const bytes = readFileSync(absolutePath)
+		return {
+			path: relativePath,
+			bytes: bytes.byteLength,
+			sha256: sha256Digest(bytes),
+			executable: (status.mode & 0o111) !== 0,
+		}
+	})
+	const projections = PAYLOAD_PROJECTIONS.map((projection) => {
+		const absolutePath = resolve(sourceRoot, projection.path)
+		let status: ReturnType<typeof lstatSync> | undefined
+		try {
+			status = lstatSync(absolutePath)
+		} catch {
+			status = undefined
+		}
+		if (status === undefined || !status.isFile()) {
+			throw new Error(
+				`missing ${projection.role} projection: ${projection.path} must be a regular file`,
+			)
+		}
+		const bytes = readFileSync(absolutePath)
+		return {
+			role: projection.role,
+			path: projection.path,
+			bytes: bytes.byteLength,
+			sha256: sha256Digest(bytes),
+		}
+	}).sort((left, right) => compareCodeUnits(left.role, right.role) || compareCodeUnits(left.path, right.path))
+	const payloadSha256: Sha256Digest = `sha256:${payloadInventorySha256(pluginRoot, inventory)}`
+	return {
+		sourceIdentity: identity.sourceIdentity,
+		files,
+		projections,
+		payloadSha256,
+		bindingSha256: preparationBindingSha256({
+			sourceIdentity: identity.sourceIdentity,
+			release: identity.release,
+			files,
+			projections,
+			payloadSha256,
+		}),
+	}
 }

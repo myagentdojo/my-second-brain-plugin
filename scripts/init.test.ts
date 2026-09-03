@@ -13,6 +13,9 @@ import { basename, join, resolve } from "node:path"
 
 import { expect, test } from "bun:test"
 
+import { sharedKitCheckout } from "./fixtures/kit-checkout"
+import { KIT_CHECKOUT_ENVIRONMENT } from "./package-adapter"
+
 const root = resolve(import.meta.dir, "..")
 const initialVersion = "0.1.0"
 const ignoredEntries = new Set([
@@ -60,7 +63,7 @@ function commitPackageCheckout(repositoryRoot: string): string {
 
 	for (const arguments_ of [
 		["init", "--quiet"],
-		["add", "--", "plugin.config.json", "plugin"],
+		["add", "--", "package.json", "plugin.config.json", "plugin"],
 		[
 			"-c",
 			"user.name=Plugin Test",
@@ -93,20 +96,11 @@ function packageWithSource(
 			SOURCE_COMMIT: undefined,
 			GITHUB_SHA: undefined,
 			[sourceVariable]: value,
+			[KIT_CHECKOUT_ENVIRONMENT]: sharedKitCheckout,
 		},
 		stdout: "pipe",
 		stderr: "pipe",
 	})
-}
-
-function successfulPackageWithSource(
-	repositoryRoot: string,
-	sourceVariable: "SOURCE_COMMIT" | "GITHUB_SHA",
-	value: string,
-): { archive: string; checksums: string } {
-	const packaged = packageWithSource(repositoryRoot, sourceVariable, value)
-	expect(packaged.exitCode, packaged.stderr.toString()).toBe(0)
-	return JSON.parse(packaged.stdout.toString().trim())
 }
 
 function createReleasedTemplate(prefix: string): string {
@@ -566,7 +560,12 @@ test("initialized repository packages the configured plugin identity", () => {
 	const packaged = Bun.spawnSync({
 		cmd: ["bun", "run", "package"],
 		cwd: temporaryRoot,
-		env: { ...process.env, SOURCE_COMMIT: sourceCommit, GITHUB_SHA: undefined },
+		env: {
+			...process.env,
+			SOURCE_COMMIT: sourceCommit,
+			GITHUB_SHA: undefined,
+			[KIT_CHECKOUT_ENVIRONMENT]: sharedKitCheckout,
+		},
 		stdout: "pipe",
 		stderr: "pipe",
 	})
@@ -592,14 +591,16 @@ test("initialized repository packages the configured plugin identity", () => {
 	})
 })
 
-test("package accepts an explicit source commit when Git metadata is unavailable", () => {
+test("package refuses an explicit source commit when Git metadata is unavailable", () => {
 	const temporaryRoot = copyTemplate("agent-plugin-template-package-no-git-")
 	const init = initializeTemplate(temporaryRoot)
 	expect(init.exitCode, init.stderr.toString()).toBe(0)
-	const sourceCommit = "a".repeat(40)
-	const result = successfulPackageWithSource(temporaryRoot, "SOURCE_COMMIT", sourceCommit)
-	const checksums = JSON.parse(readFileSync(result.checksums, "utf8"))
-	expect(checksums.sourceCommit).toBe(sourceCommit)
+	const packaged = packageWithSource(temporaryRoot, "SOURCE_COMMIT", "a".repeat(40))
+	expect(packaged.exitCode).not.toBe(0)
+	expect(packaged.stderr.toString()).toContain(
+		"Unable to resolve the package source commit from git HEAD",
+	)
+	expect(existsSync(join(temporaryRoot, "dist"))).toBe(false)
 })
 
 test("package rejects payload files outside the exact expected inventory", () => {
