@@ -3,8 +3,8 @@ import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 
 import { type CommandRunner, bunCommandRunner } from "./command-runner"
+import { type PackageOutcome, packagePreparedPlugin } from "./package-adapter"
 import { type PluginConfig, loadPluginConfig } from "./plugin-config"
-import { deterministicPluginArchive, payloadInventorySha256 } from "./plugin-files"
 import { copyMarketplaceDistribution, proveHostedHarnessInstall } from "./prove-harness-install"
 
 const root = resolve(import.meta.dir, "..")
@@ -218,6 +218,52 @@ export function bindCandidateQualificationLineage(
 		packagedPayloadHash: checksums.payloadInventorySha256,
 		installedPayloadHash,
 	}
+}
+
+/** The one Kit process adapter Canary packaging shares with release packaging. */
+export type CandidatePackager = typeof packagePreparedPlugin
+
+/**
+ * Bind qualification lineage to the package evidence the admitted Kit returned.
+ *
+ * @param input - Candidate identity, expected commit, Kit outcome, and independently hashed installation
+ * @returns Lineage bound to the packaged archive and payload digests
+ * @throws {CanaryError} When the outcome is not `packaged` or the lineage does not agree
+ *
+ * @example
+ * ```typescript
+ * lineageFromPackageEvidence({ repository, candidateRef, expectedSourceCommit, outcome, installedPayloadHash })
+ * ```
+ */
+export function lineageFromPackageEvidence(input: {
+	repository: string
+	candidateRef: string
+	expectedSourceCommit: string
+	outcome: PackageOutcome
+	installedPayloadHash: string
+}): CandidateQualificationLineage {
+	const { outcome } = input
+	if (outcome.kind !== "packaged") {
+		const detail =
+			outcome.kind === "process-guard"
+				? `${outcome.kind} (signal ${outcome.signal ?? "none"})`
+				: `${outcome.kind} (${outcome.resultCode}/${outcome.stationId})`
+		throw new CanaryError(
+			"qualification_lineage_invalid",
+			`${input.repository} candidate packaging ${detail}; lineage cannot be bound`,
+			`inspect the Kit refusal and rerun from ${input.candidateRef}; never rewrite history`,
+			false,
+		)
+	}
+	return bindCandidateQualificationLineage(
+		input.expectedSourceCommit,
+		{
+			sourceCommit: outcome.sourceIdentity.commit,
+			archiveSha256: outcome.artifacts.archive.sha256,
+			payloadInventorySha256: outcome.payloadSha256,
+		},
+		input.installedPayloadHash,
+	)
 }
 
 /** Injectable hosted-I/O seams keep qualification behavior unit-testable without real repositories. */
@@ -1108,6 +1154,7 @@ export function installCandidate(
 	commandRunner: CommandRunner = bunCommandRunner,
 	workingRoot = root,
 	environment: NodeJS.ProcessEnv = process.env,
+	packager: CandidatePackager = packagePreparedPlugin,
 ): CandidateInstallEvidence {
 	const temporaryRoot = mkdtempSync(join(tmpdir(), "hosted-canary-install-"))
 	const checkoutRoot = join(temporaryRoot, "candidate")
@@ -1179,21 +1226,27 @@ export function installCandidate(
 				false,
 			)
 		}
-		const lineage = bindCandidateQualificationLineage(
-			sourceSha,
-			{
-				sourceCommit: checkoutSha,
-				archiveSha256: deterministicPluginArchive(
-					checkoutRoot,
-					`${manifestName}-${manifestVersion}`,
-				).sha256,
-				payloadInventorySha256: payloadInventorySha256(
-					join(checkoutRoot, "plugin"),
-					proof.preflight.inventory,
-				),
-			},
-			proof.claude.installedPayloadHash,
-		)
+		// The driver repository admits the Kit; the candidate checkout is the packaged repository.
+		const lineage = lineageFromPackageEvidence({
+			repository: target.repository,
+			candidateRef: target.candidateRef,
+			expectedSourceCommit: sourceSha,
+			outcome: packager({
+				consumerRoot: workingRoot,
+				repositoryRoot: checkoutRoot,
+				sourceIdentity: {
+					repository: { origin: loadPluginConfig(checkoutRoot).repository },
+					commit: checkoutSha,
+				},
+				release: {
+					name: manifestName,
+					version: manifestVersion,
+					tag: `v${manifestVersion}`,
+				},
+				environment,
+			}),
+			installedPayloadHash: proof.claude.installedPayloadHash,
+		})
 		return {
 			repository: target.repository,
 			candidateRef: target.candidateRef,

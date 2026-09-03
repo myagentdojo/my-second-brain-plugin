@@ -1,4 +1,10 @@
 {
   "$schema": "https://docs.fallow.tools/config-schema.json",
-  "entry": ["scripts/*.ts", "runtime/src/bun-proof-adapter.ts"]
+  "entry": [
+    "scripts/*.ts",
+    "runtime/src/bun-proof-adapter.ts"
+  ],
+  "ignoreDependencies": [
+    "agent-plugin-kit"
+  ]
 }

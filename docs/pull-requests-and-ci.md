@@ -20,7 +20,7 @@ Installable payload changes require a releasable title: `feat`, `fix`, `perf`, o
 
 ## Qualify the current head
 
-Hosted CI builds one candidate, then on Linux x64, Linux arm64, macOS arm64, and macOS x64 acquires the locked Bun asset through `repair --apply` into isolated state, runs a packaged skill, and proves warm reuse with custody network denied. It then creates the deterministic archive and `*.checksums.json`. The checksums bind the source commit, archive, runtime lock, bundle inventory, and payload inventory. They are integrity evidence for the named bytes, not independent publisher or builder authenticity. Public `main` artifacts receive GitHub artifact attestation. User-owned private repositories retain the checksums JSON and skip the unsupported attestation job.
+Hosted CI builds one candidate, then on Linux x64, Linux arm64, macOS arm64, and macOS x64 acquires the locked Bun asset through `repair --apply` into isolated state, runs a packaged skill, and proves warm reuse with custody network denied. The pinned Agent Plugin Kit process then creates the deterministic archive and `*.checksums.json` from the consumer's prepared payload. The checksums bind the source commit, archive, runtime lock, bundle inventory, and payload inventory. They are integrity evidence for the named bytes, not independent publisher or builder authenticity. Public `main` artifacts receive GitHub artifact attestation. User-owned private repositories retain the checksums JSON and skip the unsupported attestation job.
 
 PR qualification completes when the title matches the payload impact and every required check passes on the current head.
 
