@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/myagentdojo/my-second-brain-plugin/compare/v0.5.0...v0.5.1) (2026-09-03)
+
+
+### Bug Fixes
+
+* **packaging:** adopt agent plugin kit ([#60](https://github.com/myagentdojo/my-second-brain-plugin/issues/60)) ([cb4f755](https://github.com/myagentdojo/my-second-brain-plugin/commit/cb4f75532f3c52e22782b1591db2c1fe63af757a))
+
 ## [0.5.0](https://github.com/myagentdojo/my-second-brain-plugin/compare/v0.4.0...v0.5.0) (2026-08-30)
 
 
