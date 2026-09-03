@@ -99,14 +99,22 @@ export function payloadInventorySha256(
 	payloadRoot: string,
 	inventory: readonly string[],
 ): string {
+	return payloadBuffersSha256(
+		inventory.map((relativePath) => ({
+			path: relativePath,
+			bytes: readFileSync(join(payloadRoot, relativePath)),
+		})),
+	)
+}
+
+function payloadBuffersSha256(files: readonly { path: string; bytes: Uint8Array }[]): string {
 	const hash = createHash("sha256")
-	for (const relativePath of inventory) {
-		const pathBytes = Buffer.from(relativePath, "utf8")
-		const fileBytes = readFileSync(join(payloadRoot, relativePath))
+	for (const file of files) {
+		const pathBytes = Buffer.from(file.path, "utf8")
 		hash.update(framedLength(pathBytes.byteLength))
 		hash.update(pathBytes)
-		hash.update(framedLength(fileBytes.byteLength))
-		hash.update(fileBytes)
+		hash.update(framedLength(file.bytes.byteLength))
+		hash.update(file.bytes)
 	}
 	return hash.digest("hex")
 }
@@ -284,18 +292,22 @@ export function preparePluginPayload(
 ): PreparedPayloadDeclaration {
 	const pluginRoot = resolve(sourceRoot, PLUGIN_DIRECTORY)
 	const inventory = pluginPayloadInventory(sourceRoot)
-	const files = inventory.map((relativePath) => {
+	const loadedFiles = inventory.map((relativePath) => {
 		const absolutePath = join(pluginRoot, relativePath)
 		const status = lstatSync(absolutePath)
 		if (!status.isFile()) throw unsafeEntry(relativePath, "changed after inventory (expected file)")
 		const bytes = readFileSync(absolutePath)
 		return {
-			path: relativePath,
-			bytes: bytes.byteLength,
-			sha256: sha256Digest(bytes),
-			executable: (status.mode & 0o111) !== 0,
+			bytes,
+			declaration: {
+				path: relativePath,
+				bytes: bytes.byteLength,
+				sha256: sha256Digest(bytes),
+				executable: (status.mode & 0o111) !== 0,
+			},
 		}
 	})
+	const files = loadedFiles.map((file) => file.declaration)
 	const projections = PAYLOAD_PROJECTIONS.map((projection) => {
 		const absolutePath = resolve(sourceRoot, projection.path)
 		let status: ReturnType<typeof lstatSync> | undefined
@@ -317,7 +329,9 @@ export function preparePluginPayload(
 			sha256: sha256Digest(bytes),
 		}
 	}).sort((left, right) => compareCodeUnits(left.role, right.role) || compareCodeUnits(left.path, right.path))
-	const payloadSha256: Sha256Digest = `sha256:${payloadInventorySha256(pluginRoot, inventory)}`
+	const payloadSha256: Sha256Digest = `sha256:${payloadBuffersSha256(
+		loadedFiles.map((file) => ({ path: file.declaration.path, bytes: file.bytes })),
+	)}`
 	return {
 		sourceIdentity: identity.sourceIdentity,
 		files,

@@ -72,10 +72,11 @@ function temporaryDirectory(prefix: string): string {
 const hex = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex")
 
 /**
- * A dirty Kit checkout for S06: a local clone of the shared checkout at the same commit with
- * frozen dependencies and one untracked file. Provisioned at module load, outside test timing.
+ * Lazily provision the dirty Kit checkout used only by S06, then reuse it within that case.
  */
-const dirtyKitCheckout: string = (() => {
+let dirtyKitCheckout: string | undefined
+function getDirtyKitCheckout(): string {
+	if (dirtyKitCheckout !== undefined) return dirtyKitCheckout
 	const dirtyKit = join(temporaryDirectory("msb-kit-dirty-"), "kit")
 	const clone = Bun.spawnSync({
 		cmd: ["git", "clone", "--quiet", sharedKitCheckout, dirtyKit],
@@ -96,8 +97,9 @@ const dirtyKitCheckout: string = (() => {
 	})
 	if (install.exitCode !== 0) throw new Error(install.stderr.toString())
 	writeFileSync(join(dirtyKit, "dirty.txt"), "uncommitted\n")
-	return dirtyKit
-})()
+	dirtyKitCheckout = dirtyKit
+	return dirtyKitCheckout
+}
 
 /**
  * A separate committed consumer: this worktree, including uncommitted work, at one commit.
@@ -428,7 +430,7 @@ test("S05 Canary lineage consumes package evidence", () => {
 })
 
 test("S06 a dirty Kit checkout and a fake pin identity are refused by the real source-link observer", () => {
-	const dirtyKit = dirtyKitCheckout
+	const dirtyKit = getDirtyKitCheckout()
 	const dirtyConsumer = createCommittedConsumer({ kitCheckout: dirtyKit })
 	const dirtyOutcome = packageReal(dirtyConsumer, { ensureKit: () => dirtyKit, linkKit: linkKitCheckout })
 	if (dirtyOutcome.kind !== "not-admitted") throw new Error(JSON.stringify(dirtyOutcome))
