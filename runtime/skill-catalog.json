@@ -25,6 +25,11 @@
       "entry": "runtime/skill-b.js",
       "runtimeProfile": "bun",
       "workspace": "packages/skill-b"
+    },
+    "vault-note-commits": {
+      "entry": "runtime/vault-note-commits.js",
+      "runtimeProfile": "bun",
+      "workspace": "packages/vault-note-commits"
     }
   }
 }

@@ -137,7 +137,8 @@ function isSupportedSingleLine(value: unknown): value is string {
 	)
 }
 
-function validateRepository(repository: unknown): void {
+/** Validate the canonical repository URL projected into native manifests and package lineage. */
+export function validateRepository(repository: unknown): asserts repository is string {
 	if (
 		typeof repository !== "string" ||
 		repository.length > 2_048 ||

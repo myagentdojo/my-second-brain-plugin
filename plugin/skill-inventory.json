@@ -85,6 +85,11 @@
 			"id": "ultragoal",
 			"execution": "model-only",
 			"hookDependence": "hook-independent"
+		},
+		{
+			"id": "vault-note-commits",
+			"execution": "bun-backed",
+			"hookDependence": "hook-independent"
 		}
 	]
 }

@@ -62,22 +62,26 @@ or scope.
    task.
 5. Define one concrete objective, explicit boundaries, acceptance checks, and a
    verifier.
-6. Keep durable state in the project packet:
+6. Commit each durable packet update through the sibling
+   [vault-note-commits](../vault-note-commits/SKILL.md) workflow. Choose the
+   complete packet file set, begin before mutation, work in the returned
+   worktree, and finish after the update.
+7. Keep durable state in the project packet:
    - `README.md`: current state, ownership links, and next action.
    - `GOAL.md`: optional detail for a bounded active outcome.
    - `result.md`: completion evidence only.
-7. Never create a running activity log. Promote decisions, findings, and proof
+8. Never create a running activity log. Promote decisions, findings, and proof
    into the canonical note instead.
-8. Ask for user approval before irreversible, public, shared, or costly actions,
+9. Ask for user approval before irreversible, public, shared, or costly actions,
    or when the next action crosses a safety or ownership boundary.
-9. Activate only for an affirmative work request or the mapped effect of a
+10. Activate only for an affirmative work request or the mapped effect of a
    start or continue selection, following
    [Activation by Harness](#activation-by-harness). Questions, reviews, and
    drafting leave the goal unactivated.
-10. Omit `token_budget` unless the user explicitly supplies one.
-11. Continue until the acceptance checks pass or a genuine blocker prevents the
+11. Omit `token_budget` unless the user explicitly supplies one.
+12. Continue until the acceptance checks pass or a genuine blocker prevents the
     next safe action.
-12. Mark the goal complete only after the verifier confirms the result and the
+13. Mark the goal complete only after the verifier confirms the result and the
     project packet records the evidence.
 
 ## Activation by Harness

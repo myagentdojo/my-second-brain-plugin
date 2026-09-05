@@ -22,6 +22,10 @@ runtime_catalog_select_skill() {
 		RUNTIME_SKILL_ENTRY='runtime/skill-b.js'
 		RUNTIME_SKILL_PROFILE='bun'
 		;;
+	vault-note-commits)
+		RUNTIME_SKILL_ENTRY='runtime/vault-note-commits.js'
+		RUNTIME_SKILL_PROFILE='bun'
+		;;
 	*) return 1 ;;
 	esac
 }

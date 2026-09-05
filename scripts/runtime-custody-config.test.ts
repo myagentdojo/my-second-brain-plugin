@@ -59,6 +59,7 @@ test("names every packaged launcher the catalog registers", () => {
 		"hello-world",
 		"skill-a",
 		"skill-b",
+		"vault-note-commits",
 		"warm-browser",
 	])
 })
@@ -99,6 +100,7 @@ test("renders one custody launcher for every catalog skill", () => {
 		"plugin/bin/hello-world",
 		"plugin/bin/skill-a",
 		"plugin/bin/skill-b",
+		"plugin/bin/vault-note-commits",
 	])
 	for (const launcher of files.filter((file) => file.path.startsWith("plugin/bin/"))) {
 		expect(launcher.contents).toContain('exec "$plugin_root/runtime/runtime-exec" run')

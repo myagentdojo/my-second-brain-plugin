@@ -32,6 +32,7 @@ const expectedSkills = [
 	["skill-a", "bun-backed", "hook-independent"],
 	["skill-b", "bun-backed", "hook-independent"],
 	["ultragoal", "model-only", "hook-independent"],
+	["vault-note-commits", "bun-backed", "hook-independent"],
 ] as const
 
 afterEach(() => {

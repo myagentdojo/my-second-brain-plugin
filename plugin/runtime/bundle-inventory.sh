@@ -27,6 +27,11 @@ runtime_inventory_select_bundle() {
 		RUNTIME_BUNDLE_BYTES='6437'
 		RUNTIME_BUNDLE_SHA256='a7d9599c270986ece563c9bdabd87f3ccc650deb505cdf10f3dd8905042c58f3'
 		;;
+	'vault-note-commits')
+		RUNTIME_BUNDLE_PATH='runtime/vault-note-commits-49accdf941a41604.js'
+		RUNTIME_BUNDLE_BYTES='14512'
+		RUNTIME_BUNDLE_SHA256='49accdf941a4160406424408af8ebe00b097907908d37d5cdce494643ac2f706'
+		;;
 	*) return 1 ;;
 	esac
 }

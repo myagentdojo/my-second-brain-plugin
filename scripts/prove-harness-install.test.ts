@@ -383,6 +383,7 @@ test("automated install evidence binds bytes without claiming native activation"
 				"skill-a",
 				"skill-b",
 				"ultragoal",
+				"vault-note-commits",
 			],
 		})
 	}
@@ -892,8 +893,16 @@ codexNativeTest("Codex JSON records native state (Codex CLI required; fallback p
 	const jsonEvidence = proof.codex.jsonEvidence
 	expect(jsonEvidence).not.toBeNull()
 	if (!jsonEvidence) throw new Error("native Codex proof omitted JSON evidence")
-	expect(jsonEvidence.marketplaceList.marketplaces).toHaveLength(1)
-	expect(jsonEvidence.pluginList.installed).toHaveLength(1)
+	expect(
+		jsonEvidence.marketplaceList.marketplaces.filter(
+			(marketplace) => marketplace.name === proof.codex.marketplaceIdentity,
+		),
+	).toHaveLength(1)
+	expect(
+		jsonEvidence.pluginList.installed.filter(
+			(plugin) => plugin.pluginId === `${pluginName}@${pluginName}`,
+		),
+	).toHaveLength(1)
 })
 
 codexNativeTest("Codex local refresh changes bytes (Codex CLI required; fallback proves bytes)", () => {
@@ -931,6 +940,7 @@ test.each([
 	"bin/hello-world",
 	"bin/skill-a",
 	"bin/skill-b",
+	"bin/vault-note-commits",
 	"runtime/hello-world.js",
 	"runtime/runtime-exec",
 	"runtime/runtime-lock.sh",
