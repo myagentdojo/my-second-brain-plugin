@@ -99,6 +99,11 @@ test("runtime custody sources generate one thin launcher and checked shell proje
 				runtimeProfile: "bun",
 				workspace: "packages/skill-b",
 			},
+			"vault-note-commits": {
+				entry: "runtime/vault-note-commits.js",
+				runtimeProfile: "bun",
+				workspace: "packages/vault-note-commits",
+			},
 		},
 	})
 	const installedSkills = readdirSync(
@@ -123,6 +128,7 @@ test("runtime custody sources generate one thin launcher and checked shell proje
 		"skill-a",
 		"skill-b",
 		"ultragoal",
+		"vault-note-commits",
 	])
 	expect(catalog.skills).not.toHaveProperty("capability-tour")
 
@@ -157,7 +163,7 @@ test("runtime custody sources generate one thin launcher and checked shell proje
 		).text()
 		expect(skillDocument).not.toContain("Status: not yet invocable")
 	}
-	expect(generated.filter((file) => file.path.startsWith("plugin/bin/")).length).toBe(5)
+	expect(generated.filter((file) => file.path.startsWith("plugin/bin/")).length).toBe(6)
 	const launcherNames = readdirSync(
 		fileURLToPath(new URL("../plugin/bin", import.meta.url)),
 	).sort()
@@ -166,6 +172,7 @@ test("runtime custody sources generate one thin launcher and checked shell proje
 		"hello-world",
 		"skill-a",
 		"skill-b",
+		"vault-note-commits",
 		"warm-browser",
 	])
 	const bundleInventory = await Bun.file(
@@ -177,6 +184,7 @@ test("runtime custody sources generate one thin launcher and checked shell proje
 		"hello-world",
 		"skill-a",
 		"skill-b",
+		"vault-note-commits",
 	])
 	expect(bundleInventory.bundles).not.toHaveProperty("capability-tour")
 	expect(bundleInventory.bundles["agent-browser"].path).toMatch(

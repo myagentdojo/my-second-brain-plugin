@@ -1502,6 +1502,7 @@ test("workspace bundles build, relocate, and execute without hooks, workspaces, 
 		"hello-world",
 		"skill-a",
 		"skill-b",
+		"vault-note-commits",
 	])
 	validateBundleClosure(root)
 

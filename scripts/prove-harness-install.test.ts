@@ -383,6 +383,7 @@ test("automated install evidence binds bytes without claiming native activation"
 				"skill-a",
 				"skill-b",
 				"ultragoal",
+				"vault-note-commits",
 			],
 		})
 	}
@@ -931,6 +932,7 @@ test.each([
 	"bin/hello-world",
 	"bin/skill-a",
 	"bin/skill-b",
+	"bin/vault-note-commits",
 	"runtime/hello-world.js",
 	"runtime/runtime-exec",
 	"runtime/runtime-lock.sh",
