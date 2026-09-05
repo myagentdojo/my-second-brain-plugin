@@ -128,7 +128,7 @@ function flags(args: string[], allowed: Set<string>): Map<string, string[]> {
 	for (let index = 0; index < args.length; index += 2) {
 		const key = args[index]
 		const value = args[index + 1]
-		if (!allowed.has(key) || value === undefined || value.startsWith("--")) {
+		if (key === undefined || value === undefined || !allowed.has(key) || value.startsWith("--")) {
 			refuse("help", "INVALID_USAGE", null, "Run vault-note-commits --help and use the documented flags.")
 		}
 		parsed.set(key, [...(parsed.get(key) ?? []), value])
@@ -138,10 +138,11 @@ function flags(args: string[], allowed: Set<string>): Map<string, string[]> {
 
 function one(parsed: Map<string, string[]>, key: string, command: "begin" | "finish"): string {
 	const values = parsed.get(key) ?? []
-	if (values.length !== 1) {
+	const value = values[0]
+	if (values.length !== 1 || value === undefined) {
 		refuse(command, "INVALID_USAGE", null, `Provide ${key} exactly once.`)
 	}
-	return values[0]
+	return value
 }
 
 function canonicalVault(input: string): string {
