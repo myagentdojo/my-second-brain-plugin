@@ -148,6 +148,15 @@ test("new-project instructions preserve an unrelated active goal in a separate p
 	)
 })
 
+test("new-project routes packet writes through vault-note-commits", () => {
+	const skill = readFileSync(join(root, "plugin", "skills", "new-project", "SKILL.md"), "utf8")
+	const begin = skill.indexOf("use the sibling\n   [vault-note-commits](../vault-note-commits/SKILL.md) workflow to begin")
+	const finish = skill.indexOf("Finish through `vault-note-commits`")
+	expect(begin).toBeGreaterThanOrEqual(0)
+	expect(finish).toBeGreaterThan(begin)
+	expect(skill).not.toContain("Run `bun run check`")
+})
+
 test("capability tour is one model-only skill with one cross-client reviewer prompt", () => {
 	const skillRoot = join(root, "plugin", "skills", "capability-tour")
 	const skill = readFileSync(join(skillRoot, "SKILL.md"), "utf8")
