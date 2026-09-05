@@ -166,6 +166,15 @@ test("new-note routes its canonical write through vault-note-commits", () => {
 	expect(skill).not.toContain("Run `bun run check`")
 })
 
+test("ultragoal routes durable packet updates through vault-note-commits", () => {
+	const skill = readFileSync(join(root, "plugin", "skills", "ultragoal", "SKILL.md"), "utf8")
+	const begin = skill.indexOf("[vault-note-commits](../vault-note-commits/SKILL.md) workflow")
+	const finish = skill.indexOf("finish after the update")
+	expect(begin).toBeGreaterThanOrEqual(0)
+	expect(finish).toBeGreaterThan(begin)
+	expect(skill).toContain("Terminal status belongs to that session")
+})
+
 test("capability tour is one model-only skill with one cross-client reviewer prompt", () => {
 	const skillRoot = join(root, "plugin", "skills", "capability-tour")
 	const skill = readFileSync(join(skillRoot, "SKILL.md"), "utf8")
