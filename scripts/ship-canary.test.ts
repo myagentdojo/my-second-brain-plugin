@@ -976,6 +976,13 @@ test("sanitized public candidates are deterministic root commits with no reposit
 		expect(paths).not.toContain("plugin.config.json")
 		expect(paths.some((path) => path.startsWith("scripts/"))).toBe(false)
 		expect(paths).not.toContain("README.md")
+		const manifest = JSON.parse(
+			readFileSync(
+				join(first.repositoryRoot, "plugin", ".claude-plugin", "plugin.json"),
+				"utf8",
+			),
+		) as { repository?: unknown }
+		expect(manifest.repository).toBe(trustedPluginConfig.repository)
 		const workflow = readFileSync(join(first.repositoryRoot, ".github/workflows/plugin-ci.yml"), "utf8")
 		expect(workflow).toContain("name: Prove and package plugin")
 		expect(workflow).toContain('branches:\n      - "candidate/**"')

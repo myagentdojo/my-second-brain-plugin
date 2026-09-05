@@ -4,7 +4,7 @@ import { join, resolve } from "node:path"
 
 import { type CommandRunner, bunCommandRunner } from "./command-runner"
 import { type PackageOutcome, packagePreparedPlugin } from "./package-adapter"
-import { type PluginConfig, loadPluginConfig } from "./plugin-config"
+import { type PluginConfig, loadPluginConfig, validateRepository } from "./plugin-config"
 import { copyMarketplaceDistribution, proveHostedHarnessInstall } from "./prove-harness-install"
 
 const root = resolve(import.meta.dir, "..")
@@ -1201,11 +1201,10 @@ export function installCandidate(
 			environment,
 		)
 		const manifestVersion = validateLineageManifestVersion(proof.preflight.manifestVersion)
-		const manifestName = (
-			JSON.parse(
-				readFileSync(join(checkoutRoot, "plugin", ".claude-plugin", "plugin.json"), "utf8"),
-			) as { name?: unknown }
-		).name
+		const manifest = JSON.parse(
+			readFileSync(join(checkoutRoot, "plugin", ".claude-plugin", "plugin.json"), "utf8"),
+		) as { name?: unknown; repository?: unknown }
+		const manifestName = manifest.name
 		if (
 			typeof manifestName !== "string" ||
 			!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(manifestName) ||
@@ -1218,6 +1217,7 @@ export function installCandidate(
 				false,
 			)
 		}
+		validateRepository(manifest.repository)
 		if (proof.claude.installedPayloadHash !== proof.codex.installedPayloadHash) {
 			throw new CanaryError(
 				"install_mismatch",
@@ -1235,7 +1235,7 @@ export function installCandidate(
 				consumerRoot: workingRoot,
 				repositoryRoot: checkoutRoot,
 				sourceIdentity: {
-					repository: { origin: loadPluginConfig(checkoutRoot).repository },
+					repository: { origin: manifest.repository },
 					commit: checkoutSha,
 				},
 				release: {
