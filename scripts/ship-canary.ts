@@ -160,7 +160,7 @@ export interface CandidateInstallEvidence {
 		version: string
 		cachedPayloadMatches: boolean
 	}
-	/** Package and installed-byte lineage bound to the exact candidate commit. */
+	/** Package and installed-byte lineage bound to the full source commit. */
 	lineage: CandidateQualificationLineage
 }
 
@@ -170,6 +170,12 @@ export interface CandidateQualificationLineage {
 	archiveSha256: string
 	packagedPayloadHash: string
 	installedPayloadHash: string
+}
+
+/** Full source checkout used to package bytes installed from a derived or private candidate. */
+export interface CandidatePackageSource {
+	root: string
+	commit: string
 }
 
 /** Bind qualification lineage to checksum metadata and the independently hashed installation. */
@@ -278,8 +284,12 @@ export interface QualificationDependencies {
 	publish: (target: Target, sourceSha: string) => void | Promise<void>
 	/** Wait for hosted proof bound to the candidate. */
 	hostedProof: (target: Target, sourceSha: string) => Promise<HostedRun>
-	/** Install and compare the exact candidate payload. */
-	install: (target: Target, sourceSha: string) => CandidateInstallEvidence | Promise<CandidateInstallEvidence>
+	/** Install the exact candidate and compare it with the package from its full source checkout. */
+	install: (
+		target: Target,
+		candidateSha: string,
+		packageSource: CandidatePackageSource,
+	) => CandidateInstallEvidence | Promise<CandidateInstallEvidence>
 }
 
 /** Identity, source, and immutable target evidence produced before publication. */
@@ -1136,7 +1146,8 @@ export function bindTrustedPrivateRun(
  * Install one immutable candidate through both native harness proof paths.
  *
  * @param target - Hosted canary repository and immutable candidate ref
- * @param sourceSha - Exact commit the checkout and installed bytes must bind to
+ * @param candidateSha - Exact derived or private candidate commit to install
+ * @param packageSource - Full source checkout and commit used for packaging
  * @param commandRunner - Git subprocess adapter
  * @param workingRoot - Trusted driver checkout used as the clone cwd
  * @param environment - Explicit Git transport environment
@@ -1145,12 +1156,13 @@ export function bindTrustedPrivateRun(
  *
  * @example
  * ```typescript
- * const evidence = installCandidate(target, target.candidateSha)
+ * const evidence = installCandidate(target, target.candidateSha, packageSource)
  * ```
  */
 export function installCandidate(
 	target: Target,
-	sourceSha: string,
+	candidateSha: string,
+	packageSource: CandidatePackageSource,
 	commandRunner: CommandRunner = bunCommandRunner,
 	workingRoot = root,
 	environment: NodeJS.ProcessEnv = process.env,
@@ -1185,10 +1197,10 @@ export function installCandidate(
 				environment,
 				commandRunner,
 			) || ""
-		if (checkoutSha !== sourceSha) {
+		if (checkoutSha !== candidateSha) {
 			throw new CanaryError(
 				"install_mismatch",
-				`${target.repository} candidate checkout resolved to ${checkoutSha}, not ${sourceSha}`,
+				`${target.repository} candidate checkout resolved to ${checkoutSha}, not ${candidateSha}`,
 				`inspect ${target.candidateRef}; never rewrite history or reuse the ref`,
 				false,
 			)
@@ -1197,7 +1209,7 @@ export function installCandidate(
 			checkoutRoot,
 			target.remote,
 			target.candidateRef.replace(/^refs\/heads\//, ""),
-			sourceSha,
+			candidateSha,
 			environment,
 		)
 		const manifestVersion = validateLineageManifestVersion(proof.preflight.manifestVersion)
@@ -1226,17 +1238,26 @@ export function installCandidate(
 				false,
 			)
 		}
-		// The driver repository admits the Kit; the candidate checkout is the packaged repository.
+		const sourceOrigin =
+			processResult(
+				["git", "remote", "get-url", "origin"],
+				false,
+				packageSource.root,
+				environment,
+				commandRunner,
+			) || ""
+		// The driver repository admits the Kit. Package the complete source checkout,
+		// then compare its payload with bytes installed from the immutable candidate.
 		const lineage = lineageFromPackageEvidence({
 			repository: target.repository,
 			candidateRef: target.candidateRef,
-			expectedSourceCommit: sourceSha,
+			expectedSourceCommit: packageSource.commit,
 			outcome: packager({
 				consumerRoot: workingRoot,
-				repositoryRoot: checkoutRoot,
+				repositoryRoot: packageSource.root,
 				sourceIdentity: {
-					repository: { origin: `https://github.com/${target.repository}` },
-					commit: checkoutSha,
+					repository: { origin: sourceOrigin },
+					commit: packageSource.commit,
 				},
 				release: {
 					name: manifestName,
@@ -1308,8 +1329,15 @@ export function createQualificationDependencies(
 					? bindTrustedPrivateRun(target, candidateSha, environment)
 					: waitForRun(target, candidateSha, commandRunner, environment, workingRoot),
 			),
-		install: (target, candidateSha) =>
-			installCandidate(target, candidateSha, commandRunner, workingRoot, environment),
+		install: (target, candidateSha, packageSource) =>
+			installCandidate(
+				target,
+				candidateSha,
+				packageSource,
+				commandRunner,
+				workingRoot,
+				environment,
+			),
 	}
 }
 
@@ -1442,10 +1470,11 @@ export async function qualifyTargets(
 ): Promise<{ runs: HostedRun[]; installs: CandidateInstallEvidence[] }> {
 	const adapters = dependencies ?? createQualificationDependencies()
 	const visibilities = targets.map((target) => target.visibility).sort().join(",")
+	const privateTarget = targets.find((target) => target.visibility === "PRIVATE")
 	if (
 		targets.length !== 2 ||
 		visibilities !== "PRIVATE,PUBLIC" ||
-		targets.find((target) => target.visibility === "PRIVATE")?.candidateSha !== sourceSha ||
+		privateTarget?.candidateSha !== sourceSha ||
 		targets.some((target) => target.candidateRef !== candidateRefForSource(target.candidateSha))
 	) {
 		throw new CanaryError(
@@ -1460,16 +1489,20 @@ export async function qualifyTargets(
 	for (const target of targets.filter((candidate) => candidate.visibility === "PUBLIC")) {
 		runs.set(target.visibility, await adapters.hostedProof(target, target.candidateSha))
 	}
+	const packageSource = {
+		root: privateTarget.publicationRoot,
+		commit: sourceSha,
+	}
 	const installs: CandidateInstallEvidence[] = []
 	for (const target of targets) {
-		const evidence = await adapters.install(target, target.candidateSha)
+		const evidence = await adapters.install(target, target.candidateSha, packageSource)
 		assertCandidateInstall(target, evidence)
 		// Re-bind lineage at the qualification seam so emitted claims always carry
-		// checked source, archive, packaged, and installed hashes for this candidate.
+		// checked source, archive, packaged, and installed hashes for this source.
 		installs.push({
 			...evidence,
 			lineage: bindCandidateQualificationLineage(
-				target.candidateSha,
+				sourceSha,
 				{
 					sourceCommit: evidence.lineage.sourceCommit,
 					archiveSha256: evidence.lineage.archiveSha256,
