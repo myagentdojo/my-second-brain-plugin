@@ -19,5 +19,5 @@
     "noPropertyAccessFromIndexSignature": false,
     "rootDir": "."
   },
-  "include": ["scripts/**/*.ts", "packages/**/*.ts", "tests/**/*.ts"]
+  "include": ["scripts/**/*.ts", "packages/**/*.ts"]
 }
