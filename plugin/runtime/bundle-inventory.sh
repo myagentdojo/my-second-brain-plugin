@@ -1,5 +1,15 @@
 #!/bin/sh
 # Generated from bundle-inventory.json by scripts/build.ts. Edit workspace sources, then run bun run build.
+runtime_inventory_select_compiled() {
+	RUNTIME_COMPILED_PATH='bin/darwin-arm64/my-second-brain'
+	RUNTIME_COMPILED_TARGET='darwin-arm64'
+	RUNTIME_COMPILED_BYTES='63910514'
+	RUNTIME_COMPILED_SHA256='6da1e0bb3d57611503025a6ee4bb8a9cc556b858d4cc06ccbd00dc18ce9d28f0'
+	case "$1" in
+	'skill-a') return 0 ;;
+	*) return 1 ;;
+	esac
+}
 runtime_inventory_select_bundle() {
 	case "$1" in
 	'agent-browser')

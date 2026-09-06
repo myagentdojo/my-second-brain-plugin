@@ -31,5 +31,15 @@
     "path": "THIRD-PARTY-NOTICES.md",
     "bytes": 15210,
     "sha256": "5d69d5ddb5926faa30abc0425b718fa9ff2f578d99863aaf1bb0dbccaf9cc526"
+  },
+  "compiled": {
+    "path": "bin/darwin-arm64/my-second-brain",
+    "target": "darwin-arm64",
+    "compilerVersion": "1.4.0",
+    "skills": [
+      "skill-a"
+    ],
+    "bytes": 63910514,
+    "sha256": "6da1e0bb3d57611503025a6ee4bb8a9cc556b858d4cc06ccbd00dc18ce9d28f0"
   }
 }

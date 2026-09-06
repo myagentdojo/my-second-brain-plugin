@@ -6,6 +6,10 @@ Accepted — 2026-08-06. Complements ADR 0006 (single Bun runtime) and ADR 0005
 (shared runtime custody). Where those decide how the *runtime* reaches the
 consumer, this decides how *dependencies* do.
 
+Declared compiled skills follow the accepted scoped amendment in
+[Compiled plugin development](0010-compiled-plugin-development.md).
+The remaining contract below is preserved.
+
 ## Context
 
 ADR 0006 makes every plugin a bootstrapped-Bun program, and ADR 0005 shares one

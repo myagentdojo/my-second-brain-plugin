@@ -26,6 +26,8 @@ interface RuntimeLock {
 
 /** One logical skill registration owning entry, runtime, and optional workspace identity. */
 export interface SkillCatalogEntry {
+	/** Included executable target; no acquired-runtime fallback is permitted. */
+	compiledTarget?: "darwin-arm64"
 	/** Logical payload-relative bundle identity. */
 	entry: string
 	/** Runtime profile key that must exist in the runtime lock. */
@@ -132,6 +134,9 @@ function claimGeneratedName(
 
 /** Every rule one catalog entry satisfies on its own, before any cross-entry rule. */
 function validateSkillEntry(skillId: string, skill: SkillCatalogEntry, lock: RuntimeLock): void {
+	if (skill.compiledTarget !== undefined && skill.compiledTarget !== "darwin-arm64") {
+		throw new Error(`unsupported compiled target for ${skillId}`)
+	}
 	if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(skillId)) {
 		throw new Error(`skill catalog id is invalid: ${skillId}`)
 	}
@@ -229,6 +234,7 @@ function renderCatalogProjection(catalog: SkillCatalog): string {
 			([skillId, skill]) => `	${skillId})
 		RUNTIME_SKILL_ENTRY=${shellQuote(skill.entry)}
 		RUNTIME_SKILL_PROFILE=${shellQuote(skill.runtimeProfile)}
+		RUNTIME_SKILL_COMPILED_TARGET=${shellQuote(skill.compiledTarget ?? "")}
 		;;`,
 		)
 	return `#!/bin/sh

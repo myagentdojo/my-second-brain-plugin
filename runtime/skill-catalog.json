@@ -19,7 +19,8 @@
     "skill-a": {
       "entry": "runtime/skill-a.js",
       "runtimeProfile": "bun",
-      "workspace": "packages/skill-a"
+      "workspace": "packages/skill-a",
+      "compiledTarget": "darwin-arm64"
     },
     "skill-b": {
       "entry": "runtime/skill-b.js",

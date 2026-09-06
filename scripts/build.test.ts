@@ -1607,6 +1607,7 @@ test("workspace bundles build, relocate, and execute without hooks, workspaces, 
 
 function bunPayloadFixture(): string {
 	const fixtureRoot = temporaryDirectory("bun-payload-")
+	cpSync(join(root, "plugin.config.json"), join(fixtureRoot, "plugin.config.json"))
 	mkdirSync(join(fixtureRoot, "runtime"), { recursive: true })
 	cpSync(
 		join(root, "runtime", "runtime.lock.json"),

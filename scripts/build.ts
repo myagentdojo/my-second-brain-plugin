@@ -1,4 +1,6 @@
 import {
+	chmodSync,
+	lstatSync,
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
@@ -97,6 +99,13 @@ export interface AdmittedDependency {
 	noticeText?: string
 }
 
+/** Included executable identity and the exact admitted dispatch set. */
+export interface CompiledRecord extends BundleRecord {
+	target: string
+	compilerVersion: string
+	skills: string[]
+}
+
 /** One materialized bundle identity owned by the generated inventory. */
 export interface BundleRecord {
 	/** Payload-relative digest-named bundle path. */
@@ -107,6 +116,7 @@ export interface BundleRecord {
 
 /** Result of one complete workspace bundle build and materialization. */
 export interface BundleClosureResult {
+	compiled?: CompiledRecord
 	bundles: Record<string, BundleRecord>
 	notices: BundleRecord
 }
@@ -1409,7 +1419,10 @@ export function renderThirdPartyNotices(dependencies: AdmittedDependency[]): str
  * renderBundleInventoryProjection(closure.bundles)
  * ```
  */
-export function renderBundleInventoryProjection(bundles: Record<string, BundleRecord>): string {
+export function renderBundleInventoryProjection(
+	bundles: Record<string, BundleRecord>,
+	compiled?: CompiledRecord,
+): string {
 	const cases = Object.keys(bundles)
 		.sort(compareCodeUnits)
 		.map((skillId) => {
@@ -1423,6 +1436,16 @@ export function renderBundleInventoryProjection(bundles: Record<string, BundleRe
 		})
 	return `#!/bin/sh
 # Generated from bundle-inventory.json by scripts/build.ts. Edit workspace sources, then run bun run build.
+runtime_inventory_select_compiled() {
+	RUNTIME_COMPILED_PATH=${shellQuote(compiled?.path ?? "")}
+	RUNTIME_COMPILED_TARGET=${shellQuote(compiled?.target ?? "")}
+	RUNTIME_COMPILED_BYTES=${shellQuote(String(compiled?.bytes ?? 0))}
+	RUNTIME_COMPILED_SHA256=${shellQuote(compiled?.sha256 ?? "")}
+	case "$1" in
+	${compiled?.skills.map(shellQuote).join(" | ") || "__none__"}) return 0 ;;
+	*) return 1 ;;
+	esac
+}
 runtime_inventory_select_bundle() {
 	case "$1" in
 ${cases.join("\n")}
@@ -1432,9 +1455,117 @@ ${cases.join("\n")}
 `
 }
 
+/** Compile only admitted bundles, before publishing any candidate bytes. */
+function compileAdmittedSkills(
+	root: string,
+	staging: string,
+	artifacts: BundleArtifact[],
+): { record: CompiledRecord; contents: Uint8Array } | undefined {
+	const selected = Object.entries(loadSkillCatalog(root).skills)
+		.filter(([, skill]) => skill.compiledTarget !== undefined)
+		.map(([id]) => id)
+		.sort(compareCodeUnits)
+	if (selected.length === 0) return undefined
+	const version = JSON.parse(
+		readFileSync(join(root, "runtime/runtime.lock.json"), "utf8"),
+	).profiles.bun.version
+	if (Bun.version !== version)
+		throw new Error(
+			`compiled build requires Bun ${version}; received ${Bun.version}`,
+		)
+	if (process.platform !== "darwin" || process.arch !== "arm64") {
+		throw new Error(
+			"compiled build requires the qualified darwin-arm64 contributor host",
+		)
+	}
+	const directory = join(staging, "compiled")
+	mkdirSync(directory)
+	const cases = selected.map((id) => {
+		const artifact = artifacts.find((candidate) => candidate.skillId === id)
+		if (!artifact)
+			throw new Error(`compiled build has no admitted bundle for ${id}`)
+		writeFileSync(join(directory, `${id}.js`), artifact.contents)
+		return `case ${JSON.stringify(id)}: await import(${JSON.stringify(`./${id}.js`)}); break;`
+	})
+	// Remove only the private dispatch argument. Skills retain ordinary argv shape.
+	writeFileSync(
+		join(directory, "dispatch.js"),
+		`const skill = process.argv.splice(2, 1)[0];\nswitch (skill) {\n${cases.join("\n")}\ndefault: console.error("Unknown compiled skill"); process.exit(23);\n}\n`,
+	)
+	const executable = join(directory, "plugin-executable")
+	const result = Bun.spawnSync({
+		cmd: [
+			process.execPath,
+			"build",
+			"--compile",
+			"--target=bun-darwin-arm64",
+			"--no-compile-autoload-dotenv",
+			"--no-compile-autoload-bunfig",
+			"--no-compile-autoload-tsconfig",
+			"--no-compile-autoload-package-json",
+			"--outfile",
+			executable,
+			"./dispatch.js",
+		],
+		cwd: directory,
+		stdout: "pipe",
+		stderr: "pipe",
+	})
+	if (result.exitCode !== 0)
+		throw new Error(`compiled build failed: ${result.stderr.toString()}`)
+	const contents = new Uint8Array(readFileSync(executable))
+	return {
+		contents,
+		record: {
+			path: `bin/darwin-arm64/${loadPluginConfig(root).name}`,
+			target: "darwin-arm64",
+			compilerVersion: version,
+			skills: selected,
+			bytes: contents.byteLength,
+			sha256: sha256Hex(contents),
+		},
+	}
+}
+
+function validateCompiledArtifact(root: string, record?: CompiledRecord): void {
+	const selected = Object.entries(loadSkillCatalog(root).skills)
+		.filter(([, skill]) => skill.compiledTarget !== undefined)
+		.map(([id]) => id)
+		.sort(compareCodeUnits)
+	if (!record && selected.length === 0) return
+	const expectedPath = `bin/darwin-arm64/${loadPluginConfig(root).name}`
+	const version = JSON.parse(
+		readFileSync(join(root, "runtime/runtime.lock.json"), "utf8"),
+	).profiles.bun.version
+	if (
+		!record ||
+		record.path !== expectedPath ||
+		record.target !== "darwin-arm64" ||
+		record.compilerVersion !== version ||
+		JSON.stringify(record.skills) !== JSON.stringify(selected) ||
+		!/^[a-f0-9]{64}$/.test(record.sha256)
+	) {
+		throw new Error(
+			"compiled inventory disagrees with the catalog; rebuild the plugin payload",
+		)
+	}
+	const executable = join(root, "plugin", record.path)
+	const metadata = lstatSync(executable)
+	if (
+		!metadata.isFile() ||
+		(metadata.mode & 0o111) === 0 ||
+		metadata.size !== record.bytes ||
+		sha256Hex(readFileSync(executable)) !== record.sha256
+	) {
+		throw new Error(
+			"compiled executable disagrees with inventory; rebuild the plugin payload",
+		)
+	}
+}
+
 function serializeInventory(result: BundleClosureResult): string {
 	return `${JSON.stringify(
-		{ schemaVersion: 1, bundles: result.bundles, notices: result.notices },
+		{ schemaVersion: 1, bundles: result.bundles, notices: result.notices, ...(result.compiled ? { compiled: result.compiled } : {}) },
 		null,
 		2,
 	)}\n`
@@ -1475,6 +1606,7 @@ export async function buildWorkspaceBundles(root: string): Promise<BundleClosure
 
 	const stagingDirectory = mkdtempSync(join(tmpdir(), "skill-bundle-staging-"))
 	const artifacts: BundleArtifact[] = []
+	let compiledArtifact: { record: CompiledRecord; contents: Uint8Array } | undefined
 	try {
 		const helloWorld = catalog.skills["hello-world"]
 		if (helloWorld && isOwnedHelloWorldAdapter("hello-world", helloWorld)) {
@@ -1492,6 +1624,7 @@ export async function buildWorkspaceBundles(root: string): Promise<BundleClosure
 				),
 			)
 		}
+		compiledArtifact = compileAdmittedSkills(root, stagingDirectory, artifacts)
 	} finally {
 		rmSync(stagingDirectory, { recursive: true, force: true })
 	}
@@ -1516,6 +1649,7 @@ export async function buildWorkspaceBundles(root: string): Promise<BundleClosure
 			}
 		}
 	const result: BundleClosureResult = {
+		...(compiledArtifact ? { compiled: compiledArtifact.record } : {}),
 		bundles,
 		notices: {
 			path: "THIRD-PARTY-NOTICES.md",
@@ -1537,11 +1671,33 @@ export async function buildWorkspaceBundles(root: string): Promise<BundleClosure
 	for (const artifact of artifacts) {
 		writeFileSync(join(runtimeDirectory, artifact.fileName), artifact.contents)
 	}
+	if (compiledArtifact) {
+		const priorInventory = join(runtimeDirectory, "bundle-inventory.json")
+		if (existsSync(priorInventory)) {
+			const previous = JSON.parse(readFileSync(priorInventory, "utf8")).compiled as CompiledRecord | undefined
+			if (previous && previous.path !== compiledArtifact.record.path) {
+				if (!/^bin\/darwin-arm64\/[a-z0-9]+(?:-[a-z0-9]+)*$/.test(previous.path)) {
+					throw new Error("previous compiled artifact path is invalid; inspect the generated inventory")
+				}
+				const previousPath = join(root, "plugin", previous.path)
+				if (existsSync(previousPath)) {
+					if (!lstatSync(previousPath).isFile() || sha256Hex(readFileSync(previousPath)) !== previous.sha256) {
+						throw new Error("previous compiled artifact changed; preserve it and reconcile before rebuilding")
+					}
+					rmSync(previousPath)
+				}
+			}
+		}
+		const executable = join(root, "plugin", compiledArtifact.record.path)
+		mkdirSync(dirname(executable), { recursive: true })
+		writeFileSync(executable, compiledArtifact.contents)
+		chmodSync(executable, 0o755)
+	}
 	writeFileSync(join(root, "plugin", "THIRD-PARTY-NOTICES.md"), noticesText)
 	writeFileSync(join(runtimeDirectory, "bundle-inventory.json"), serializeInventory(result))
 	writeFileSync(
 		join(runtimeDirectory, "bundle-inventory.sh"),
-		renderBundleInventoryProjection(bundles),
+		renderBundleInventoryProjection(bundles, result.compiled),
 	)
 	return result
 }
@@ -1567,11 +1723,14 @@ export function validateBundleClosure(root: string): void {
 	const inventory = JSON.parse(readFileSync(inventoryPath, "utf8")) as {
 		schemaVersion: number
 		bundles: Record<string, BundleRecord>
+		compiled?: CompiledRecord
 		notices: BundleRecord
 	}
 	if (inventory.schemaVersion !== 1) {
 		throw new Error("bundle closure: bundle-inventory.json schemaVersion must be 1")
 	}
+
+	validateCompiledArtifact(root, inventory.compiled)
 
 	for (const [skillId, skill] of Object.entries(catalog.skills)) {
 		if (skill.workspace === undefined && !isOwnedHelloWorldAdapter(skillId, skill)) {
@@ -1630,7 +1789,7 @@ export function validateBundleClosure(root: string): void {
 	if (!existsSync(projectionPath)) {
 		throw new Error("bundle closure: bundle-inventory.sh is missing; run bun run build")
 	}
-	if (readFileSync(projectionPath, "utf8") !== renderBundleInventoryProjection(inventory.bundles)) {
+	if (readFileSync(projectionPath, "utf8") !== renderBundleInventoryProjection(inventory.bundles, inventory.compiled)) {
 		throw new Error("bundle closure: stale bundle inventory projection; run bun run build")
 	}
 	if (inventory.notices.path !== "THIRD-PARTY-NOTICES.md") {
@@ -1750,7 +1909,8 @@ export function validateBunOnlyPayload(root: string): void {
 	]
 	const bundleInventory = JSON.parse(
 		readFileSync(join(root, "plugin", "runtime", "bundle-inventory.json"), "utf8"),
-	) as { bundles: Record<string, BundleRecord> }
+	) as { bundles: Record<string, BundleRecord>; compiled?: CompiledRecord }
+	if (bundleInventory.compiled) required.push(bundleInventory.compiled.path)
 	for (const [skillId, skill] of Object.entries(catalog.skills)) {
 		required.push(`bin/${skill.launcher ?? skillId}`, `skills/${skillId}/SKILL.md`)
 		required.push(
@@ -1792,7 +1952,7 @@ export function validateBunOnlyPayload(root: string): void {
 		throw new Error(`Bun payload closure: stale generated file ${drifted[0]}`)
 	}
 	const launchers = inventory
-		.filter((path) => path.startsWith("bin/"))
+		.filter((path) => path.startsWith("bin/") && !path.slice(4).includes("/"))
 		.map((path) => path.slice("bin/".length))
 	const expectedLaunchers = Object.entries(catalog.skills)
 		.map(([skillId, skill]) => skill.launcher ?? skillId)
@@ -1813,7 +1973,7 @@ export function validateBunOnlyPayload(root: string): void {
 		if (forbiddenRuntimePaths.some((pattern) => pattern.test(path))) {
 			throw new Error(`Bun payload closure: legacy runtime surface ${path}`)
 		}
-		if (/\.(?:js|json|md|sh)$/.test(path) || path.startsWith("bin/")) {
+		if (/\.(?:js|json|md|sh)$/.test(path) || (path.startsWith("bin/") && !path.slice(4).includes("/"))) {
 			const text = readFileSync(join(root, "plugin", path), "utf8")
 			if (/qjs:std|QuickJS/i.test(text)) {
 				throw new Error(`Bun payload closure: legacy runtime claim in ${path}`)
@@ -1992,6 +2152,7 @@ async function main(): Promise<void> {
 			sideEffects: "repository-files-written",
 			helloWorldRuntime: join(root, "plugin", "runtime", "hello-world.js"),
 			bundles: closure.bundles,
+			compiled: closure.compiled,
 			notices: closure.notices,
 		}),
 	)

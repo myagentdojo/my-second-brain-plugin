@@ -93,6 +93,7 @@ test("runtime custody sources generate one thin launcher and checked shell proje
 				entry: "runtime/skill-a.js",
 				runtimeProfile: "bun",
 				workspace: "packages/skill-a",
+				compiledTarget: "darwin-arm64",
 			},
 			"skill-b": {
 				entry: "runtime/skill-b.js",
@@ -160,7 +161,8 @@ test("runtime custody sources generate one thin launcher and checked shell proje
 	expect(generated.filter((file) => file.path.startsWith("plugin/bin/")).length).toBe(5)
 	const launcherNames = readdirSync(
 		fileURLToPath(new URL("../plugin/bin", import.meta.url)),
-	).sort()
+		{ withFileTypes: true },
+	).filter((entry) => entry.isFile()).map((entry) => entry.name).sort()
 	expect(launcherNames).toEqual([
 		"frontier-runner",
 		"hello-world",

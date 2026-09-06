@@ -190,7 +190,7 @@ if (JSON.stringify(packagedSkills) !== JSON.stringify(packagedSkillInventory.map
 	throw new Error("package skill inventory does not preserve the exact portable and model-only closure")
 }
 const packagedLaunchers = entries
-	.filter((entry) => entry.startsWith(`${packageName}/bin/`) && !entry.endsWith("/"))
+	.filter((entry) => entry.startsWith(`${packageName}/bin/`) && !entry.endsWith("/") && !entry.slice(`${packageName}/bin/`.length).includes("/"))
 	.map((entry) => entry.slice(`${packageName}/bin/`.length))
 	.sort(compareCodeUnits)
 // The launcher closure follows the skill catalog. Freezing a list from a past
@@ -231,6 +231,12 @@ for (const skillId of ["frontier-runner", "hello-world", "skill-a", "skill-b"]) 
 		throw new Error(`packaged ${skillId} launcher is not bound to runtime custody`)
 	}
 	const missing = runPackaged(launcher, [], coldXdg)
+	if (catalog.skills[skillId]?.compiledTarget) {
+		if (missing.exitCode !== 0 || missing.stderr !== "" || JSON.parse(missing.stdout).skill !== skillId) {
+			throw new Error(`packaged compiled ${skillId} failed cold execution`)
+		}
+		continue
+	}
 	if (missing.exitCode !== 20) throw new Error(`packaged ${skillId} did not return BUN_MISSING`)
 	const control = JSON.parse(missing.stdout)
 	if (control.code !== "BUN_MISSING" || !Array.isArray(control.sideEffects) || control.sideEffects.length !== 0) {

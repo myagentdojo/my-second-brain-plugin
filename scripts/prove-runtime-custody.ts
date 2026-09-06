@@ -63,13 +63,13 @@ function requireEnvelope(
 }
 
 try {
-	const run = requireEnvelope("run skill-a with empty store", runEngine(["run", "skill-a"]), {
+	const run = requireEnvelope("run skill-b with empty store", runEngine(["run", "skill-b"]), {
 		exitCode: 20,
 		ok: false,
 		code: "BUN_MISSING",
 	})
 	if (run.sideEffects.length !== 0) {
-		throw new Error(`run skill-a reported side effects: ${JSON.stringify(run.sideEffects)}`)
+		throw new Error(`run skill-b reported side effects: ${JSON.stringify(run.sideEffects)}`)
 	}
 
 	const preview = requireEnvelope("repair preview with empty store", runEngine(["repair"]), {

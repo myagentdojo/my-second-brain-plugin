@@ -1290,7 +1290,7 @@ export function proveInstalledCapabilityEvidence(
 		.filter((skill) => skill.execution === "bun-backed")
 		.map((skill) => skill.id)
 	const launchers = installedInventory
-		.filter((path) => path.startsWith("bin/"))
+		.filter((path) => path.startsWith("bin/") && !path.slice(4).includes("/"))
 		.map((path) => path.slice("bin/".length))
 	const catalogProjection = readFileSync(
 		join(pluginRoot, "runtime", "skill-catalog.sh"),
@@ -1455,7 +1455,7 @@ function proveNativeRuntimeJourney(
 	const target = nativeRuntimeTarget()
 	const cacheRoot = join(temporaryRoot, "runtime-journeys", client)
 	mkdirSync(cacheRoot, { recursive: true, mode: 0o700 })
-	const launcher = join(pluginRoot, "bin", client === "claude-cli" ? "skill-a" : "skill-b")
+	const launcher = join(pluginRoot, "bin", "skill-b")
 	const engine = join(pluginRoot, "runtime", "runtime-exec")
 	const missing = requireProofControlEnvelope(
 		`${client} cold run`,
