@@ -1235,7 +1235,7 @@ export function installCandidate(
 				consumerRoot: workingRoot,
 				repositoryRoot: checkoutRoot,
 				sourceIdentity: {
-					repository: { origin: loadPluginConfig(checkoutRoot).repository },
+					repository: { origin: `https://github.com/${target.repository}` },
 					commit: checkoutSha,
 				},
 				release: {
