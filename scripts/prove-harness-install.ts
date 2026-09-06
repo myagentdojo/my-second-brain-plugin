@@ -789,6 +789,7 @@ export function nativeHarnessEnvironment(
 	if (!isolatedClient) return base
 	return {
 		...base,
+		...(isolatedClient.client === "codex" ? { HOME: isolatedClient.home } : {}),
 		[isolatedClient.client === "claude" ? "CLAUDE_CONFIG_DIR" : "CODEX_HOME"]:
 			isolatedClient.home,
 		CI: "1",

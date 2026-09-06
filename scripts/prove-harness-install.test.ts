@@ -585,6 +585,7 @@ test("hosted proof honors an injected environment for CLI lookup before checkout
 test("both native clients derive isolated homes from the injected environment", () => {
 	const injected = {
 		PATH: "/injected/bin",
+		HOME: "/injected/home",
 		GIT_CONFIG_GLOBAL: "/injected/gitconfig",
 		SSH_AUTH_SOCK: "/injected/agent.sock",
 		GH_TOKEN: "publication-secret",
@@ -604,6 +605,7 @@ test("both native clients derive isolated homes from the injected environment", 
 
 	expect(claude).toEqual({
 		PATH: "/injected/bin",
+		HOME: "/injected/home",
 		GIT_CONFIG_GLOBAL: "/injected/gitconfig",
 		SSH_AUTH_SOCK: "/injected/agent.sock",
 		CLAUDE_CONFIG_DIR: "/isolated/claude",
@@ -612,6 +614,7 @@ test("both native clients derive isolated homes from the injected environment", 
 	})
 	expect(codex).toEqual({
 		PATH: "/injected/bin",
+		HOME: "/isolated/codex",
 		GIT_CONFIG_GLOBAL: "/injected/gitconfig",
 		SSH_AUTH_SOCK: "/injected/agent.sock",
 		CODEX_HOME: "/isolated/codex",
