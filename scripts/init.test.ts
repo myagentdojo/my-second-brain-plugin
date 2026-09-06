@@ -551,10 +551,21 @@ test("test fixtures can reinitialize a customized recipient", () => {
 	expect(reinitialized.exitCode, reinitialized.stderr.toString()).toBe(0)
 })
 
+function buildPackageCandidate(repositoryRoot: string): void {
+	const built = Bun.spawnSync({
+		cmd: [process.execPath, "run", "build"],
+		cwd: repositoryRoot,
+		stdout: "pipe",
+		stderr: "pipe",
+	})
+	expect(built.exitCode, built.stderr.toString()).toBe(0)
+}
+
 test("initialized repository packages the configured plugin identity", () => {
 	const temporaryRoot = copyTemplate("agent-plugin-template-package-")
 	const init = initializeTemplate(temporaryRoot)
 	expect(init.exitCode, init.stderr.toString()).toBe(0)
+	buildPackageCandidate(temporaryRoot)
 	const sourceCommit = commitPackageCheckout(temporaryRoot)
 
 	const packaged = Bun.spawnSync({
@@ -589,12 +600,13 @@ test("initialized repository packages the configured plugin identity", () => {
 		evidence:
 			"Checksum metadata is integrity evidence for these archive bytes, not independent publisher or builder authenticity.",
 	})
-})
+}, 60_000)
 
 test("package refuses an explicit source commit when Git metadata is unavailable", () => {
 	const temporaryRoot = copyTemplate("agent-plugin-template-package-no-git-")
 	const init = initializeTemplate(temporaryRoot)
 	expect(init.exitCode, init.stderr.toString()).toBe(0)
+	buildPackageCandidate(temporaryRoot)
 	const packaged = packageWithSource(temporaryRoot, "SOURCE_COMMIT", "a".repeat(40))
 	expect(packaged.exitCode).not.toBe(0)
 	expect(packaged.stderr.toString()).toContain(
@@ -607,6 +619,7 @@ test("package rejects payload files outside the exact expected inventory", () =>
 	const temporaryRoot = copyTemplate("agent-plugin-template-package-filenames-")
 	const init = initializeTemplate(temporaryRoot)
 	expect(init.exitCode, init.stderr.toString()).toBe(0)
+	buildPackageCandidate(temporaryRoot)
 	const unusualName = "line\nbreak\\slash.txt"
 	const unusualPath = join(temporaryRoot, "plugin", "runtime", unusualName)
 	writeFileSync(unusualPath, "unusual filename payload\n")
@@ -622,6 +635,7 @@ test.each(["SOURCE_COMMIT", "GITHUB_SHA"] as const)(
 		const temporaryRoot = copyTemplate("agent-plugin-template-package-source-")
 		const init = initializeTemplate(temporaryRoot)
 		expect(init.exitCode, init.stderr.toString()).toBe(0)
+	buildPackageCandidate(temporaryRoot)
 
 		const packaged = packageWithSource(temporaryRoot, sourceVariable, "A".repeat(40))
 		expect(packaged.exitCode).not.toBe(0)
@@ -637,6 +651,7 @@ test.each(["SOURCE_COMMIT", "GITHUB_SHA"] as const)(
 		const temporaryRoot = copyTemplate("agent-plugin-template-package-mismatch-")
 		const init = initializeTemplate(temporaryRoot)
 		expect(init.exitCode, init.stderr.toString()).toBe(0)
+	buildPackageCandidate(temporaryRoot)
 		const gitHead = commitPackageCheckout(temporaryRoot)
 		const mismatchedCommit = gitHead === "b".repeat(40) ? "c".repeat(40) : "b".repeat(40)
 		const packaged = packageWithSource(temporaryRoot, sourceVariable, mismatchedCommit)

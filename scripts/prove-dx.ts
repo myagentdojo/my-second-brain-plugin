@@ -282,7 +282,8 @@ console.log(
 		development: {
 			claude:
 				"isolated production replacement + persistent user link + ordinary-directory discovery + exact restore",
-			codex: "full staged copy + candidate-hash plan + native inspection + fresh-task boundary",
+			codex:
+				"one approved checkout + one initial task binding + stable staged cache + automatic refresh + native inspection",
 		},
 		production: "release PR + proof + tag + GitHub Release + harness update",
 		boundaries: [
@@ -290,7 +291,7 @@ console.log(
 			"no symlinks in the distributed payload",
 			"no npm publication",
 			"Claude live reload is explicit",
-			"Codex reload means a fresh task",
+			"Codex refresh reuses one checkout-owned stable development identity",
 			"direct handler checks do not prove native activation",
 		],
 		automatedClaimBoundary: {

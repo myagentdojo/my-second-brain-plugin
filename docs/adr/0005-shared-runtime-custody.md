@@ -5,6 +5,10 @@
 Accepted — 2026-08-05; production contract updated 2026-08-08 after ADR 0006
 made Bun the only runtime.
 
+Declared compiled skills follow the accepted scoped amendment in
+[Compiled plugin development](0010-compiled-plugin-development.md).
+The remaining contract below is preserved.
+
 ## Context
 
 A plugin can contain many dependency-bearing skills. If each skill owns fetch,

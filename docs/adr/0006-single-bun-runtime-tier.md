@@ -6,6 +6,10 @@ Accepted — 2026-08-06. Supersedes ADR 0004's two-tier model. Keeps ADR 0005
 (shared runtime custody) unchanged — the custody engine becomes the single
 path rather than the OS-integrated path.
 
+Declared compiled skills follow the accepted scoped amendment in
+[Compiled plugin development](0010-compiled-plugin-development.md).
+The remaining contract below is preserved.
+
 ## Context
 
 ADR 0004 split plugins into two runtime tiers: a QuickJS-sandboxed default

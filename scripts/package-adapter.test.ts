@@ -229,6 +229,8 @@ afterAll(() => {
 	for (const directory of temporaryRoots.splice(0)) rmSync(directory, { recursive: true, force: true })
 })
 
+// These process cases package an included Bun executable. The prior five-second
+// default killed real compression after the compiled payload increased to 64 MB.
 test("S01 source/preparation dispatch packages through the admitted Kit with complete evidence", () => {
 	const consumer = admitted()
 	const outcome = packageReal(consumer)
@@ -295,7 +297,7 @@ test("S01 source/preparation dispatch packages through the admitted Kit with com
 	expect(listing.stdout.toString().split("\n").filter((line) => line !== "")).toEqual(
 		directoryArchiveEntries(join(staging, packageName), packageName),
 	)
-})
+}, 60_000)
 
 test("S02 a preparation refusal invokes no Kit", () => {
 	const identity = admitted().identity
@@ -380,7 +382,7 @@ test("S04 a Kit refusal and a partial outcome are forwarded, never fabricated", 
 	expect(failed.kind).toBe("failed")
 	const truncated = classifyKitOutcome({ exitCode: 0, signal: null, stdout: '{"status":"ok"}\n', stderr: "", runId: "literal" })
 	expect(truncated.kind).toBe("failed")
-})
+}, 60_000)
 
 test("S05 Canary lineage consumes package evidence", () => {
 	const consumer = admitted()
@@ -449,4 +451,4 @@ test("S06 a dirty Kit checkout and a fake pin identity are refused by the real s
 	expect(fakeOutcome.message).toBe(KIT_NOT_ADMITTED_MESSAGE)
 	expect(fakeOutcome.artifacts).toEqual({ archive: null, checksums: null })
 	expect(existsSync(join(fakeConsumer.root, "dist"))).toBe(false)
-})
+}, 60_000)

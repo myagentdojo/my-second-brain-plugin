@@ -5,26 +5,31 @@
       "entry": "runtime/warm-browser.js",
       "runtimeProfile": "bun",
       "workspace": "packages/agent-browser",
-      "launcher": "warm-browser"
+      "launcher": "warm-browser",
+      "compiledTarget": "darwin-arm64"
     },
     "frontier-runner": {
       "entry": "runtime/frontier-runner.js",
       "runtimeProfile": "bun",
-      "workspace": "packages/frontier-runner"
+      "workspace": "packages/frontier-runner",
+      "compiledTarget": "darwin-arm64"
     },
     "hello-world": {
       "entry": "runtime/hello-world.js",
-      "runtimeProfile": "bun"
+      "runtimeProfile": "bun",
+      "compiledTarget": "darwin-arm64"
     },
     "skill-a": {
       "entry": "runtime/skill-a.js",
       "runtimeProfile": "bun",
-      "workspace": "packages/skill-a"
+      "workspace": "packages/skill-a",
+      "compiledTarget": "darwin-arm64"
     },
     "skill-b": {
       "entry": "runtime/skill-b.js",
       "runtimeProfile": "bun",
-      "workspace": "packages/skill-b"
+      "workspace": "packages/skill-b",
+      "compiledTarget": "darwin-arm64"
     }
   }
 }

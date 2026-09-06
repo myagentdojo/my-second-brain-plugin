@@ -216,11 +216,29 @@ file_size() {
 }
 
 sanitize_bun_environment() {
-	unset BUN_OPTIONS NODE_OPTIONS NODE_PATH BUN_INSTALL BUN_INSTALL_CACHE_DIR BUN_CONFIG_FILE 2>/dev/null || :
+	unset BUN_BE_BUN BUN_INSPECT BUN_INSPECT_BRK BUN_INSPECT_WAIT BUN_OPTIONS NODE_OPTIONS NODE_PATH BUN_INSTALL BUN_INSTALL_CACHE_DIR BUN_CONFIG_FILE AGENT_PLUGIN_COMPILED_SKILL 2>/dev/null || :
 	DO_NOT_TRACK=1
 	export DO_NOT_TRACK
 	BUN_RUNTIME_TRANSPILER_CACHE_PATH=0
 	export BUN_RUNTIME_TRANSPILER_CACHE_PATH
+}
+
+restore_caller_environment() {
+	if [ "$caller_lc_all_set" = 1 ]; then
+		LC_ALL=$caller_lc_all
+		export LC_ALL
+	else
+		unset LC_ALL 2>/dev/null || :
+	fi
+	if [ "$caller_path_set" = 1 ]; then
+		PATH=$caller_path
+		export PATH
+	else
+		unset PATH 2>/dev/null || :
+	fi
+	# Restore the caller umask so the launched skill's own file writes are not
+	# forced to the tightened 077 custody mask.
+	umask "$caller_umask"
 }
 
 # --- platform custody (R9) ----------------------------------------------------
@@ -1055,6 +1073,36 @@ cmd_run() {
 		diag "skill profile $RUNTIME_SKILL_PROFILE does not match lock profile $RUNTIME_LOCK_PROFILE"
 		die 23 LOCK_INVALID '[]' false 'Regenerate the plugin payload; the skill profile does not match the runtime lock.'
 	fi
+	if [ -n "${RUNTIME_SKILL_COMPILED_TARGET:-}" ]; then
+		if [ "$platform" != "$RUNTIME_SKILL_COMPILED_TARGET" ]; then
+			die 21 COMPILED_UNSUPPORTED_TARGET '[]' false 'Install a compiled payload qualified for this platform; no runtime download fallback is available.'
+		fi
+		if ! command -v runtime_inventory_select_compiled >/dev/null 2>&1 || ! runtime_inventory_select_compiled "$skill"; then
+			die 23 COMPILED_UNMAPPED '[]' false 'Rebuild or reinstall the compiled plugin payload.'
+		fi
+		case "$RUNTIME_COMPILED_PATH" in
+		bin/darwin-arm64/*) ;;
+		*) die 23 COMPILED_INVALID '[]' false 'Rebuild or reinstall the compiled plugin payload.' ;;
+		esac
+		_compiled_name=${RUNTIME_COMPILED_PATH#bin/darwin-arm64/}
+		case "$_compiled_name" in
+		'' | *[!a-z0-9-]*) die 23 COMPILED_INVALID '[]' false 'Rebuild or reinstall the compiled plugin payload.' ;;
+		esac
+		if [ "$RUNTIME_COMPILED_TARGET" != "$platform" ]; then
+			die 23 COMPILED_WRONG_TARGET '[]' false 'Rebuild or reinstall the compiled payload for this platform.'
+		fi
+		_compiled_path=$plugin_root/$RUNTIME_COMPILED_PATH
+		if [ -L "$plugin_root/bin" ] || [ -L "$plugin_root/bin/darwin-arm64" ] || [ -L "$_compiled_path" ] || [ ! -f "$_compiled_path" ] || [ ! -x "$_compiled_path" ]; then
+			die 23 COMPILED_UNAVAILABLE '[]' false 'Rebuild or reinstall the missing or non-executable compiled payload.'
+		fi
+		if [ "$(file_size "$_compiled_path")" != "$RUNTIME_COMPILED_BYTES" ] || [ "$(sha_file "$_compiled_path")" != "$RUNTIME_COMPILED_SHA256" ]; then
+			die 23 COMPILED_MISMATCH '[]' false 'Rebuild or reinstall the corrupt compiled payload.'
+		fi
+		sanitize_bun_environment
+		restore_caller_environment
+		exec "$_compiled_path" "$skill" "$@"
+	fi
+
 	runtime_inventory_select_bundle "$skill" || {
 		diag "skill has no bundle mapping in the inventory: $skill"
 		die 23 BUNDLE_UNMAPPED '[]' false 'Rebuild the plugin payload; this skill has no bundle inventory mapping.'
@@ -1109,21 +1157,7 @@ cmd_run() {
 		diag 'verified runtime reported an unexpected version before launch'
 		die 23 EXECUTABLE_VERSION_MISMATCH '[]' false 'Run runtime-exec repair --apply after approval to replace the unusable cached runtime.'
 	fi
-	if [ "$caller_lc_all_set" = 1 ]; then
-		LC_ALL=$caller_lc_all
-		export LC_ALL
-	else
-		unset LC_ALL 2>/dev/null || :
-	fi
-	if [ "$caller_path_set" = 1 ]; then
-		PATH=$caller_path
-		export PATH
-	else
-		unset PATH 2>/dev/null || :
-	fi
-	# Restore the caller umask so the launched skill's own file writes are not
-	# forced to the tightened 077 custody mask.
-	umask "$caller_umask"
+	restore_caller_environment
 	exec "$blob_path" --config=/dev/null --no-install --env-file=/dev/null "$bundle_path" "$@"
 }
 

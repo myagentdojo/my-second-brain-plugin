@@ -5,7 +5,7 @@ import { join, resolve } from "node:path"
 import { copyPluginPayload, payloadInventorySha256 } from "./plugin-files"
 import { loadPluginConfig } from "./plugin-config"
 
-type CodexDevelopmentOperation = "check" | "install"
+type CodexDevelopmentOperation = "check" | "install" | "refresh"
 type CodexDevelopmentMode = "inspect" | "preview" | "apply"
 export type CodexDevelopmentErrorAction = "FIX_INPUT" | "INSPECT_STATE" | "ESCALATE"
 type CodexDevelopmentErrorFamily = "conflict" | "protocol" | "runtime" | "verification" | "internal"
@@ -146,6 +146,7 @@ function codexErrorHint(code: string): {
 		case "CODEX_DEVELOPMENT_IDENTITY_AMBIGUOUS":
 		case "CODEX_DEVELOPMENT_MARKETPLACE_MISMATCH":
 		case "CODEX_DEVELOPMENT_STATE_INCOMPLETE":
+		case "CODEX_DEVELOPMENT_REFRESH_NOT_OWNED":
 			return { action: "INSPECT_STATE", errorFamily: "conflict" }
 		default:
 			return { action: "ESCALATE", errorFamily: "internal" }
@@ -214,7 +215,7 @@ function prepareCandidate(repositoryRoot: string): PreparedCodexDevelopmentCandi
 	mkdirSync(sourcePath, { recursive: true })
 	const inventory = copyPluginPayload(repositoryRoot, sourcePath)
 	const sourcePayloadHash = payloadInventorySha256(sourcePath, inventory)
-	const version = `${pluginConfig.version}+codex.local-${sourcePayloadHash.slice(0, 12)}`
+	const version = `${pluginConfig.version}+codex.dev`
 
 	const manifestPath = join(sourcePath, ".codex-plugin", "plugin.json")
 	const manifest = JSON.parse(readFileSync(manifestPath, "utf8"))
@@ -348,7 +349,6 @@ function operationPlan(
 	current: CodexDevelopmentCurrent,
 	candidate: PreparedCodexDevelopmentCandidate,
 ): CodexDevelopmentPlanOperation[] {
-	if (current.candidateCurrent && !current.supersededIdentityPresent) return []
 	const operations: CodexDevelopmentPlanOperation[] = []
 	if (current.development === "absent") {
 		operations.push({
@@ -462,10 +462,23 @@ export function runCodexDevelopmentInstallation(
 		return baseResult(input, candidate, current, "inspect", "ready", {
 			plan: commands,
 			nextAction:
-				commands.length === 0
-					? "The exact Codex Development Installation is current. Start a fresh Codex task to load it."
-					: "Run `bun run dev -- codex install --json --no-input --no-launch` to preview the exact staged reinstall.",
+				current.candidateCurrent && !current.supersededIdentityPresent
+					? "Run `bun run dev -- codex refresh --json --no-input` to replace the stable development cache with this payload."
+					: "Run `bun run dev -- codex install --json --no-input --no-launch` to preview this checkout ownership change.",
 		})
+	}
+	if (
+		input.operation === "refresh" &&
+		(!current.candidateCurrent || current.supersededIdentityPresent)
+	) {
+		throw new CodexDevelopmentInstallationError(
+			"CODEX_DEVELOPMENT_REFRESH_NOT_OWNED",
+			"This checkout does not own the exact enabled Codex Development Installation",
+			{
+				nextAction:
+					"Run the Codex install preview and approve its candidate before using refresh.",
+			},
+		)
 	}
 	if (commands.length === 0) {
 		return baseResult(input, candidate, current, input.apply ? "apply" : "preview", "no_op", {
@@ -478,7 +491,10 @@ export function runCodexDevelopmentInstallation(
 			nextAction: `Review this exact plan, then run \`bun run dev -- codex install --apply --candidate-hash ${candidate.candidateHash} --json --no-input --no-launch\`.`,
 		})
 	}
-	if (input.expectedCandidateHash !== candidate.candidateHash) {
+	if (
+		input.operation === "install" &&
+		input.expectedCandidateHash !== candidate.candidateHash
+	) {
 		throw new CodexDevelopmentInstallationError(
 			"CODEX_DEVELOPMENT_CANDIDATE_CHANGED",
 			"The staged Plugin Payload or operation plan differs from the approved preview",
@@ -509,7 +525,10 @@ export function runCodexDevelopmentInstallation(
 			changed: true,
 			plan: commands,
 			sideEffects,
-			nextAction: "Start a fresh Codex task so the harness loads the verified Development Installation.",
+			nextAction:
+				input.operation === "refresh"
+					? "Invoke the changed skill in the current Codex task to confirm the stable development cache was reloaded."
+					: "Start one fresh Codex task to bind the stable development path, then invoke the installed skill to confirm native discovery and execution.",
 		})
 	} catch (error) {
 		if (error instanceof CodexDevelopmentInstallationError && error.changed) throw error

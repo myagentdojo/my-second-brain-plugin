@@ -158,6 +158,7 @@ test("Agent Browser has the approved lifecycle workspace and generated activatio
 		runtimeProfile: "bun",
 		workspace: "packages/agent-browser",
 		launcher: "warm-browser",
+		compiledTarget: "darwin-arm64",
 	})
 	const packageText = readFileSync(join(packageRoot, "package.json"), "utf8")
 	expect(packageText).not.toContain("bin")

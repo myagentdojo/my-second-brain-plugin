@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "bundles": {
     "agent-browser": {
-      "path": "runtime/warm-browser-b7439fade40f7851.js",
-      "bytes": 140848,
-      "sha256": "b7439fade40f7851a0785a972e0c35b0a70212474ee7197361807770211cc014"
+      "path": "runtime/warm-browser-bf336f2c1e90afb6.js",
+      "bytes": 141850,
+      "sha256": "bf336f2c1e90afb634524b64457b2144c9b0ba1013a638f3bf317bb3502716c7"
     },
     "frontier-runner": {
       "path": "runtime/frontier-runner-659b5dedecb84722.js",
@@ -31,5 +31,19 @@
     "path": "THIRD-PARTY-NOTICES.md",
     "bytes": 15210,
     "sha256": "5d69d5ddb5926faa30abc0425b718fa9ff2f578d99863aaf1bb0dbccaf9cc526"
+  },
+  "compiled": {
+    "path": "bin/darwin-arm64/my-second-brain",
+    "target": "darwin-arm64",
+    "compilerVersion": "1.4.0",
+    "skills": [
+      "agent-browser",
+      "frontier-runner",
+      "hello-world",
+      "skill-a",
+      "skill-b"
+    ],
+    "bytes": 64174706,
+    "sha256": "fd4e8e80734413a0b3e48294a9edada84c3b4e0dabeb6dd16e241a35eed1494c"
   }
 }

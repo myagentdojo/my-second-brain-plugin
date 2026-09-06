@@ -22,6 +22,11 @@ import {
 	interpretSanitizedCredentialDetail,
 	interpretSanitizedCredentialList,
 } from "./credential-match"
+import {
+	currentCompiledSkill,
+	privateEntryCommand,
+	privateEntryPath,
+} from "./private-entry"
 import { successfulVaultReplyText } from "./credential-reading"
 import type { CredentialFieldKind } from "./field-kind"
 
@@ -276,7 +281,12 @@ export async function deliverPrivately(input: {
 	const vault = configuration.vault
 	const wrapper = verifiedCredentialFile(credentialWrapperPath, "wrapper")
 	if (wrapper === undefined) return { kind: "wrapper_unavailable" }
-	const entryArgument = process.argv[1]
+	const compiledSkill = currentCompiledSkill()
+	const entryArgument = privateEntryPath({
+		executable: process.execPath,
+		invocationEntry: process.argv[1],
+		compiledSkill,
+	})
 	const entry =
 		entryArgument === undefined ? undefined : verifiedCredentialFile(entryArgument, "entry")
 	if (entry === undefined) return { kind: "unverified", touchedPage: false }
@@ -336,35 +346,34 @@ export async function deliverPrivately(input: {
 		return { kind: "vault_unverified" }
 	}
 	const reference = `op://${segments.join("/")}`
-	// The child re-enters through the same entry this process was started from,
-	// so one bundle still ships and the checked path is the one used.
-	// Everything in this list is non-secret. The runtime flags keep the child
-	// from reading any configuration or environment file and from installing
-	// anything on its own account.
-	const command = [
-		process.execPath,
-		"--config=/dev/null",
-		"--no-install",
-		"--env-file=/dev/null",
+	// The source bundle re-enters through Bun; the compiled process re-enters
+	// through the same selected-entry executable. Everything in this list is
+	// non-secret. Interpreter flags or compile-time controls keep the child from
+	// reading configuration and environment files or installing dependencies.
+	const command = privateEntryCommand({
+		executable: process.execPath,
 		entry,
-		privateDeliveryChildArgument,
-		"--port",
-		String(input.port),
-		"--target",
-		input.targetId,
-		"--node",
-		String(input.backendNodeId),
-		"--frame",
-		input.basis.frameId,
-		"--loader",
-		input.basis.loaderId,
-		"--url",
-		input.basis.url,
-		"--origin",
-		input.origin,
-		"--field",
-		input.field,
-	]
+		compiledSkill,
+		argumentList: [
+			privateDeliveryChildArgument,
+			"--port",
+			String(input.port),
+			"--target",
+			input.targetId,
+			"--node",
+			String(input.backendNodeId),
+			"--frame",
+			input.basis.frameId,
+			"--loader",
+			input.basis.loaderId,
+			"--url",
+			input.basis.url,
+			"--origin",
+			input.origin,
+			"--field",
+			input.field,
+		],
+	})
 	return interpretDelivery(
 		await runPrivateDelivery({ wrapper, reference, command }),
 	)

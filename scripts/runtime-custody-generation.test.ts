@@ -79,25 +79,30 @@ test("runtime custody sources generate one thin launcher and checked shell proje
 				runtimeProfile: "bun",
 				workspace: "packages/agent-browser",
 				launcher: "warm-browser",
+				compiledTarget: "darwin-arm64",
 			},
 			"frontier-runner": {
 				entry: "runtime/frontier-runner.js",
 				runtimeProfile: "bun",
 				workspace: "packages/frontier-runner",
+				compiledTarget: "darwin-arm64",
 			},
 			"hello-world": {
 				entry: "runtime/hello-world.js",
 				runtimeProfile: "bun",
+				compiledTarget: "darwin-arm64",
 			},
 			"skill-a": {
 				entry: "runtime/skill-a.js",
 				runtimeProfile: "bun",
 				workspace: "packages/skill-a",
+				compiledTarget: "darwin-arm64",
 			},
 			"skill-b": {
 				entry: "runtime/skill-b.js",
 				runtimeProfile: "bun",
 				workspace: "packages/skill-b",
+				compiledTarget: "darwin-arm64",
 			},
 		},
 	})
@@ -160,7 +165,8 @@ test("runtime custody sources generate one thin launcher and checked shell proje
 	expect(generated.filter((file) => file.path.startsWith("plugin/bin/")).length).toBe(5)
 	const launcherNames = readdirSync(
 		fileURLToPath(new URL("../plugin/bin", import.meta.url)),
-	).sort()
+		{ withFileTypes: true },
+	).filter((entry) => entry.isFile()).map((entry) => entry.name).sort()
 	expect(launcherNames).toEqual([
 		"frontier-runner",
 		"hello-world",

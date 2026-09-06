@@ -190,7 +190,7 @@ if (JSON.stringify(packagedSkills) !== JSON.stringify(packagedSkillInventory.map
 	throw new Error("package skill inventory does not preserve the exact portable and model-only closure")
 }
 const packagedLaunchers = entries
-	.filter((entry) => entry.startsWith(`${packageName}/bin/`) && !entry.endsWith("/"))
+	.filter((entry) => entry.startsWith(`${packageName}/bin/`) && !entry.endsWith("/") && !entry.slice(`${packageName}/bin/`.length).includes("/"))
 	.map((entry) => entry.slice(`${packageName}/bin/`.length))
 	.sort(compareCodeUnits)
 // The launcher closure follows the skill catalog. Freezing a list from a past
@@ -224,13 +224,42 @@ for (const [surfaceName, surface] of [
 }
 
 const coldXdg = join(extractedRoot, "cold-xdg")
-for (const skillId of ["frontier-runner", "hello-world", "skill-a", "skill-b"]) {
-	const launcher = join(installedRoot, "bin", skillId)
+for (const skillId of Object.keys(catalog.skills).sort(compareCodeUnits)) {
+	const skill = catalog.skills[skillId] as { launcher?: string; compiledTarget?: string }
+	const launcher = join(installedRoot, "bin", skill.launcher ?? skillId)
 	const launcherText = readFileSync(launcher, "utf8")
 	if (!launcherText.includes(`runtime/runtime-exec\" run ${skillId} --`)) {
 		throw new Error(`packaged ${skillId} launcher is not bound to runtime custody`)
 	}
-	const missing = runPackaged(launcher, [], coldXdg)
+	const arguments_ =
+		skillId === "agent-browser"
+			? ["help", "--run-id", "packaged-browser-help"]
+			: skillId === "frontier-runner"
+				? ["--help"]
+				: skillId === "hello-world"
+					? ["hello", "--json"]
+					: []
+	const missing = runPackaged(launcher, arguments_, coldXdg)
+	if (skill.compiledTarget) {
+		if (missing.exitCode !== 0 || missing.stderr !== "") {
+			throw new Error(`packaged compiled ${skillId} failed cold execution`)
+		}
+		if (skillId === "frontier-runner") {
+			if (!missing.stdout.includes("Usage:\n  frontier-runner run")) {
+				throw new Error("packaged compiled frontier-runner returned the wrong help")
+			}
+		} else {
+			const result = JSON.parse(missing.stdout)
+			if (
+				(skillId === "agent-browser" && result.command !== "help") ||
+				(skillId === "hello-world" && result.command !== "hello") ||
+				((skillId === "skill-a" || skillId === "skill-b") && result.skill !== skillId)
+			) {
+				throw new Error(`packaged compiled ${skillId} returned the wrong result`)
+			}
+		}
+		continue
+	}
 	if (missing.exitCode !== 20) throw new Error(`packaged ${skillId} did not return BUN_MISSING`)
 	const control = JSON.parse(missing.stdout)
 	if (control.code !== "BUN_MISSING" || !Array.isArray(control.sideEffects) || control.sideEffects.length !== 0) {

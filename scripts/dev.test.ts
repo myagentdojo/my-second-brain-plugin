@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test"
+import { fakeCodexProfile, type FakeCodexPlugin } from "./test-support/codex-profile"
 import { createHash } from "node:crypto"
 import {
 	chmodSync,
@@ -273,13 +274,13 @@ test("dev:claude is the build-only watch shortcut", () => {
 	expect(packageJson.scripts["dev:claude"]).toBe("bun run scripts/dev.ts claude watch")
 })
 
-test("dev:codex is the preview-only shortcut", () => {
+test("dev:codex is the established-installation refresh shortcut", () => {
 	const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8"))
 
-	expect(packageJson.scripts["dev:codex"]).toBe("bun run scripts/dev.ts codex install")
+	expect(packageJson.scripts["dev:codex"]).toBe("bun run scripts/dev.ts codex refresh")
 })
 
-test("Codex dev-mode reference follows the candidate-bound lifecycle", () => {
+test("Codex dev-mode reference separates first approval from automatic refresh", () => {
 	const reference = readFileSync(
 		join(root, "plugin/skills/dev-mode/references/codex.md"),
 		"utf8",
@@ -290,150 +291,13 @@ test("Codex dev-mode reference follows the candidate-bound lifecycle", () => {
 	expect(reference).toContain(
 		"bun run dev -- codex install --apply --candidate-hash <sha256> --json --no-input --no-launch",
 	)
+	expect(reference).toContain("bun run dev -- codex refresh --json --no-input")
+	expect(reference).toContain("Do not ask for another approval")
+	expect(reference).toContain("start one fresh Codex task")
 	expect(reference).not.toContain("bun run dev -- codex --dry-run")
 	expect(reference).not.toContain("bun run dev -- codex --check")
 	expect(reference).not.toContain("bun run dev -- codex --no-launch")
 })
-
-interface FakeCodexPlugin {
-	pluginId: string
-	name: string
-	marketplaceName: string
-	version: string
-	installed: boolean
-	enabled: boolean
-	source: { source: string; path: string }
-	marketplaceSource: { sourceType: string; source: string }
-}
-
-interface FakeCodexState {
-	marketplaces: Array<{ name: string; root: string }>
-	plugins: FakeCodexPlugin[]
-	commands: string[]
-	skipInstall?: boolean
-	failCommands?: string[]
-	failAfterCommands?: string[]
-	invalidJsonCommands?: string[]
-}
-
-function fakeCodexProfile(
-	repositoryRoot: string,
-	options: {
-		marketplaceRoot?: string | null
-		plugins?: FakeCodexPlugin[]
-		skipInstall?: boolean
-		failCommands?: string[]
-		failAfterCommands?: string[]
-		invalidJsonCommands?: string[]
-	} = {},
-) {
-	const temporaryRoot = mkdtempSync(join(tmpdir(), "codex-development-profile-"))
-	const binaryRoot = join(temporaryRoot, "bin")
-	const statePath = join(temporaryRoot, "state.json")
-	const marketplaceRoot = join(repositoryRoot, ".dev", "codex-marketplace")
-	mkdirSync(binaryRoot, { recursive: true })
-	writeExecutable(
-		join(binaryRoot, "bun"),
-		`#!/bin/sh
-if [ "$1" = "run" ] && [ "$2" = "build" ]; then exit 0; fi
-exec '${process.execPath}' "$@"
-`,
-	)
-	writeExecutable(
-		join(binaryRoot, "codex"),
-		`#!/usr/bin/env bun
-import { readFileSync, writeFileSync } from "node:fs"
-import { join } from "node:path"
-const statePath = process.env.CODEX_TEST_STATE
-const state = JSON.parse(readFileSync(statePath, "utf8"))
-const args = process.argv.slice(2)
-const command = args.join(" ")
-state.commands.push(command)
-const save = () => writeFileSync(statePath, JSON.stringify(state, null, 2) + "\\n")
-const completeMutation = (output) => {
-  save()
-  if (state.failAfterCommands?.includes(command)) {
-    console.error("injected Codex post-mutation failure")
-    process.exit(70)
-  }
-  console.log(JSON.stringify(output))
-}
-if (state.failCommands?.includes(command)) {
-  save()
-  console.error("injected Codex failure")
-  process.exit(70)
-} else if (state.invalidJsonCommands?.includes(command)) {
-  save()
-  console.log("not JSON")
-} else if (command === "plugin marketplace list --json") {
-  save()
-  console.log(JSON.stringify({ marketplaces: state.marketplaces }))
-} else if (command === "plugin list --json") {
-  save()
-  console.log(JSON.stringify({ installed: state.plugins, available: [] }))
-} else if (args.slice(0, 3).join(" ") === "plugin marketplace add") {
-	const root = args[3]
-	state.marketplaces = state.marketplaces.filter((entry) => entry.name !== "my-second-brain-dev")
-	state.marketplaces.push({ name: "my-second-brain-dev", root })
-	completeMutation({ marketplaceName: "my-second-brain-dev", installedRoot: root })
-} else if (args[0] === "plugin" && args[1] === "add") {
-  if (!state.skipInstall) {
-    const sourcePath = join(process.env.CODEX_TEST_MARKETPLACE_ROOT, "plugins", "my-second-brain-dev")
-    const manifest = JSON.parse(readFileSync(join(sourcePath, ".codex-plugin", "plugin.json"), "utf8"))
-    state.plugins = state.plugins.filter((entry) => entry.pluginId !== args[2])
-    state.plugins.push({
-      pluginId: args[2],
-      name: "my-second-brain-dev",
-      marketplaceName: "my-second-brain-dev",
-      version: manifest.version,
-      installed: true,
-      enabled: true,
-      source: { source: "local", path: sourcePath },
-		marketplaceSource: { sourceType: "local", source: process.env.CODEX_TEST_MARKETPLACE_ROOT },
-	})
-	}
-	completeMutation({ ok: true })
-} else if (args[0] === "plugin" && args[1] === "remove") {
-	state.plugins = state.plugins.filter((entry) => entry.pluginId !== args[2])
-	completeMutation({ ok: true })
-} else {
-  save()
-  console.error("unexpected Codex command: " + command)
-  process.exit(99)
-}
-`,
-	)
-	const state: FakeCodexState = {
-		marketplaces:
-			options.marketplaceRoot === null
-				? []
-				: [
-						{
-							name: "my-second-brain-dev",
-							root: options.marketplaceRoot ?? marketplaceRoot,
-						},
-					],
-		plugins: options.plugins ?? [],
-		commands: [],
-		skipInstall: options.skipInstall,
-		failCommands: options.failCommands,
-		failAfterCommands: options.failAfterCommands,
-		invalidJsonCommands: options.invalidJsonCommands,
-	}
-	writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`)
-	return {
-		environment: {
-			...process.env,
-			PATH: `${binaryRoot}:${process.env.PATH ?? ""}`,
-			CODEX_TEST_STATE: statePath,
-			CODEX_TEST_MARKETPLACE_ROOT: marketplaceRoot,
-		},
-		marketplaceRoot,
-		readState: () => JSON.parse(readFileSync(statePath, "utf8")) as FakeCodexState,
-		writeState: (state: FakeCodexState) => writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`),
-		cleanup: () => rmSync(temporaryRoot, { recursive: true, force: true }),
-	}
-}
 
 function staleCodexPlugin(repositoryRoot: string, pluginId = "my-second-brain-dev@my-second-brain-dev") {
 	const marketplaceRoot = join(repositoryRoot, ".dev", "codex-marketplace")
@@ -580,6 +444,7 @@ test("Codex apply installs and verifies the exact previewed candidate", () => {
 			current: { development: "installed", enabled: true, candidateCurrent: true },
 			sideEffects: ["development_marketplace_added", "development_plugin_installed"],
 		})
+		expect(appliedOutput.nextAction).toContain("Start one fresh Codex task")
 		const commands = profile.readState().commands
 		expect(commands).toContain(`plugin marketplace add ${profile.marketplaceRoot}`)
 		expect(commands).toContain("plugin add my-second-brain-dev@my-second-brain-dev --json")
@@ -594,6 +459,93 @@ test("Codex apply installs and verifies the exact previewed candidate", () => {
 				.map((command) => `codex ${command}`),
 		).toEqual(appliedOutput.plan)
 		expect(commands.slice(-2)).toEqual([
+			"plugin marketplace list --json",
+			"plugin list --json",
+		])
+	} finally {
+		profile.cleanup()
+		rmSync(repositoryRoot, { recursive: true, force: true })
+	}
+})
+
+test("Codex refresh keeps one development version while binding each payload", () => {
+	const repositoryRoot = isolatedRepository("codex-development-stable-version-")
+	const profile = fakeCodexProfile(repositoryRoot, { marketplaceRoot: null })
+	const skillPath = join(repositoryRoot, "plugin", "skills", "skill-a", "SKILL.md")
+	try {
+		const firstPreview = run(
+			["codex", "install", "--json", "--no-input", "--no-launch"],
+			profile.environment,
+			repositoryRoot,
+		)
+		expect(firstPreview.exitCode, firstPreview.stderr.toString()).toBe(0)
+		const first = jsonOutput(firstPreview)
+		expect(first.candidate.version).toBe(`${pluginVersion}+codex.dev`)
+
+		const firstApply = run(
+			[
+				"codex",
+				"install",
+				"--apply",
+				"--candidate-hash",
+				first.candidate.candidateHash,
+				"--json",
+				"--no-input",
+				"--no-launch",
+			],
+			profile.environment,
+			repositoryRoot,
+		)
+		expect(firstApply.exitCode, firstApply.stderr.toString()).toBe(0)
+
+		writeFileSync(skillPath, `${readFileSync(skillPath, "utf8")}\nStable refresh proof.\n`)
+		const refreshed = run(
+			["codex", "refresh", "--json", "--no-input"],
+			profile.environment,
+			repositoryRoot,
+		)
+		expect(refreshed.exitCode, refreshed.stderr.toString()).toBe(0)
+		const second = jsonOutput(refreshed)
+		expect(second.candidate.version).toBe(first.candidate.version)
+		expect(second.candidate.payloadHash).not.toBe(first.candidate.payloadHash)
+		expect(second.candidate.candidateHash).not.toBe(first.candidate.candidateHash)
+		expect(second).toMatchObject({
+			operation: "refresh",
+			mode: "apply",
+			changed: true,
+			transactionState: "installed",
+			plan: ["codex plugin add my-second-brain-dev@my-second-brain-dev --json"],
+			sideEffects: ["development_plugin_installed"],
+		})
+	} finally {
+		profile.cleanup()
+		rmSync(repositoryRoot, { recursive: true, force: true })
+	}
+})
+
+test("Codex refresh refuses to claim an unowned development installation", () => {
+	const repositoryRoot = isolatedRepository("codex-development-refresh-unowned-")
+	const profile = fakeCodexProfile(repositoryRoot, { marketplaceRoot: null })
+	try {
+		const result = run(
+			["codex", "refresh", "--json", "--no-input"],
+			profile.environment,
+			repositoryRoot,
+		)
+
+		expect(result.exitCode).toBe(1)
+		expect(jsonOutput(result)).toMatchObject({
+			operation: "refresh",
+			mode: "apply",
+			changed: false,
+			transactionState: "blocked",
+			error: {
+				code: "CODEX_DEVELOPMENT_REFRESH_NOT_OWNED",
+				action: "INSPECT_STATE",
+				errorFamily: "conflict",
+			},
+		})
+		expect(profile.readState().commands).toEqual([
 			"plugin marketplace list --json",
 			"plugin list --json",
 		])
