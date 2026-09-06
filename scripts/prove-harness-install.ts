@@ -1458,6 +1458,47 @@ function proveNativeRuntimeJourney(
 	mkdirSync(cacheRoot, { recursive: true, mode: 0o700 })
 	const launcher = join(pluginRoot, "bin", "skill-b")
 	const engine = join(pluginRoot, "runtime", "runtime-exec")
+	const bundleInventoryPath = join(pluginRoot, "runtime", "bundle-inventory.json")
+	const bundleInventoryBytes = readFileSync(bundleInventoryPath)
+	const bundleInventory = JSON.parse(bundleInventoryBytes.toString()) as {
+		compiled?: { target?: unknown; skills?: unknown }
+	}
+	const closure = runtimeClosureEvidence(pluginRoot)
+	const common = {
+		kind: "installed-payload-mechanics" as const,
+		client,
+		target,
+		...identity,
+		version: closure.version,
+		payloadHash: closure.payloadHash,
+		bundleInventorySha256: createHash("sha256").update(bundleInventoryBytes).digest("hex"),
+		fixtureAcknowledged: true as const,
+		humanApprovalClaimed: false as const,
+		agentWorkflowProved: false as const,
+	}
+	if (
+		bundleInventory.compiled?.target === target &&
+		Array.isArray(bundleInventory.compiled.skills) &&
+		bundleInventory.compiled.skills.includes("skill-b")
+	) {
+		const run = runInstalledRuntime(pluginRoot, cacheRoot, [launcher])
+		if (run.exitCode !== 0 || run.stderr.toString() !== "") {
+			throw new Error(`${client} compiled cold run failed: ${run.stderr}`)
+		}
+		const result = JSON.parse(run.stdout.toString()) as Record<string, unknown>
+		if (result.skill !== "skill-b" || result.cjsDependencyDuration !== "2 hours") {
+			throw new Error(`${client} compiled cold run returned the wrong dependency proof`)
+		}
+		if (readdirSync(cacheRoot).length !== 0) {
+			throw new Error(`${client} compiled cold run mutated custody state`)
+		}
+		return {
+			...common,
+			approvalPrompt: "not required for compiled payload",
+			journey: ["compiled-launcher"],
+		}
+	}
+
 	const missing = requireProofControlEnvelope(
 		`${client} cold run`,
 		runInstalledRuntime(pluginRoot, cacheRoot, [launcher]),
@@ -1529,21 +1570,9 @@ function proveNativeRuntimeJourney(
 		)
 	}
 
-	const closure = runtimeClosureEvidence(pluginRoot)
 	return {
-		kind: "installed-payload-mechanics",
-		client,
-		target,
-		...identity,
-		version: closure.version,
-		payloadHash: closure.payloadHash,
-		bundleInventorySha256: createHash("sha256")
-			.update(readFileSync(join(pluginRoot, "runtime", "bundle-inventory.json")))
-			.digest("hex"),
+		...common,
 		approvalPrompt: preview.nextAction,
-		fixtureAcknowledged: true,
-		humanApprovalClaimed: false,
-		agentWorkflowProved: false,
 		journey,
 	}
 }

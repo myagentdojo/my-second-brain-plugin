@@ -182,16 +182,77 @@ export function proveRuntimePlatform(options: PlatformProofOptions): Record<stri
 		if (checksums.payloadInventorySha256 !== payloadDigest(pluginRoot)) {
 			throw new Error("extracted payload inventory does not match checksum metadata")
 		}
-		if (
-			checksums.bundleInventorySha256 !==
-			sha256(readFileSync(join(pluginRoot, "runtime", "bundle-inventory.json")))
-		) {
+		const bundleInventoryBytes = readFileSync(
+			join(pluginRoot, "runtime", "bundle-inventory.json"),
+		)
+		if (checksums.bundleInventorySha256 !== sha256(bundleInventoryBytes)) {
 			throw new Error("extracted bundle inventory does not match checksum metadata")
+		}
+		const bundleInventory = JSON.parse(bundleInventoryBytes.toString()) as {
+			compiled?: {
+				target?: unknown
+				compilerVersion?: unknown
+				skills?: unknown
+				sha256?: unknown
+			}
 		}
 
 		const skillA = join(pluginRoot, "bin", "skill-a")
 		const skillB = join(pluginRoot, "bin", "skill-b")
 		const engine = join(pluginRoot, "runtime", "runtime-exec")
+		if (
+			bundleInventory.compiled?.target === options.target &&
+			Array.isArray(bundleInventory.compiled.skills) &&
+			bundleInventory.compiled.skills.includes("skill-a") &&
+			bundleInventory.compiled.skills.includes("skill-b")
+		) {
+			const first = runLauncher(skillA, [], pluginRoot, homeRoot, cacheRoot, true)
+			const warm = runLauncher(skillB, [], pluginRoot, homeRoot, cacheRoot, true)
+			if (first.exitCode !== 0 || first.stderr.toString() !== "") {
+				throw new Error(`compiled skill-a failed: ${first.stderr}`)
+			}
+			if (warm.exitCode !== 0 || warm.stderr.toString() !== "") {
+				throw new Error(`compiled skill-b failed: ${warm.stderr}`)
+			}
+			const firstResult = JSON.parse(first.stdout.toString())
+			const warmResult = JSON.parse(warm.stdout.toString())
+			if (firstResult.skill !== "skill-a" || firstResult.esmDependency !== "skillAOfflineProof") {
+				throw new Error("compiled skill-a returned the wrong packaged dependency proof")
+			}
+			if (warmResult.skill !== "skill-b" || warmResult.cjsDependencyDuration !== "2 hours") {
+				throw new Error("compiled skill-b returned the wrong packaged dependency proof")
+			}
+			if (readdirSync(cacheRoot).length !== 0) {
+				throw new Error("compiled skill runs mutated the isolated cache")
+			}
+			if (
+				typeof bundleInventory.compiled.compilerVersion !== "string" ||
+				typeof bundleInventory.compiled.sha256 !== "string"
+			) {
+				throw new Error("compiled runtime inventory omitted its exact identity")
+			}
+			return {
+				ok: true,
+				client: "platform-ci",
+				target: options.target,
+				repository: checksums.repository,
+				sourceCommit: checksums.sourceCommit,
+				pluginVersion: checksums.version,
+				archiveSha256: checksums.archiveSha256,
+				runtimeLockSha256: checksums.runtimeLockSha256,
+				bundleInventorySha256: checksums.bundleInventorySha256,
+				payloadInventorySha256: checksums.payloadInventorySha256,
+				runtime: {
+					kind: "compiled",
+					version: bundleInventory.compiled.compilerVersion,
+					executableSha256: bundleInventory.compiled.sha256,
+				},
+				journey: ["compiled-skill-a", "compiled-skill-b"],
+				fixtureAcknowledged: options.fixtureAcknowledged,
+				networkDeniedForSkillRuns: true,
+			}
+		}
+
 		const missing = requireProofControlEnvelope(
 			"cold run",
 			runLauncher(skillA, [], pluginRoot, homeRoot, cacheRoot, false),
