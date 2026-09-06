@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.1](https://github.com/myagentdojo/my-second-brain-plugin/compare/v0.5.0...v0.5.1) (2026-09-06)
+
+
+### Bug Fixes
+
+* **packaging:** adopt agent plugin kit ([#60](https://github.com/myagentdojo/my-second-brain-plugin/issues/60)) ([cb4f755](https://github.com/myagentdojo/my-second-brain-plugin/commit/cb4f75532f3c52e22782b1591db2c1fe63af757a))
+* **proof:** isolate canary identity and Codex home ([#66](https://github.com/myagentdojo/my-second-brain-plugin/issues/66)) ([c4bef9f](https://github.com/myagentdojo/my-second-brain-plugin/commit/c4bef9f2386bf00844f2b12442f9782045e6ba22))
+
 ## [0.5.0](https://github.com/myagentdojo/my-second-brain-plugin/compare/v0.4.0...v0.5.0) (2026-08-30)
 
 
