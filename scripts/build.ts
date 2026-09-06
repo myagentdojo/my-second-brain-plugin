@@ -1473,11 +1473,6 @@ function compileAdmittedSkills(
 		throw new Error(
 			`compiled build requires Bun ${version}; received ${Bun.version}`,
 		)
-	if (process.platform !== "darwin" || process.arch !== "arm64") {
-		throw new Error(
-			"compiled build requires the qualified darwin-arm64 contributor host",
-		)
-	}
 	const directory = join(staging, "compiled")
 	mkdirSync(directory)
 	const cases = selected.map((id) => {
