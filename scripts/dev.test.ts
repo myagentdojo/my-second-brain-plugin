@@ -274,13 +274,13 @@ test("dev:claude is the build-only watch shortcut", () => {
 	expect(packageJson.scripts["dev:claude"]).toBe("bun run scripts/dev.ts claude watch")
 })
 
-test("dev:codex is the preview-only shortcut", () => {
+test("dev:codex is the established-installation refresh shortcut", () => {
 	const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8"))
 
-	expect(packageJson.scripts["dev:codex"]).toBe("bun run scripts/dev.ts codex install")
+	expect(packageJson.scripts["dev:codex"]).toBe("bun run scripts/dev.ts codex refresh")
 })
 
-test("Codex dev-mode reference follows the candidate-bound lifecycle", () => {
+test("Codex dev-mode reference separates first approval from automatic refresh", () => {
 	const reference = readFileSync(
 		join(root, "plugin/skills/dev-mode/references/codex.md"),
 		"utf8",
@@ -291,6 +291,9 @@ test("Codex dev-mode reference follows the candidate-bound lifecycle", () => {
 	expect(reference).toContain(
 		"bun run dev -- codex install --apply --candidate-hash <sha256> --json --no-input --no-launch",
 	)
+	expect(reference).toContain("bun run dev -- codex refresh --json --no-input")
+	expect(reference).toContain("Do not ask for another approval")
+	expect(reference).toContain("start one fresh Codex task")
 	expect(reference).not.toContain("bun run dev -- codex --dry-run")
 	expect(reference).not.toContain("bun run dev -- codex --check")
 	expect(reference).not.toContain("bun run dev -- codex --no-launch")
@@ -441,6 +444,7 @@ test("Codex apply installs and verifies the exact previewed candidate", () => {
 			current: { development: "installed", enabled: true, candidateCurrent: true },
 			sideEffects: ["development_marketplace_added", "development_plugin_installed"],
 		})
+		expect(appliedOutput.nextAction).toContain("Start one fresh Codex task")
 		const commands = profile.readState().commands
 		expect(commands).toContain(`plugin marketplace add ${profile.marketplaceRoot}`)
 		expect(commands).toContain("plugin add my-second-brain-dev@my-second-brain-dev --json")
@@ -455,6 +459,93 @@ test("Codex apply installs and verifies the exact previewed candidate", () => {
 				.map((command) => `codex ${command}`),
 		).toEqual(appliedOutput.plan)
 		expect(commands.slice(-2)).toEqual([
+			"plugin marketplace list --json",
+			"plugin list --json",
+		])
+	} finally {
+		profile.cleanup()
+		rmSync(repositoryRoot, { recursive: true, force: true })
+	}
+})
+
+test("Codex refresh keeps one development version while binding each payload", () => {
+	const repositoryRoot = isolatedRepository("codex-development-stable-version-")
+	const profile = fakeCodexProfile(repositoryRoot, { marketplaceRoot: null })
+	const skillPath = join(repositoryRoot, "plugin", "skills", "skill-a", "SKILL.md")
+	try {
+		const firstPreview = run(
+			["codex", "install", "--json", "--no-input", "--no-launch"],
+			profile.environment,
+			repositoryRoot,
+		)
+		expect(firstPreview.exitCode, firstPreview.stderr.toString()).toBe(0)
+		const first = jsonOutput(firstPreview)
+		expect(first.candidate.version).toBe(`${pluginVersion}+codex.dev`)
+
+		const firstApply = run(
+			[
+				"codex",
+				"install",
+				"--apply",
+				"--candidate-hash",
+				first.candidate.candidateHash,
+				"--json",
+				"--no-input",
+				"--no-launch",
+			],
+			profile.environment,
+			repositoryRoot,
+		)
+		expect(firstApply.exitCode, firstApply.stderr.toString()).toBe(0)
+
+		writeFileSync(skillPath, `${readFileSync(skillPath, "utf8")}\nStable refresh proof.\n`)
+		const refreshed = run(
+			["codex", "refresh", "--json", "--no-input"],
+			profile.environment,
+			repositoryRoot,
+		)
+		expect(refreshed.exitCode, refreshed.stderr.toString()).toBe(0)
+		const second = jsonOutput(refreshed)
+		expect(second.candidate.version).toBe(first.candidate.version)
+		expect(second.candidate.payloadHash).not.toBe(first.candidate.payloadHash)
+		expect(second.candidate.candidateHash).not.toBe(first.candidate.candidateHash)
+		expect(second).toMatchObject({
+			operation: "refresh",
+			mode: "apply",
+			changed: true,
+			transactionState: "installed",
+			plan: ["codex plugin add my-second-brain-dev@my-second-brain-dev --json"],
+			sideEffects: ["development_plugin_installed"],
+		})
+	} finally {
+		profile.cleanup()
+		rmSync(repositoryRoot, { recursive: true, force: true })
+	}
+})
+
+test("Codex refresh refuses to claim an unowned development installation", () => {
+	const repositoryRoot = isolatedRepository("codex-development-refresh-unowned-")
+	const profile = fakeCodexProfile(repositoryRoot, { marketplaceRoot: null })
+	try {
+		const result = run(
+			["codex", "refresh", "--json", "--no-input"],
+			profile.environment,
+			repositoryRoot,
+		)
+
+		expect(result.exitCode).toBe(1)
+		expect(jsonOutput(result)).toMatchObject({
+			operation: "refresh",
+			mode: "apply",
+			changed: false,
+			transactionState: "blocked",
+			error: {
+				code: "CODEX_DEVELOPMENT_REFRESH_NOT_OWNED",
+				action: "INSPECT_STATE",
+				errorFamily: "conflict",
+			},
+		})
+		expect(profile.readState().commands).toEqual([
 			"plugin marketplace list --json",
 			"plugin list --json",
 		])

@@ -27,12 +27,12 @@ const topLevelHelp = `Develop the complete Plugin Payload through each native ha
 
 Usage:
   bun run dev -- claude <check|install|restore|watch> [options]
-  bun run dev -- codex <check|install> [options]
+  bun run dev -- codex <check|install|refresh> [options]
   bun run dev -- --help
 
 Commands:
   claude              Manage one persistent live-linked Claude Development Installation
-  codex               Inspect, preview, and apply one staged Codex Development Installation
+  codex               Inspect, install, or refresh one staged Codex Development Installation
 
 Run \`bun run dev -- claude --help\` for the Claude lifecycle and safety contract.
 `
@@ -75,6 +75,12 @@ const codexHelp = `Manage one staged Codex Development Installation.
 Usage:
   bun run dev -- codex check [--json] [--no-input]
   bun run dev -- codex install [--apply --candidate-hash <sha256>] [--no-launch] [--json] [--no-input]
+  bun run dev -- codex refresh [--json] [--no-input]
+
+Actions:
+	check                Build, stage, and inspect without changing Codex profile state
+	install              Preview a checkout ownership change; --apply executes the exact candidate
+	refresh              Rebuild and replace bytes for the already-owned checkout without another approval
 
 Options:
 	--apply              Authorize the exact previewed candidate mutation
@@ -87,7 +93,8 @@ Options:
 Safety:
   Check and install preview may rebuild repository output and stage the candidate,
   but never change Codex profile state. Native mutation requires --apply plus the
-  exact candidate hash. Apply re-inspects the resulting native identity.
+  exact candidate hash. Refresh mutates only when this exact checkout already owns
+  the enabled stable Development Installation. Every mutation re-inspects identity.
 `
 
 interface ClaudeInvocation {
@@ -100,7 +107,7 @@ interface ClaudeInvocation {
 
 interface CodexInvocation {
 	harness: "codex"
-	operation: "check" | "install"
+	operation: "check" | "install" | "refresh"
 	apply: boolean
 	expectedCandidateHash?: string
 	launch: boolean
@@ -145,9 +152,9 @@ function parseClaude(arguments_: string[]): ClaudeInvocation {
 }
 
 function parseCodex(arguments_: string[]): CodexInvocation {
-	const operation = arguments_[0] as "check" | "install" | undefined
-	if (!operation || !["check", "install"].includes(operation)) {
-		throw new UsageError("codex requires check or install")
+	const operation = arguments_[0] as "check" | "install" | "refresh" | undefined
+	if (!operation || !["check", "install", "refresh"].includes(operation)) {
+		throw new UsageError("codex requires check, install, or refresh")
 	}
 	let apply = false
 	let expectedCandidateHash: string | undefined
@@ -189,6 +196,9 @@ function parseCodex(arguments_: string[]): CodexInvocation {
 	if (operation === "check" && (apply || expectedCandidateHash || noLaunch)) {
 		throw new UsageError("Codex check supports only --json and --no-input")
 	}
+	if (operation === "refresh" && (apply || expectedCandidateHash || noLaunch)) {
+		throw new UsageError("Codex refresh supports only --json and --no-input")
+	}
 	if (operation === "install" && apply !== Boolean(expectedCandidateHash)) {
 		throw new UsageError("Codex install --apply requires --candidate-hash, and the hash requires --apply")
 	}
@@ -199,7 +209,7 @@ function parseCodex(arguments_: string[]): CodexInvocation {
 	return {
 		harness: "codex",
 		operation,
-		apply,
+		apply: operation === "refresh" ? true : apply,
 		expectedCandidateHash,
 		launch,
 		json,

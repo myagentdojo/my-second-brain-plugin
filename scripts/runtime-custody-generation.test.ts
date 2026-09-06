@@ -79,15 +79,18 @@ test("runtime custody sources generate one thin launcher and checked shell proje
 				runtimeProfile: "bun",
 				workspace: "packages/agent-browser",
 				launcher: "warm-browser",
+				compiledTarget: "darwin-arm64",
 			},
 			"frontier-runner": {
 				entry: "runtime/frontier-runner.js",
 				runtimeProfile: "bun",
 				workspace: "packages/frontier-runner",
+				compiledTarget: "darwin-arm64",
 			},
 			"hello-world": {
 				entry: "runtime/hello-world.js",
 				runtimeProfile: "bun",
+				compiledTarget: "darwin-arm64",
 			},
 			"skill-a": {
 				entry: "runtime/skill-a.js",
@@ -99,6 +102,7 @@ test("runtime custody sources generate one thin launcher and checked shell proje
 				entry: "runtime/skill-b.js",
 				runtimeProfile: "bun",
 				workspace: "packages/skill-b",
+				compiledTarget: "darwin-arm64",
 			},
 		},
 	})

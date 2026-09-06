@@ -2,10 +2,13 @@
 
 ## Status
 
-Accepted by Nathan on 6 September 2026, including the focused Test Design.
+Accepted by Nathan on 6 September 2026, including the focused Test Design and
+the stable Codex development identity amendment.
 Use one plugin executable per target for the declared compiled skill set.
 This scoped amendment preserves the remaining contracts of ADRs 0005, 0006
-and 0007. Native usability confirmation remains unproved.
+and 0007. Nathan confirmed the native Codex development loop usable on
+6 September 2026, then approved widening every runtime-backed skill to the
+qualified `darwin-arm64` executable.
 
 ## Context and problem
 
@@ -18,9 +21,11 @@ dependencies and records bundle identities.
 The product direction now requires the runtime inside the Plugin Payload and
 observable edit/build/refresh/use cycles. Downloaded-runtime construction no
 longer satisfies that direction, even though users already avoid manual setup.
-The first selected caller is the existing `skill-a`, whose ESM and CommonJS
-dependency result can be exercised offline. Other skills remain separate proof
-obligations, not implied coverage.
+The first selected caller was the existing `skill-a`, whose ESM and CommonJS
+dependency result can be exercised offline. Its native development loop is now
+proved. The current migration includes Agent Browser, Frontier Runner, Hello
+World, Skill A and Skill B on `darwin-arm64`; each retains its own process
+Interface behind one selected-entry executable.
 
 ## Decision drivers
 
@@ -67,21 +72,36 @@ dispatch. Compilation does not move product code into the Kit.
 7. Keep compilation in the existing build owner. Retain dependency admission,
    notices and generated drift checks. Publish inventory only for successfully
    produced bytes. A failed build cannot qualify yesterday's executable.
-8. Reuse `bun run dev -- codex install` preview and candidate-bound apply.
-   Include compiled bytes in staged payload/version identity. Keep production
-   and development identities separate and report the actual fresh-task reload
-   boundary. No new watcher, daemon, Marketplace protocol or manual version bump.
+8. Use one stable `<plugin-version>+codex.dev` version and cache path for Codex
+   development. Keep the candidate hash as the exact staged payload identity.
+   The first install or checkout ownership change uses preview and
+   candidate-bound apply. After that approval, `codex refresh` may replace the
+   cached bytes without another approval only while the exact enabled
+   Development Installation remains owned by the same checkout. A missing,
+   disabled, conflicting, migrated or differently owned identity refuses and
+   returns to the install preview. Register the development Marketplace once;
+   rebuild and stage its payload on each refresh. Keep production immutable and
+   separately identified. Start one fresh Codex task after that one-time
+   identity transition so its selector binds the stable path. Do not require a
+   fresh task after each later refresh. Add no watcher, daemon, lease,
+   Marketplace protocol or manual version bump.
 
-### First-slice migration
+### Migration state
 
-Declare only `skill-a` compiled on the first target. Other runtime skills keep
-their accepted JavaScript/custody route. This is a migration state, not the final
-product: it proves the selected path only. Unqualified targets refuse the
-compiled skill instead of silently taking its old runtime path.
+The first slice declared only `skill-a` compiled on `darwin-arm64`. After its
+native development loop passed and Nathan confirmed usability, Nathan approved
+the second slice: declare every runtime-backed skill compiled on that same
+target. Unqualified targets refuse compiled skills instead of silently taking
+the old downloaded-runtime path.
 
-The implementation changes the selected caller, build/inventory projections,
-runtime execution and their focused proofs. It does not delete unrelated
-custody behaviour, change release pins, finish Issue #62 or claim whole-plugin
+Agent Browser keeps Private Delivery inside its existing Module. Its source
+bundle re-enters through the Bun interpreter; its compiled process re-enters
+the same plugin executable with the private Agent Browser selector. The public
+Command Vocabulary does not gain a child command.
+
+The implementation changes catalog declarations, build and inventory
+projections, runtime execution and focused proofs. It does not delete unrelated
+custody behaviour, change release pins, finish Issue #62 or claim cross-platform
 portability. Keep existing package work and accepted predecessor evidence.
 
 This record amends ADRs 0005, 0006 and 0007 for declared compiled
@@ -137,19 +157,57 @@ cross-platform execution, browser/worker child isolation, Claude behaviour or
 production release qualification. Existing full repository checks remain local
 completion obligations; this brief does not replace them.
 
+### Full-plugin `darwin-arm64` Test Design
+
+**Behaviour:** Every runtime-backed skill in the catalog runs through one
+compiled plugin executable. Agent Browser keeps its source and compiled private
+re-entry shapes distinct and can run a synthetic sanitizer child through the
+compiled dispatcher.
+
+**Seam and proof layer:** Real catalog, generator, build, extracted Plugin
+Payload, generated launchers and public processes. A private pure check supports
+the Agent Browser re-entry shape; the compiled sanitizer process is the primary
+child-dispatch evidence.
+
+**Independent result:** Literal skill identities, help and JSON output, stdout,
+stderr and exit status, plus a test-owned synthetic credential-wrapper reply.
+
+**How it goes RED:** Omit one compiled catalog declaration, remove the shared
+executable, or restore interpreter-style arguments for a compiled Private
+Delivery child. The focused proof must fail, then pass after restoration.
+
+**Focused command:** `bun test ./scripts/compiled-plugin.test.ts` through Agent
+Runner. Require four tests, zero skips and zero failures.
+
+**Still unproved:** Real browser login, live Claude and Codex discovery for all
+skills, non-macOS targets, signing, production release automation, install,
+update and rollback remain separate gates.
+
 ### Native acceptance
 
-After local proof, separately preview and approve the exact Development
-Installation effect. Run two real edit/build/refresh/invoke cycles in Codex,
-verify the loaded development identity and both changed results, and record
-elapsed time plus Nathan's required actions. Nathan confirms usability before
-widening. Preserve the established qualification distinction between mechanics
-and fresh-native evidence. The selected skill needs no hook trust change.
+After local proof, separately preview and approve the first Development
+Installation effect. Start one fresh task to bind the stable development path.
+In that task, run two real edit/build/refresh/invoke cycles without another
+approval or task restart. Verify the stable development version and path plus
+both changed results, and record elapsed time plus Nathan's required actions.
+Nathan confirms usability before widening. Preserve the distinction between
+local mechanics and native evidence. The selected skill needs no hook trust
+change.
+
+Observed on `darwin-arm64`: the one-time transition from a hash-version identity
+required one Codex Desktop restart to bind the stable path. Two later real
+source edits each compiled, refreshed, and ran through that same path without
+another approval or task restart. Refreshes took 0.81 and 1.13 seconds. Both
+compiled invocations exited zero with empty stderr and no external Bun visible.
+Nathan approved widening. The private receipt SHA-256 is
+`7bdd351669d33d0f7cbbd34d6ffc93c2552660098bedfce2c2e9676a841af0bb`.
 
 ## Consequences and revisit triggers
 
 - Positive: the selected installed path is self-contained; the existing skill
   Interface and development command remain familiar.
+- Positive: one checkout approval covers repeated local refreshes without
+  weakening checkout ownership or production identity checks.
 - Negative: every target artifact includes Bun, increasing installation bytes;
   recompilation may cost more than JavaScript bundling. Measure both cycles.
 - Neutral: compilation is not a sandbox, encryption, publisher authentication

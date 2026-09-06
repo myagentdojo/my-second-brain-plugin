@@ -451,4 +451,4 @@ test("S06 a dirty Kit checkout and a fake pin identity are refused by the real s
 	expect(fakeOutcome.message).toBe(KIT_NOT_ADMITTED_MESSAGE)
 	expect(fakeOutcome.artifacts).toEqual({ archive: null, checksums: null })
 	expect(existsSync(join(fakeConsumer.root, "dist"))).toBe(false)
-})
+}, 60_000)

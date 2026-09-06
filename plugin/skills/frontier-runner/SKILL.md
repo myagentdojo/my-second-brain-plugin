@@ -6,6 +6,10 @@ disable-model-invocation: true
 
 # Frontier Runner
 
+On `darwin-arm64`, the installed `bin/frontier-runner` launcher selects Frontier
+Runner from the plugin's compiled executable. Report any structured rebuild or
+reinstall refusal; runtime download cannot repair a compiled payload.
+
 Read [CONTEXT.md](CONTEXT.md), then resolve this skill directory from the
 installed `SKILL.md` path.
 

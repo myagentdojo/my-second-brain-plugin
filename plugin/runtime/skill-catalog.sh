@@ -5,17 +5,17 @@ runtime_catalog_select_skill() {
 	agent-browser)
 		RUNTIME_SKILL_ENTRY='runtime/warm-browser.js'
 		RUNTIME_SKILL_PROFILE='bun'
-		RUNTIME_SKILL_COMPILED_TARGET=''
+		RUNTIME_SKILL_COMPILED_TARGET='darwin-arm64'
 		;;
 	frontier-runner)
 		RUNTIME_SKILL_ENTRY='runtime/frontier-runner.js'
 		RUNTIME_SKILL_PROFILE='bun'
-		RUNTIME_SKILL_COMPILED_TARGET=''
+		RUNTIME_SKILL_COMPILED_TARGET='darwin-arm64'
 		;;
 	hello-world)
 		RUNTIME_SKILL_ENTRY='runtime/hello-world.js'
 		RUNTIME_SKILL_PROFILE='bun'
-		RUNTIME_SKILL_COMPILED_TARGET=''
+		RUNTIME_SKILL_COMPILED_TARGET='darwin-arm64'
 		;;
 	skill-a)
 		RUNTIME_SKILL_ENTRY='runtime/skill-a.js'
@@ -25,7 +25,7 @@ runtime_catalog_select_skill() {
 	skill-b)
 		RUNTIME_SKILL_ENTRY='runtime/skill-b.js'
 		RUNTIME_SKILL_PROFILE='bun'
-		RUNTIME_SKILL_COMPILED_TARGET=''
+		RUNTIME_SKILL_COMPILED_TARGET='darwin-arm64'
 		;;
 	*) return 1 ;;
 	esac

@@ -5,6 +5,10 @@ description: "Operate the My Second Brain dedicated browser when an agent needs 
 
 # Agent Browser
 
+On `darwin-arm64`, the installed `bin/warm-browser` launcher selects Agent
+Browser from the plugin's compiled executable. Report any structured rebuild or
+reinstall refusal; runtime download cannot repair a compiled payload.
+
 Read [`CONTEXT.md`](CONTEXT.md) before using this skill.
 
 Use Agent Browser for browser work that needs the dedicated Agent Chrome

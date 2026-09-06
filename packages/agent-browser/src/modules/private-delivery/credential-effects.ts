@@ -8,6 +8,7 @@ import {
 	privateDeliveryDetailSanitizerArgument,
 	privateDeliveryListSanitizerArgument,
 } from "./contract"
+import { currentCompiledSkill, privateEntryCommand } from "./private-entry"
 
 /**
  * Every raw credential-wrapper effect Private Delivery performs: one
@@ -171,13 +172,12 @@ async function runCredentialSanitizer(
 ): Promise<VaultCommandReading> {
 	const result = await runBoundedProcess({
 		command: process.execPath,
-		argumentList: [
-			"--config=/dev/null",
-			"--no-install",
-			"--env-file=/dev/null",
+		argumentList: privateEntryCommand({
+			executable: process.execPath,
 			entry,
-			...argumentList,
-		],
+			compiledSkill: currentCompiledSkill(),
+			argumentList,
+		}).slice(1),
 		environment: sanitizerEnvironment(),
 		timeoutMs: credentialDetailSanitizerTimeoutMs,
 		processGroupOwnership: "child",

@@ -68,7 +68,7 @@ write its own credential policy could be steered into configuring itself.
 The one credential wrapper this Module invokes is
 `$HOME/code/dotfiles/bin/with-one-password-token`, proved to be a regular,
 non-symlink, executable file owned by the current user before any invocation.
-It and the shipped Bun entry have no group or world write bits, and every
+It and the shipped execution entry have no group or world write bits, and every
 component in their named and resolved parent chains is root- or current-user
 owned and cannot be replaced by another user. These checks happen before any
 vault access and fail closed when filesystem metadata cannot prove them.
@@ -78,10 +78,12 @@ reference itself, hands the secret to the child on its standard input, and
 scrubs the child environment down to HOME, PATH, LANG, LC_ALL, and TMPDIR. No
 secret is ever an argument, an environment value, or a variable in this Module.
 
-Three private re-entry modes use the shipped entry: the list sanitizer, the
-detail sanitizer, and the disposable delivery child. Their selector arguments
-never reach the public parser, so one bundle still ships and `help` never names
-them. The delivery child reads the value once from its standard input, revalidates
+Three private re-entry modes use the shipped execution entry: the list
+sanitizer, the detail sanitizer, and the disposable delivery child. A source
+bundle re-enters through the Bun interpreter and the same bundle. A compiled
+payload re-enters the plugin executable through its private Agent Browser
+selector. Their child selectors never reach the public parser, so `help` never
+names them. The delivery child reads the value once from its standard input, revalidates
 the frame, the document load, the url, and the exact origin immediately before
 the fill, re-derives the field kind from the live page, proves the field empty
 and then focused, inserts the value, and reports one closed JSON outcome line

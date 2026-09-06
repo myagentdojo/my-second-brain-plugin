@@ -117,21 +117,25 @@ Claude development completes when an ordinary reloaded session discovers and run
 #### Codex
 
 ```sh
+bun run dev -- codex install --json --no-input --no-launch
+bun run dev -- codex install --apply --candidate-hash <sha256> --json --no-input --no-launch
 bun run dev:codex
 ```
 
-Codex plugins use a staged development source rather than the canonical payload directly. `bun run dev:codex` builds `plugin/`, copies it into ignored `.dev` staging, derives deterministic build metadata from the staged payload, inspects the native Marketplace and Plugin Installation, and previews the exact reinstall without changing the Codex profile. The preview returns its candidate hash and the bound `--apply --candidate-hash <sha256>` command.
+Codex plugins use a staged development source rather than the canonical payload directly. Enter development mode once with `codex install`: it builds `plugin/`, copies it into ignored `.dev` staging, derives a candidate hash from the exact payload, inspects the native Marketplace and Plugin Installation, and previews the checkout ownership change. The preview returns the bound `--apply --candidate-hash <sha256>` command.
 
-Review that preview before running its exact apply command. Apply creates or validates the local development Marketplace, reinstalls the plugin, removes only the superseded same-name development selector when present, then re-inspects the enabled identity, version, source path, and Marketplace owner. `--no-input` implies `--no-launch`; `--no-launch` is the equivalent explicit human-facing choice. A fresh task is the reload boundary.
+Review that first preview before running its exact apply command. Apply registers the local development Marketplace, installs the stable `<plugin-version>+codex.dev` identity, removes only the superseded same-name development selector when present, then re-inspects its enabled identity, source path, and Marketplace owner. `--no-input` implies `--no-launch`; `--no-launch` is the equivalent explicit human-facing choice. Start one fresh Codex task after this one-time identity change so its selector binds the stable path.
+
+After that approval, `bun run dev:codex` rebuilds, stages, and replaces the bytes at the same development version and cache path. It does not ask for another approval while the exact enabled installation remains owned by this checkout. It refuses before mutation when the installation is absent, disabled, conflicting, migrated, or owned by another checkout. The Marketplace registration persists; only its staged payload and cache bytes refresh.
 
 Production and development remain enabled together under distinct Codex identities:
 
 - Production displays as `<Display Name>` and exposes `$<plugin-name>:<skill>`.
 - Development displays as `<Display Name> Dev` and exposes `$<plugin-name>-dev:<skill>`.
 
-The Development Installation stays distinct from the production identity and preserves the production installation. A changed candidate hash invalidates the earlier approval and requires a new preview.
+The Development Installation stays distinct from the production identity and preserves the production installation. Candidate hashes still identify each staged payload for evidence, but same-checkout refresh does not turn each edit into a new ownership approval.
 
-Codex development completes when a fresh task discovers both identities without collisions and runs the changed development skill from the staged cache. Production-skill proof must resolve to the production cache separately.
+Codex development completes when the one fresh task discovers both identities without collisions and then runs two changed development payloads from the stable cache path without another task restart. Production-skill proof must resolve to the production cache separately.
 
 Use the native development commands. A skills-only symlink or harness-global copy bypasses the manifests, launchers, runtime custody, cache identity, and installation boundary under test.
 
@@ -157,6 +161,7 @@ plugin/
 ├── skills/<id>/SKILL.md
 ├── skill-inventory.json
 ├── bin/{frontier-runner,hello-world,skill-a,skill-b,warm-browser}
+├── bin/darwin-arm64/my-second-brain
 ├── THIRD-PARTY-NOTICES.md
 └── runtime/
     ├── runtime-exec
@@ -178,10 +183,10 @@ skill id + arguments + invocation identity
 | Area | Shared | Claude Code | Codex |
 | --- | --- | --- | --- |
 | Skills | Portable Agent Skills content | `/PLUGIN:SKILL` invocation and Claude extensions | `$SKILL` invocation and Codex extensions |
-| Runtime | Closed bundles, generated launchers, and one Bun custody engine | Executes the shared launcher | Executes the shared launcher |
+| Runtime | One selected-entry compiled executable on admitted targets, generated launchers, closed migration bundles, and one custody engine | Executes the shared launcher | Executes the shared launcher |
 | Manifest | Plugin identity only | Claude-native manifest | Codex-native manifest |
 | Lifecycle hooks | One shared fail-open mechanics handler | Native `SessionStart`/`Stop` declaration; plugin enablement controls activation | Native `SessionStart`/`Stop` declaration; exact hook definition requires user trust |
-| Development refresh | Source and payload | Persistent live link plus `/reload-plugins` | Staged reinstall plus a fresh task |
+| Development refresh | Source and payload | Persistent live link plus `/reload-plugins` | Stable staged cache plus same-checkout refresh |
 | Harness-only features | Nothing by default | Keep Claude-only components native | Keep Codex-only components native |
 
 Use [`CONTEXT.md`](CONTEXT.md) for canonical language. The architecture rationale lives in the ADRs for [one payload with native adapters](docs/adr/0001-one-payload-native-harness-adapters.md), [shared runtime custody](docs/adr/0005-shared-runtime-custody.md), [one Bun runtime](docs/adr/0006-single-bun-runtime-tier.md), and [closed workspace bundles](docs/adr/0007-workspace-authoring-bundled-distribution.md).
@@ -201,11 +206,12 @@ Use [`CONTEXT.md`](CONTEXT.md) for canonical language. The architecture rational
 ## Current boundaries
 
 - macOS arm64/x64 and Linux arm64/x64 only.
+- The current compiled migration admits all runtime-backed skills only on `darwin-arm64`. Do not publish it as a production replacement until every retained supported target has a matching executed artifact or is deliberately removed from the support contract.
 - The locked x64 baseline assets support AVX-capable CPUs for this Bun 1.4.0 candidate. Older no-AVX x64 hosts are outside the support boundary; custody executes `bun --version` before publication and refuses an unusable binary. Development uses TypeScript 7.0.2 with the Bun type declarations pinned at 1.4.0.
 - Bun is pinned by version and per-target archive/executable digests; users do not install or pin it themselves.
 - Publisher-reviewed bundles and dependencies execute with the user's normal Bun and OS capabilities. This is not a sandbox or an untrusted-plugin runtime.
 - The build rejects native addons, statically visible computed loaders and direct `eval`/`Function` use, undeclared assets, and runtime package installation. These are deterministic bundle-hygiene checks, not adversarial capability confinement; publisher review owns indirect or obfuscated code, and architecture-layer isolation owns untrusted code ([ADR 0006](docs/adr/0006-single-bun-runtime-tier.md)).
-- Claude loads one persistent user-scoped Development Installation from the live Plugin Payload. Source edits need a successful build and `/reload-plugins` in each open session. Codex needs a staged reinstall and fresh task.
+- Claude loads one persistent user-scoped Development Installation from the live Plugin Payload. Source edits need a successful build and `/reload-plugins` in each open session. Codex uses one approved checkout-owned development identity and refreshes the stable staged cache after each successful build.
 - The capability-tour `SessionStart`/`Stop` sidecar is a fail-open lifecycle mechanics proof, not a production integrity or security guarantee. Runtime setup hooks, prewarm, doctor, inventory, and prune commands remain absent.
 - Managed, workspace-installed, or non-removable plugins require administrator replacement or rollback.
 - Vendor plugin specifications change. Recheck the official documentation linked from the [installation guide](docs/installing.md) and [maintainer index](docs/releasing.md) when manifests, discovery, installation, or reload behavior changes.

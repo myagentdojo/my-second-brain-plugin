@@ -33,7 +33,7 @@ The harness-specific part of a Plugin Payload that expresses discovery, trust, a
 _Avoid_: Host adapter, shared hook configuration
 
 **Portable Runtime**:
-Consumer-executable plugin behavior that does not depend on the contributor toolchain.
+Consumer-executable plugin behavior that does not depend on the contributor toolchain. A declared compiled target carries one Bun-built plugin executable whose selected skill dispatch preserves each skill's process Interface.
 _Avoid_: Bun runtime, generated script
 
 **Development Installation**:

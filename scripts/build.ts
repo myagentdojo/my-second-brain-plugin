@@ -1490,7 +1490,7 @@ function compileAdmittedSkills(
 	// Remove only the private dispatch argument. Skills retain ordinary argv shape.
 	writeFileSync(
 		join(directory, "dispatch.js"),
-		`const skill = process.argv.splice(2, 1)[0];\nswitch (skill) {\n${cases.join("\n")}\ndefault: console.error("Unknown compiled skill"); process.exit(23);\n}\n`,
+		`const skill = process.argv.splice(2, 1)[0];\nprocess.env.AGENT_PLUGIN_COMPILED_SKILL = skill;\nswitch (skill) {\n${cases.join("\n")}\ndefault: console.error("Unknown compiled skill"); process.exit(23);\n}\n`,
 	)
 	const executable = join(directory, "plugin-executable")
 	const result = Bun.spawnSync({

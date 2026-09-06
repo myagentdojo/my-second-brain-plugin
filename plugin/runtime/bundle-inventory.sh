@@ -3,19 +3,19 @@
 runtime_inventory_select_compiled() {
 	RUNTIME_COMPILED_PATH='bin/darwin-arm64/my-second-brain'
 	RUNTIME_COMPILED_TARGET='darwin-arm64'
-	RUNTIME_COMPILED_BYTES='63910514'
-	RUNTIME_COMPILED_SHA256='6da1e0bb3d57611503025a6ee4bb8a9cc556b858d4cc06ccbd00dc18ce9d28f0'
+	RUNTIME_COMPILED_BYTES='64174706'
+	RUNTIME_COMPILED_SHA256='fd4e8e80734413a0b3e48294a9edada84c3b4e0dabeb6dd16e241a35eed1494c'
 	case "$1" in
-	'skill-a') return 0 ;;
+	'agent-browser' | 'frontier-runner' | 'hello-world' | 'skill-a' | 'skill-b') return 0 ;;
 	*) return 1 ;;
 	esac
 }
 runtime_inventory_select_bundle() {
 	case "$1" in
 	'agent-browser')
-		RUNTIME_BUNDLE_PATH='runtime/warm-browser-b7439fade40f7851.js'
-		RUNTIME_BUNDLE_BYTES='140848'
-		RUNTIME_BUNDLE_SHA256='b7439fade40f7851a0785a972e0c35b0a70212474ee7197361807770211cc014'
+		RUNTIME_BUNDLE_PATH='runtime/warm-browser-bf336f2c1e90afb6.js'
+		RUNTIME_BUNDLE_BYTES='141850'
+		RUNTIME_BUNDLE_SHA256='bf336f2c1e90afb634524b64457b2144c9b0ba1013a638f3bf317bb3502716c7'
 		;;
 	'frontier-runner')
 		RUNTIME_BUNDLE_PATH='runtime/frontier-runner-659b5dedecb84722.js'
