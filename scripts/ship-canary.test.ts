@@ -28,6 +28,7 @@ import {
 	runCanary,
 	validateLineageManifestVersion,
 	type CandidateInstallEvidence,
+	type CandidatePackageSource,
 	type ClassifyOptions,
 	type PublishOptions,
 	type QualificationDependencies,
@@ -1159,7 +1160,11 @@ function targets(sourceSha: string): Target[] {
 	]
 }
 
-function installEvidence(target: Target, candidateSha: string): CandidateInstallEvidence {
+function installEvidence(
+	target: Target,
+	candidateSha: string,
+	lineageSourceSha = candidateSha,
+): CandidateInstallEvidence {
 	return {
 		repository: target.repository,
 		candidateRef: target.candidateRef,
@@ -1176,7 +1181,7 @@ function installEvidence(target: Target, candidateSha: string): CandidateInstall
 			cachedPayloadMatches: true,
 		},
 		lineage: {
-			sourceCommit: candidateSha,
+			sourceCommit: lineageSourceSha,
 			archiveSha256: "a".repeat(64),
 			packagedPayloadHash: "b".repeat(64),
 			installedPayloadHash: "b".repeat(64),
@@ -1187,6 +1192,7 @@ function installEvidence(target: Target, candidateSha: string): CandidateInstall
 test("public and private candidates pass hosted proof then native cache comparison", async () => {
 	const sourceSha = "1".repeat(40)
 	const calls: string[] = []
+	const packageSources: CandidatePackageSource[] = []
 	const result = await qualifyTargets(targets(sourceSha), sourceSha, testQualificationDependencies({
 		publish: (target) => {
 			calls.push(`publish:${target.visibility}`)
@@ -1203,9 +1209,10 @@ test("public and private candidates pass hosted proof then native cache comparis
 				authority: target.visibility === "PUBLIC" ? "candidate-sanitized-workflow" : "protected-trusted-workflow",
 			}
 		},
-		install: (target, candidateSha) => {
+		install: (target, candidateSha, packageSource) => {
 			calls.push(`install:${target.visibility}`)
-			return installEvidence(target, candidateSha)
+			packageSources.push(packageSource)
+			return installEvidence(target, candidateSha, sourceSha)
 		},
 	}))
 
@@ -1219,7 +1226,7 @@ test("public and private candidates pass hosted proof then native cache comparis
 				repository: "myagentdojo/public-canary",
 				checkoutSha: "2".repeat(40),
 				lineage: {
-					sourceCommit: "2".repeat(40),
+					sourceCommit: sourceSha,
 					archiveSha256: "a".repeat(64),
 					packagedPayloadHash: "b".repeat(64),
 					installedPayloadHash: "b".repeat(64),
@@ -1237,6 +1244,10 @@ test("public and private candidates pass hosted proof then native cache comparis
 			},
 		],
 	})
+	expect(packageSources).toEqual([
+		{ root: "/tmp/private-canary", commit: sourceSha },
+		{ root: "/tmp/private-canary", commit: sourceSha },
+	])
 	expect(calls).toEqual([
 		"publish:PUBLIC",
 		"publish:PRIVATE",
@@ -1268,7 +1279,7 @@ test("qualification binds candidate lineage and rejects unbound install evidence
 			publish: () => {},
 			hostedProof,
 			install: (target, candidateSha) => {
-				const evidence = installEvidence(target, candidateSha)
+				const evidence = installEvidence(target, candidateSha, sourceSha)
 				return {
 					...evidence,
 					lineage: { ...evidence.lineage, installedPayloadHash: "c".repeat(64) },
@@ -1285,7 +1296,7 @@ test("qualification binds candidate lineage and rejects unbound install evidence
 			publish: () => {},
 			hostedProof,
 			install: (target, candidateSha) => {
-				const evidence = installEvidence(target, candidateSha)
+				const evidence = installEvidence(target, candidateSha, sourceSha)
 				return {
 					...evidence,
 					lineage: { ...evidence.lineage, archiveSha256: "not-a-digest" },
